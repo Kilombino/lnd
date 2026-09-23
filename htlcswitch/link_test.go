@@ -5844,6 +5844,10 @@ func TestChannelLinkFail(t *testing.T) {
 		// consider the failure permanent in response to the actions
 		// performed during the linkTest.
 		permanentFailure bool
+
+		// assertFailure performs case-specific checks on a
+		// received link failure.
+		assertFailure func(*testing.T, LinkFailureError)
 	}{
 		{
 			"don't fail the channel if we receive a warning " +
@@ -5861,6 +5865,7 @@ func TestChannelLinkFail(t *testing.T) {
 			false,
 			false,
 			false,
+			nil,
 		},
 		{
 			"don't force close if syncing states fails at startup",
@@ -5879,6 +5884,7 @@ func TestChannelLinkFail(t *testing.T) {
 			true,
 			false,
 			false,
+			nil,
 		},
 		{
 			"we don't force closes the channel if resolving " +
@@ -5899,6 +5905,7 @@ func TestChannelLinkFail(t *testing.T) {
 			true,
 			false,
 			false,
+			nil,
 		},
 		{
 			"don't force close the channel if we receive an " +
@@ -5919,6 +5926,7 @@ func TestChannelLinkFail(t *testing.T) {
 			true,
 			false,
 			false,
+			nil,
 		},
 		{
 			"force close the channel if we receive an invalid " +
@@ -5967,6 +5975,7 @@ func TestChannelLinkFail(t *testing.T) {
 			true,
 			true,
 			false,
+			nil,
 		},
 		{
 			"force close the channel if we receive an invalid " +
@@ -6023,6 +6032,54 @@ func TestChannelLinkFail(t *testing.T) {
 			true,
 			true,
 			false,
+			nil,
+		},
+		{
+			"fail the channel if a revocation is invalid for the " +
+				"current state",
+			func(c *channelLink) {
+				// Configure the channel so the
+				// revocation is invalid for its current state.
+				c.channel.State().RemoteNextRevocation = nil
+			},
+			func(t *testing.T, _ *Switch, c *channelLink,
+				remoteChannel *lnwallet.LightningChannel) {
+
+				// Construct a well-formed revocation
+				// message that the current channel state must
+				// reject.
+				producer := remoteChannel.State().
+					RevocationProducer
+				secret, err := producer.AtIndex(0)
+				require.NoError(t, err)
+				nextSecret, err := producer.AtIndex(2)
+				require.NoError(t, err)
+
+				revoke := &lnwire.RevokeAndAck{
+					ChanID: c.ChanID(),
+					NextRevocationKey: input.
+						ComputeCommitmentPoint(
+							nextSecret[:],
+						),
+				}
+				copy(revoke.Revocation[:], secret[:])
+
+				c.HandleChannelUpdate(revoke)
+			},
+			true,
+			false,
+			false,
+			func(t *testing.T, linkErr LinkFailureError) {
+				t.Helper()
+
+				require.Equal(
+					t, LinkFailureDisconnect,
+					linkErr.FailureAction,
+				)
+				require.Equal(
+					t, ErrInvalidRevocation, linkErr.code,
+				)
+			},
 		},
 		{
 			"consider the failure permanent if we receive a link " +
@@ -6040,6 +6097,7 @@ func TestChannelLinkFail(t *testing.T) {
 			// TODO(halseth) For compatibility with CL we currently
 			// don't treat Errors as permanent errors.
 			false,
+			nil,
 		},
 	}
 
@@ -6114,6 +6172,10 @@ func TestChannelLinkFail(t *testing.T) {
 				t, test.permanentFailure,
 				linkErr.PermanentFailure, test.name,
 			)
+
+			if test.assertFailure != nil {
+				test.assertFailure(t, linkErr)
+			}
 		})
 	}
 }
