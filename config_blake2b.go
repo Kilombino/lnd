@@ -11,6 +11,10 @@ import (
 	"github.com/lightningnetwork/lnd/zpay32"
 )
 
+// blake2bDefaultTargetShift is Knots' Consensus::Params Blake2bTargetShift
+// default, which every network but mainnet (22) uses.
+const blake2bDefaultTargetShift = 20
+
 // applyBlake2bChainConfig applies the Bitcoin BLAKE2b chain-identity options
 // to the active network parameters once the network has been selected, and
 // registers the invoice prefix for it. It returns an error for combinations
@@ -37,6 +41,16 @@ func applyBlake2bChainConfig(cfg *Config) error {
 				"at 961640")
 		}
 		params.Blake2bActivationHeight = cfg.Bitcoin.Blake2bActivationHeight
+
+		// The light client validates BLAKE2b proof of work itself from the
+		// btcd parameters, so they must carry this run's height too. A copy,
+		// so the package-level parameters stay as shipped.
+		p := *params.Params
+		p.Blake2bHeight = int32(cfg.Bitcoin.Blake2bActivationHeight)
+		if p.Blake2bTargetShift == 0 {
+			p.Blake2bTargetShift = blake2bDefaultTargetShift
+		}
+		params.Params = &p
 	}
 
 	if cfg.Bitcoin.ChainHashOverride != "" {

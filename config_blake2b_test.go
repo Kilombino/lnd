@@ -133,9 +133,9 @@ func TestApplyBlake2bChainConfig(t *testing.T) {
 	})
 }
 
-// TestBackendChoicesRefused pins that the btcd and neutrino backends are
-// rejected at configuration time with a message naming the reason, and that
-// bitcoind on mainnet gets past that check.
+// TestBackendChoicesRefused pins that the btcd backend is rejected at
+// configuration time with a message naming the reason, and that bitcoind and
+// neutrino on mainnet get past that check.
 func TestBackendChoicesRefused(t *testing.T) {
 	validate := func(t *testing.T, node string) error {
 		t.Helper()
@@ -151,17 +151,18 @@ func TestBackendChoicesRefused(t *testing.T) {
 		return err
 	}
 
-	for _, node := range []string{btcdBackendName, neutrinoBackendName} {
-		err := validate(t, node)
-		require.Error(t, err, node)
-		require.Contains(t, err.Error(), "not supported", node)
-		require.Contains(t, err.Error(), "BLAKE2b", node)
-	}
+	err := validate(t, btcdBackendName)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not supported")
+	require.Contains(t, err.Error(), "BLAKE2b")
 
-	// bitcoind is accepted by the backend switch; whatever fails later
-	// (RPC credentials are not configured here) must not be that message.
-	if err := validate(t, bitcoindBackendName); err != nil {
-		require.NotContains(t, err.Error(), "not supported")
+	// bitcoind and neutrino are accepted by the backend switch; whatever
+	// fails later (RPC credentials or peers are not configured here) must
+	// not be that message.
+	for _, node := range []string{bitcoindBackendName, neutrinoBackendName} {
+		if err := validate(t, node); err != nil {
+			require.NotContains(t, err.Error(), "not supported", node)
+		}
 	}
 }
 
@@ -260,5 +261,36 @@ func TestPeerNetworksOptionsThatContradict(t *testing.T) {
 		require.Error(t, err, "opposite requests were accepted, and "+
 			"one of them was silently ignored")
 		require.Contains(t, err.Error(), "contradict")
+	})
+}
+
+// TestNeutrinoBlake2bParams pins that the light client is handed the BLAKE2b
+// activation height it validates proof of work from: the btcd parameters'
+// own on mainnet, and the configured one on regtest, set on a copy so the
+// package-level parameters are left as shipped.
+func TestNeutrinoBlake2bParams(t *testing.T) {
+	t.Run("mainnet", func(t *testing.T) {
+		cfg := blake2bTestConfig(t, chainreg.BitcoinMainNetParams,
+			func(c *Config) { c.Bitcoin.Node = neutrinoBackendName })
+		require.NoError(t, applyBlake2bChainConfig(cfg))
+		require.Equal(t,
+			int32(cfg.ActiveNetParams.Blake2bActivationHeight),
+			cfg.ActiveNetParams.Params.Blake2bHeight)
+		require.Equal(t, uint(22),
+			cfg.ActiveNetParams.Params.Blake2bTargetShift)
+	})
+
+	t.Run("regtest takes the configured height", func(t *testing.T) {
+		cfg := blake2bTestConfig(t, chainreg.BitcoinRegTestNetParams,
+			func(c *Config) {
+				c.Bitcoin.Node = neutrinoBackendName
+				c.Bitcoin.Blake2bActivationHeight = 150
+			})
+		require.NoError(t, applyBlake2bChainConfig(cfg))
+		require.Equal(t, int32(150),
+			cfg.ActiveNetParams.Params.Blake2bHeight)
+		require.Equal(t, uint(20),
+			cfg.ActiveNetParams.Params.Blake2bTargetShift)
+		require.Zero(t, chaincfg.RegressionNetParams.Blake2bHeight)
 	})
 }

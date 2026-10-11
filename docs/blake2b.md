@@ -221,11 +221,18 @@ Neither applies to a node with no channels, which can be upgraded whenever.
 
 ## Backends
 
-Only `bitcoin.node=bitcoind`, pointed at a Bitcoin Knots v29.4.1 or later
-node which has upgraded, is supported. `btcd` cannot follow the BLAKE2b proof
-of work and
-`neutrino` would have to validate BLAKE2b proof of work itself against a
-network with no filter servers; both are refused at configuration time.
+`bitcoin.node=bitcoind`, pointed at a Bitcoin Knots v29.4.1 or later node
+which has upgraded, and `bitcoin.node=neutrino` are supported. `btcd` cannot
+follow the BLAKE2b proof of work and is refused at configuration time.
+
+`neutrino` validates BLAKE2b proof of work itself (btcd's `blockchain`
+package, from the network's `Blake2bHeight`), so it needs no chain-identity
+check: a peer serving the SHA256d chain is refused at the activation height,
+where its headers are still v1. It needs peers serving compact block filters,
+that is Knots nodes with `blockfilterindex=1` and `peerblockfilters=1`; set
+them with `neutrino.connect` or `neutrino.addpeer`, since DNS seeds do not
+know which nodes follow this chain. On regtest and simnet
+`bitcoin.blake2b-activation-height` is required as with `bitcoind`.
 
 ## Configuration
 
