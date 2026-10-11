@@ -1493,10 +1493,14 @@ func ValidateConfig(cfg Config, interceptor signal.Interceptor, fileParser,
 				"credentials for bitcoind: %v", err)
 		}
 	case neutrinoBackendName:
-		return nil, mkErr("bitcoin.node=neutrino is not supported: this " +
-			"daemon follows the Bitcoin BLAKE2b chain and does not " +
-			"validate its proof of work itself; use a Bitcoin Knots " +
-			"bitcoind backend")
+		// The light client checks BLAKE2b proof of work itself (btcd's
+		// blockchain package, from the network's Blake2bHeight), so it
+		// can only follow a network whose height it knows.
+		if !cfg.ActiveNetParams.Params.Blake2bPowDeployed() {
+			return nil, mkErr("bitcoin.node=neutrino needs the " +
+				"network's BLAKE2b activation height: set " +
+				"bitcoin.blake2b-activation-height")
+		}
 
 	case "nochainbackend":
 		// Nothing to configure, we're running without any chain
