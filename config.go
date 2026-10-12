@@ -830,6 +830,7 @@ func DefaultConfig() Config {
 			OnionMsgPeerBurstBytes:   onionmessage.DefaultPeerOnionMsgBurstBytes,
 			OnionMsgGlobalKbps:       onionmessage.DefaultGlobalOnionMsgKbps,
 			OnionMsgGlobalBurstBytes: onionmessage.DefaultGlobalOnionMsgBurstBytes,
+			SplicePeerInputConfs:     36,
 		},
 		Gossip: &lncfg.Gossip{
 			MaxChannelUpdateBurst: discovery.DefaultMaxChannelUpdateBurst,

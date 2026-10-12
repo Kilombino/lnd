@@ -3339,6 +3339,25 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg) {
 			continue
 		}
 
+		// The first time it is processed, an HTLC that draws on what
+		// the peer put into a splice not yet deep enough is failed
+		// back: the peer could reorganise the splice away after we
+		// paid out.
+		if fwdPkg.State == channeldb.FwdStateLockedIn &&
+			l.peerInputHeld() {
+
+			l.log.Warnf("failing htlc(id=%v): it draws on the "+
+				"peer's coins in a splice not yet deep enough",
+				add.ID)
+			l.sendHTLCError(
+				add, sourceRef, NewLinkError(
+					&lnwire.FailTemporaryChannelFailure{},
+				), obfuscator, fwdInfo.IsExit(),
+			)
+
+			continue
+		}
+
 		switch {
 		case fwdInfo.IsExit():
 			err := l.processExitHop(

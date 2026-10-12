@@ -153,6 +153,7 @@ func (s *server) newSpliceMachine(base splice.Config,
 		LockDepth: func(peer btcutil.Amount) uint32 {
 			return spliceLockDepth(numConfs, peer)
 		},
+		PeerInputConfs: s.cfg.ProtocolOptions.SplicePeerInputConfs,
 	}
 
 	ch := base.Channel

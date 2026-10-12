@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/btcsuite/btcd/btcutil"
 
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/lightningnetwork/lnd/fn/v2"
@@ -45,6 +46,27 @@ type SpliceHandler interface {
 	// answers an unknown next_funding with tx_abort, and treats
 	// my_current_funding_locked as splice_locked. It must not block.
 	HandleReestablish(msg *lnwire.ChannelReestablish)
+
+	// PeerInputHold returns what of the peer's balance it may not spend
+	// yet: its coins in splices that locked and aren't deep enough to
+	// rule out a reorganisation. Safe from any goroutine.
+	PeerInputHold() btcutil.Amount
+}
+
+// peerInputHeld reports whether the peer's balance is below what the splice
+// machine holds of it: an HTLC the peer just added drew on coins it put into
+// a splice that isn't deep enough yet.
+func (l *channelLink) peerInputHeld() bool {
+	if l.cfg.SpliceHandler == nil {
+		return false
+	}
+	held := l.cfg.SpliceHandler.PeerInputHold()
+	if held <= 0 {
+		return false
+	}
+	remote := l.channel.StateSnapshot().RemoteBalance.ToSatoshis()
+
+	return remote < held
 }
 
 var (

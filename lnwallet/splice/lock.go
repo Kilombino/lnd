@@ -163,6 +163,9 @@ func (m *Machine) maybeComplete() {
 		}
 	}
 	m.recordLast("locked", "", false)
+	m.holdPeerInput(
+		a.txid, a.theirContribution, a.fundingScript, scid.BlockHeight,
+	)
 	m.notify("locked", a.txid, "", false)
 	m.report(Update{State: StateLocked, Txid: a.txid})
 	m.update(func(a *active) { a.lockDone = true })

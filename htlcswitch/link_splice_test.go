@@ -26,6 +26,7 @@ type recordingSpliceHandler struct {
 	reestablish   []*lnwire.ChannelReestablish
 	nextFunding   fn.Option[lnwire.FundingTxidFlags]
 	fundingLocked fn.Option[lnwire.FundingTxidFlags]
+	held          btcutil.Amount
 }
 
 func (h *recordingSpliceHandler) ReestablishTLVs() (
@@ -45,6 +46,13 @@ func (h *recordingSpliceHandler) HandleReestablish(
 	defer h.mu.Unlock()
 
 	h.reestablish = append(h.reestablish, msg)
+}
+
+func (h *recordingSpliceHandler) PeerInputHold() btcutil.Amount {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	return h.held
 }
 
 func (h *recordingSpliceHandler) HandleSpliceMessage(msg lnwire.Message) {
@@ -799,4 +807,55 @@ func TestLinkNoSyncStillReestablishes(t *testing.T) {
 
 		return len(handler.reestablish) == 1
 	}, 5*time.Second, 10*time.Millisecond)
+}
+
+// TestLinkPeerInputHold checks that an HTLC from the peer drawing on coins
+// it put into a splice not yet deep enough is failed back with
+// temporary_channel_failure, and that one leaving them alone goes through.
+func TestLinkPeerInputHold(t *testing.T) {
+	t.Parallel()
+
+	alice, bob, err := createMirroredChannel(
+		t, btcutil.SatoshiPerBitcoin*3, btcutil.SatoshiPerBitcoin*5,
+	)
+	require.NoError(t, err)
+
+	bobHandler := &recordingSpliceHandler{}
+	n := newTwoHopNetwork(
+		t, alice.channel, bob.channel, testStartingHeight,
+		func(c *ChannelLinkConfig) {
+			c.SpliceHandler = &recordingSpliceHandler{}
+		},
+		func(c *ChannelLinkConfig) { c.SpliceHandler = bobHandler },
+	)
+
+	// Everything Alice has is held: her payment to Bob is failed back.
+	aliceBalance := bob.channel.StateSnapshot().RemoteBalance.ToSatoshis()
+	bobHandler.mu.Lock()
+	bobHandler.held = aliceBalance
+	bobHandler.mu.Unlock()
+
+	amount := lnwire.NewMSatFromSatoshis(10_000_000)
+	htlcAmt, totalTimelock, hops := generateHops(
+		amount, testStartingHeight, n.bobChannelLink,
+	)
+	_, err = makePayment(
+		n.aliceServer, n.bobServer, n.bobChannelLink.ShortChanID(),
+		hops, amount, htlcAmt, totalTimelock,
+	).Wait(30 * time.Second)
+	require.Error(t, err)
+	var clearErr ClearTextError
+	require.ErrorAs(t, err, &clearErr)
+	require.IsType(t, &lnwire.FailTemporaryChannelFailure{},
+		clearErr.WireMessage())
+	waitClean(t, n)
+	require.Equal(t, aliceBalance,
+		bob.channel.StateSnapshot().RemoteBalance.ToSatoshis())
+
+	// A third held: the same payment leaves it alone and goes through.
+	bobHandler.mu.Lock()
+	bobHandler.held = aliceBalance / 3
+	bobHandler.mu.Unlock()
+	pay(t, n, amount)
+	waitClean(t, n)
 }

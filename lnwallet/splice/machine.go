@@ -125,6 +125,10 @@ type Policy struct {
 	// MaxPeerAddMessages bounds the peer's tx_add_input and
 	// tx_add_output messages, each.
 	MaxPeerAddMessages int
+
+	// PeerInputConfs is how deep a locked splice must be before the
+	// link lets the peer spend what it put in: 0 holds nothing.
+	PeerInputConfs uint32
 }
 
 // Config is a channel's splice machine's environment.
@@ -372,6 +376,10 @@ type Machine struct {
 	// dead are splices given up on, waiting to leave the wallet.
 	dead map[chainhash.Hash]deadSplice
 
+	// holds are the peer's contributions to locked splices not yet
+	// PeerInputConfs deep, by splice. Under mu.
+	holds map[chainhash.Hash]btcutil.Amount
+
 	quit     chan struct{}
 	stopOnce sync.Once
 	wg       sync.WaitGroup
@@ -391,6 +399,7 @@ func NewMachine(cfg Config) *Machine {
 		cfg:    cfg,
 		events: make(chan func(), 64),
 		dead:   make(map[chainhash.Hash]deadSplice),
+		holds:  make(map[chainhash.Hash]btcutil.Amount),
 		quit:   make(chan struct{}),
 	}
 }
@@ -400,6 +409,10 @@ func NewMachine(cfg Config) *Machine {
 func (m *Machine) Start() error {
 	if err := m.restore(); err != nil {
 		return err
+	}
+	if err := m.restoreHold(); err != nil {
+		log.Errorf("ChannelID(%v): unable to hold the peer's coins "+
+			"from the last splice: %v", m.cfg.ChanID, err)
 	}
 
 	m.wg.Add(1)

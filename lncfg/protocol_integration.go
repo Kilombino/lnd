@@ -50,6 +50,11 @@ type ProtocolOptions struct {
 	// node or by its peers.
 	SpliceOption bool `long:"splice" description:"if set, then lnd will allow channels to be spliced (funds added or taken out without closing), by this node or its peers; needs quiescence; once set, releases without splicing can no longer open the channel database"`
 
+	// SplicePeerInputConfs is how many confirmations a splice the peer put
+	// coins into must have before the peer may spend them through us: a
+	// reorganisation could take them back after we paid out.
+	SplicePeerInputConfs uint32 `long:"splice-peer-input-confs" description:"the confirmations a splice the peer put coins into needs before HTLCs from the peer may spend them; until then they are failed back (0 lets them through once the splice locks)"`
+
 	// ScriptEnforcedLease enables script enforced commitments for channel
 	// leases.
 	//
