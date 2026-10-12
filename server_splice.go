@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	basewallet "github.com/btcsuite/btcwallet/wallet"
 	"sync"
 	"time"
 
@@ -29,7 +30,16 @@ type spliceChain struct {
 	notifier chainntnfs.ChainNotifier
 	chainIO  lnwallet.BlockChainIO
 	wallet   lnwallet.WalletController
+
+	// processed is the tip this node has processed.
+	processed interface{ BestHeight() (uint32, error) }
 }
+
+// staleTip is how old the backend's tip may be before the backend itself
+// counts as catching up with the network. Far longer than this chain's
+// gaps between blocks, which are often over the two hours the wallet's own
+// sync check allows.
+const staleTip = 24 * time.Hour
 
 // RegisterConfirmationsNtfn implements splice.Chain.
 func (c *spliceChain) RegisterConfirmationsNtfn(txid *chainhash.Hash,
@@ -110,12 +120,40 @@ func (c *spliceChain) ConfirmedOutput(op wire.OutPoint) (*wire.TxOut, uint32,
 	}
 }
 
-// Synced implements splice.Chain: whether the wallet has caught up with
-// the backend's chain.
+// Synced implements splice.Chain: whether this node has processed the
+// backend's tip, and the backend isn't itself still catching up.
 func (c *spliceChain) Synced() bool {
+	_, backend, err := c.chainIO.GetBestBlock()
+	if err != nil {
+		return false
+	}
+	if c.processed != nil {
+		ours, err := c.processed.BestHeight()
+		if err != nil || int64(ours) < int64(backend) {
+			return false
+		}
+	}
+
+	// The wallet has done its initial sync and reached the backend's
+	// tip, and that tip isn't so old that the backend is the one behind.
+	// Its own IsSynced also wants a tip under two hours old, which a slow
+	// day on this chain fails.
+	if w, ok := c.wallet.(syncedWallet); ok {
+		base := w.InternalWallet()
+		synced := base.SyncedTo()
+
+		return base.ChainSynced() && int64(synced.Height) >= int64(backend) &&
+			time.Since(synced.Timestamp) < staleTip
+	}
+
 	synced, _, err := c.wallet.IsSynced()
 
 	return err == nil && synced
+}
+
+// syncedWallet is a wallet that shows its own sync state.
+type syncedWallet interface {
+	InternalWallet() basewallet.Interface
 }
 
 // spliceLockDepth is the confirmations at which a splice of a channel locks:
@@ -142,9 +180,10 @@ func (s *server) newSpliceMachine(base splice.Config,
 
 	wallet := s.cc.Wallet
 	cfg.Chain = &spliceChain{
-		notifier: s.cc.ChainNotifier,
-		chainIO:  s.cc.ChainIO,
-		wallet:   wallet.WalletController,
+		notifier:  s.cc.ChainNotifier,
+		chainIO:   s.cc.ChainIO,
+		wallet:    wallet.WalletController,
+		processed: s.cc.BestBlockTracker,
 	}
 	cfg.Wallet = wallet.WalletController
 	cfg.CoinSource = wallet.WalletController
