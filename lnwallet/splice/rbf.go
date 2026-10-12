@@ -16,12 +16,13 @@ import (
 	"github.com/lightningnetwork/lnd/lnwire"
 )
 
-// A peer may replace a splice it started that is signed both ways and not
-// yet locked, with a transaction paying a higher fee (tx_init_rbf). This
-// node takes part as it did in the splice: it adds nothing. The splice's
-// earlier transactions stay candidates until one of them, or the
+// A peer may replace a splice that is signed both ways and not yet locked,
+// with a transaction paying at least as much (tx_init_rbf). This node takes
+// part as it did in the splice: adding nothing to the peer's, and to its
+// own the same coins, or the same amount to the same destination. The
+// splice's earlier transactions stay candidates until one of them, or the
 // replacement, confirms: they all spend the same funding output, so only
-// one can. Our own splices aren't replaced yet.
+// one can. This node doesn't start replacements yet.
 
 // The replacement must pay at least the fee of the transaction it replaces,
 // in total: checked once its construction is done (checkReplacementFee).
@@ -48,13 +49,36 @@ func (m *Machine) handleTxInitRbf(msg *lnwire.TxInitRbf) {
 		return
 	}
 
-	contribution := msg.FundingOutputContribution.UnwrapOr(
-		a.theirContribution,
+	// The peer's contribution to its own splice it may change; to ours it
+	// is what it adds on top.
+	theirs := a.theirContribution
+	if a.role == interactivetx.Initiator {
+		theirs = 0
+	}
+	contribution := msg.FundingOutputContribution.UnwrapOr(theirs)
+	feeRate := chainfee.SatPerKWeight(msg.FeeRatePerKw)
+
+	// Replacing a splice we started, we put in what we did: the same
+	// coins, or the same amount to the same destination, paying for
+	// them at the new rate.
+	var (
+		ours    btcutil.Amount
+		coins   []Coin
+		outputs []interactivetx.Output
 	)
+	if a.role == interactivetx.Initiator {
+		ours, coins, outputs, err = m.ourPart(a, feeRate)
+		if err != nil {
+			m.abort(codeInsufficientFunds, "%v", err)
+			m.resume()
+
+			return
+		}
+	}
+
 	session, b, err := m.newConstruction(
-		interactivetx.Acceptor, contribution, 0,
-		chainfee.SatPerKWeight(msg.FeeRatePerKw), msg.LockTime,
-		a.ourKey, a.theirKey,
+		interactivetx.Acceptor, contribution, ours, feeRate,
+		msg.LockTime, a.ourKey, a.theirKey,
 	)
 	if err != nil {
 		m.abort(codeInternal, "%v", err)
@@ -62,6 +86,20 @@ func (m *Machine) handleTxInitRbf(msg *lnwire.TxInitRbf) {
 
 		return
 	}
+	for _, c := range coins {
+		witness, _ := CoinWitnessWeight(c.PkScript)
+		session.AddLocalInput(interactivetx.Input{
+			OutPoint: c.OutPoint, Value: c.Value,
+			PkScript: c.PkScript, Sequence: interactivetx.MaxSequence,
+			MaxWitnessWeight: witness, PrevTx: c.PrevTx,
+		})
+	}
+	for _, o := range outputs {
+		session.AddLocalOutput(o)
+	}
+	b.ourInputs = coins
+	b.ourOutputs = outputs
+	b.oursReplaced = a.role == interactivetx.Initiator || a.oursReplaced
 
 	// The splice keeps its place in the limits: the replacement is the
 	// same splice.
@@ -76,9 +114,91 @@ func (m *Machine) handleTxInitRbf(msg *lnwire.TxInitRbf) {
 		m.cfg.ChanID, a.txid, a.feeRate, b.feeRate)
 	m.send(&lnwire.TxAckRbf{
 		ChannelID:                 m.cfg.ChanID,
-		FundingOutputContribution: fn.Some(btcutil.Amount(0)),
+		FundingOutputContribution: fn.Some(ours),
 		RequireConfirmedInputs:    true,
 	})
+}
+
+// ourPart returns what this node puts into a replacement of a splice it
+// started: the same coins with the change left after their fee at the new
+// rate (dropped if dust), or the same amount to the same destination with
+// the fee for that output out of our side. In M1 the peer adds nothing to
+// our splices, so every input but the shared one, and every output but the
+// funding one, is ours.
+func (m *Machine) ourPart(a *active, feeRate chainfee.SatPerKWeight) (
+	btcutil.Amount, []Coin, []interactivetx.Output, error) {
+
+	var outs []*wire.TxOut
+	for i, o := range a.res.Tx.TxOut {
+		if uint32(i) != a.fundingIndex {
+			outs = append(outs, o)
+		}
+	}
+
+	// Moving out: one output, the destination.
+	if a.ourContribution < 0 {
+		if len(outs) != 1 {
+			return 0, nil, nil, fmt.Errorf("%d outputs moving out",
+				len(outs))
+		}
+		out := interactivetx.Output{
+			Value:    btcutil.Amount(outs[0].Value),
+			PkScript: outs[0].PkScript,
+		}
+		fee := feeRate.FeeForWeight(lntypes.WeightUnit(
+			interactivetx.OutputWeight(out.PkScript),
+		))
+
+		return -(out.Value + fee), nil, []interactivetx.Output{out},
+			nil
+	}
+
+	// Adding funds: our coins, from the wallet's copy of each one's
+	// transaction.
+	var (
+		coins  []Coin
+		total  btcutil.Amount
+		weight int64
+	)
+	for _, in := range a.res.Inputs {
+		if in.Shared || !ourSerial(a.role, in.SerialID) {
+			continue
+		}
+		prev, err := m.cfg.CoinSource.FetchTx(in.OutPoint.Hash)
+		if err != nil {
+			return 0, nil, nil, fmt.Errorf("coin %v: %w",
+				in.OutPoint, err)
+		}
+		witness, ok := CoinWitnessWeight(in.PkScript)
+		if !ok {
+			return 0, nil, nil, fmt.Errorf("coin %v can't be "+
+				"spent here", in.OutPoint)
+		}
+		coins = append(coins, Coin{
+			OutPoint: in.OutPoint, Value: in.Value,
+			PkScript: in.PkScript, PrevTx: prev,
+		})
+		total += in.Value
+		weight += interactivetx.InputWeight(witness) + peerInputMargin
+	}
+
+	amount := a.ourContribution
+	if len(outs) == 1 {
+		change := outs[0].PkScript
+		withChange := weight + interactivetx.OutputWeight(change)
+		left := total - amount - feeRate.FeeForWeight(lntypes.WeightUnit(withChange))
+		if left >= m.cfg.DustLimit(change) {
+			return amount, coins, []interactivetx.Output{{
+				Value: left, PkScript: change,
+			}}, nil
+		}
+	}
+	if total-amount < feeRate.FeeForWeight(lntypes.WeightUnit(weight)) {
+		return 0, nil, nil, fmt.Errorf("our coins don't pay for "+
+			"themselves at %v", feeRate)
+	}
+
+	return amount, coins, nil, nil
 }
 
 // checkTxInitRbf returns why the peer's replacement is refused, or "".
@@ -87,11 +207,6 @@ func (m *Machine) checkTxInitRbf(msg *lnwire.TxInitRbf) (string, string) {
 	switch {
 	case a == nil || a.phase != phasePending:
 		return codeRbfUnsupported, "no signed splice to replace"
-
-	// Only the side that started a splice replaces it, and ours we
-	// don't replace yet.
-	case a.role != interactivetx.Acceptor:
-		return codeRbfUnsupported, "our splice"
 
 	case a.lockedSent || a.lockedReceived:
 		return codeRbfUnsupported, "already locked"

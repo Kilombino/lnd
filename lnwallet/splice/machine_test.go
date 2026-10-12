@@ -48,6 +48,9 @@ type testLink struct {
 	stfuGate   chan struct{}
 	commits    chan *lnwire.CommitSig
 	resumed    chan struct{}
+
+	// mu guards initiator, which a test may change.
+	mu sync.Mutex
 }
 
 func done(err error) <-chan error {
@@ -58,6 +61,9 @@ func done(err error) <-chan error {
 }
 
 func (l *testLink) QuiescenceInitiator() fn.Result[lntypes.ChannelParty] {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
 	return fn.Ok(l.initiator)
 }
 

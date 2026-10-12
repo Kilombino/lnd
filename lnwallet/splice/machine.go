@@ -337,6 +337,10 @@ type active struct {
 	// watching is set once the splice's confirmations are watched.
 	watching bool
 
+	// oursReplaced is set on the peer's replacement of a splice this node
+	// started: the splice is still ours to report.
+	oursReplaced bool
+
 	// pendingWatched is set once the transaction is republished at every
 	// block and its inputs watched (watchPendingOf).
 	pendingWatched bool
@@ -639,7 +643,7 @@ func (m *Machine) recordLast(outcome, reason string, fromPeer bool) {
 	}
 
 	err := m.cfg.Channel.State().PutLastSplice(&channeldb.LastSplice{
-		WeInitiated:    a.role == interactivetx.Initiator,
+		WeInitiated:    a.role == interactivetx.Initiator || a.oursReplaced,
 		LocalDelta:     a.ourContribution,
 		RemoteDelta:    a.theirContribution,
 		Txid:           a.txid,

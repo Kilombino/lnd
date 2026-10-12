@@ -164,6 +164,9 @@ func newSplicePair(t *testing.T) *splicePair {
 				to.machine.HandleSpliceMessage(msg)
 
 			case sig := <-from.link.commits:
+				if p.dropped(from, sig) {
+					continue
+				}
 				txid := sig.FundingTxid.UnsafeFromSome()
 				err := to.ch.ReceiveSpliceCommitment(
 					txid, &lnwallet.CommitSigs{
