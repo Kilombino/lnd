@@ -63,3 +63,35 @@ func TestRPCPendingSplice(t *testing.T) {
 	require.True(t, ps.WeLocked)
 	require.False(t, ps.PeerLocked)
 }
+
+// TestSetSpliceDepth checks a pending splice's confirmations and lock depth,
+// and that its first confirmation makes it "confirmed".
+func TestSetSpliceDepth(t *testing.T) {
+	t.Parallel()
+
+	ps := &lnrpc.PendingSplice{State: "broadcast"}
+	setSpliceDepth(ps, 0, 6)
+	require.Equal(t, "broadcast", ps.State)
+	require.Equal(t, uint32(6), ps.LockDepth)
+
+	setSpliceDepth(ps, 2, 6)
+	require.Equal(t, "confirmed", ps.State)
+	require.Equal(t, uint32(2), ps.Confirmations)
+
+	// Still signing: confirmations can't be known yet.
+	ps = &lnrpc.PendingSplice{State: "signed"}
+	setSpliceDepth(ps, 0, 6)
+	require.Equal(t, "signed", ps.State)
+}
+
+// TestSpliceLockDepth checks the lock depth: 6 at least, and the channel's
+// own when larger. lnd's scale for opens tops out at 6, so a peer's
+// contribution doesn't raise it further.
+func TestSpliceLockDepth(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, uint32(6), spliceLockDepth(3, 0))
+	require.Equal(t, uint32(8), spliceLockDepth(8, 0))
+	require.Equal(t, uint32(6), spliceLockDepth(3, -5))
+	require.Equal(t, uint32(6), spliceLockDepth(3, 1_000_000_000))
+}

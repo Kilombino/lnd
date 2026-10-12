@@ -114,15 +114,15 @@ func (r *rpcServer) spliceStatus(
 func (r *rpcServer) spliceFeeRate(satPerVByte uint64,
 	targetConf int32) (chainfee.SatPerKWeight, error) {
 
+	est := r.server.cc.FeeEstimator
 	if satPerVByte > 0 {
-		return chainfee.SatPerKVByte(satPerVByte * 1000).FeePerKWeight(),
-			nil
+		return splice.RequestedFeeRate(satPerVByte, est), nil
 	}
 	if targetConf <= 0 {
 		targetConf = 6
 	}
 
-	return r.server.cc.FeeEstimator.EstimateFeePerKW(uint32(targetConf))
+	return est.EstimateFeePerKW(uint32(targetConf))
 }
 
 // spliceDestination returns where funds moved out go: the address asked
@@ -313,7 +313,7 @@ func (r *rpcServer) EstimateSplice(_ context.Context,
 		)),
 		NewCapacitySat:    int64(est.NewCapacity),
 		NewLocalSat:       int64(est.NewLocal),
-		LockDepth:         max(6, uint32(ch.NumConfsRequired)),
+		LockDepth:         spliceLockDepth(ch.NumConfsRequired, 0),
 		DestinationIsOurs: ours,
 		RefusalCode:       est.RefusalCode,
 	}, nil
@@ -411,6 +411,13 @@ func (r *rpcServer) addSpliceFields(ch *channeldb.OpenChannel,
 			continue
 		}
 		channel.PendingSplice = rpcPendingSplice(rec)
+		setSpliceDepth(
+			channel.PendingSplice, r.spliceConfirmations(rec),
+			spliceLockDepth(
+				ch.NumConfsRequired,
+				btcutil.Amount(max(0, int64(rec.RemoteDelta))),
+			),
+		)
 
 		// What we can count on is the least on any funding.
 		if rec.LocalCommit != nil {
@@ -440,6 +447,33 @@ func (r *rpcServer) addSpliceFields(ch *channeldb.OpenChannel,
 		if last.Txid == [32]byte{} {
 			channel.LastSplice.Txid = ""
 		}
+	}
+}
+
+// spliceConfirmations returns the confirmations of a splice's new funding
+// output, 0 while it is unconfirmed or can't be checked. One backend call,
+// only for a splice that went out.
+func (r *rpcServer) spliceConfirmations(rec *channeldb.SpliceRecord) uint32 {
+	n := rec.Negotiation
+	if n == nil || n.OurTxSignatures == nil || n.TheirTxSignatures == nil {
+		return 0
+	}
+	chain := &spliceChain{wallet: r.server.cc.Wallet.WalletController}
+	_, confs, _, err := chain.ConfirmedOutput(rec.OutPoint)
+	if err != nil {
+		return 0
+	}
+
+	return confs
+}
+
+// setSpliceDepth adds a pending splice's confirmations and lock depth; one
+// with a confirmation is "confirmed" while it waits for the lock depth.
+func setSpliceDepth(ps *lnrpc.PendingSplice, confs, lockDepth uint32) {
+	ps.Confirmations = confs
+	ps.LockDepth = lockDepth
+	if confs > 0 && ps.State == "broadcast" {
+		ps.State = "confirmed"
 	}
 }
 

@@ -102,3 +102,32 @@ func TestCheckFeeRates(t *testing.T) {
 	require.NoError(t, CheckAcceptorFeeRate(1_000, est))
 	require.ErrorIs(t, CheckAcceptorFeeRate(999, est), ErrFeeBelowFloor)
 }
+
+// A whole sat/vbyte rate equal to a floor rounded down is the floor; one
+// below stays below and is refused.
+func TestRequestedFeeRate(t *testing.T) {
+	t.Parallel()
+
+	// No estimate: the relay fee is the floor, 1 sat/vbyte rounded down.
+	quiet := &testEstimator{err: errors.New("none"), relay: 253}
+	require.EqualValues(t, 253, RequestedFeeRate(1, quiet))
+	require.NoError(t, CheckInitiatorFeeRate(
+		RequestedFeeRate(1, quiet), quiet, false,
+	))
+	require.EqualValues(t, 500, RequestedFeeRate(2, quiet))
+
+	// An estimate of 1.5 sat/vbyte shows as 1, and 1 means it.
+	est := &testEstimator{rate: 375, relay: 253, fallback: 12_500}
+	require.EqualValues(t, 375, RequestedFeeRate(1, est))
+	require.NoError(t, CheckInitiatorFeeRate(
+		RequestedFeeRate(1, est), est, false,
+	))
+
+	// An estimate of 3.2 sat/vbyte shows as 3: 2 is still below it.
+	high := &testEstimator{rate: 800, relay: 253, fallback: 12_500}
+	require.EqualValues(t, 800, RequestedFeeRate(3, high))
+	require.EqualValues(t, 500, RequestedFeeRate(2, high))
+	require.ErrorIs(t, CheckInitiatorFeeRate(
+		RequestedFeeRate(2, high), high, false,
+	), ErrFeeBelowFloor)
+}

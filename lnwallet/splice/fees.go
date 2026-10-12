@@ -81,6 +81,27 @@ func AcceptorFloor(est chainfee.Estimator) chainfee.SatPerKWeight {
 	return rate / 2
 }
 
+// RequestedFeeRate returns the feerate of a whole sat/vbyte rate asked for
+// over RPC. Floors aren't whole sat/vbyte rates, and are reported rounded
+// down (the minimum relay fee of 253 sat/kw shows as 1 sat/vbyte): asking
+// for the rate a floor shows as means the floor, as lnd raises a rate under
+// its minimum elsewhere.
+func RequestedFeeRate(satPerVByte uint64,
+	est chainfee.Estimator) chainfee.SatPerKWeight {
+
+	rate := chainfee.SatPerKVByte(satPerVByte * 1000).FeePerKWeight()
+	floors := []chainfee.SatPerKWeight{
+		est.RelayFeePerKW(), InitiatorFloor(est).Rate,
+	}
+	for _, floor := range floors {
+		if rate < floor && uint64(floor.FeePerVByte()) == satPerVByte {
+			rate = floor
+		}
+	}
+
+	return rate
+}
+
 // CheckInitiatorFeeRate refuses a feerate below the initiator floor unless
 // the user forced it. The minimum relay fee is never waived: the splice
 // wouldn't propagate.

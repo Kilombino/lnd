@@ -84,6 +84,19 @@ func (c *spliceChain) ConfirmedOutput(op wire.OutPoint) (*wire.TxOut, uint32,
 	return d.GetUtxoDetails(&op)
 }
 
+// spliceLockDepth is the confirmations at which a splice of a channel locks:
+// at least 6, at least the channel's own, and more for a large amount the
+// peer put in (it could double-spend it in a reorg).
+func spliceLockDepth(numConfsRequired uint16, peer btcutil.Amount) uint32 {
+	if peer < 0 {
+		peer = 0
+	}
+	depth := max(uint32(6), uint32(numConfsRequired))
+	scaled := uint32(lnwallet.ScaleNumConfs(peer, 0))
+
+	return max(depth, scaled)
+}
+
 // newSpliceMachine fills the node's part of a channel's splice machine's
 // configuration.
 func (s *server) newSpliceMachine(base splice.Config,
@@ -134,14 +147,11 @@ func (s *server) newSpliceMachine(base splice.Config,
 	// The lock depth: at least 6, at least the channel's own, and more for
 	// a large amount the peer put in (it could double-spend it in a
 	// reorg).
-	numConfs := uint32(base.Channel.State().NumConfsRequired)
+	numConfs := base.Channel.State().NumConfsRequired
 	cfg.Policy = splice.Policy{
 		MaxChannelSize: btcutil.Amount(s.cfg.MaxChanSize),
 		LockDepth: func(peer btcutil.Amount) uint32 {
-			depth := max(uint32(6), numConfs)
-			scaled := uint32(lnwallet.ScaleNumConfs(peer, 0))
-
-			return max(depth, scaled)
+			return spliceLockDepth(numConfs, peer)
 		},
 	}
 
