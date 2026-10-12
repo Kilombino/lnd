@@ -116,6 +116,23 @@ type SpliceNegotiation struct {
 
 	// LockedSent and LockedReceived record splice_locked each way.
 	LockedSent, LockedReceived bool
+
+	// Inputs describe the transaction's inputs in its order, which
+	// signing and checking the peer's signatures need after a restart.
+	Inputs []SpliceInput
+}
+
+// SpliceInput is an input of a splice transaction as negotiated.
+type SpliceInput struct {
+	// SerialID says which side added it.
+	SerialID uint64
+
+	// Value and PkScript describe the output it spends.
+	Value    btcutil.Amount
+	PkScript []byte
+
+	// Shared marks the input spending the channel's funding output.
+	Shared bool
 }
 
 // SpliceNegotiation TLV types.
@@ -128,6 +145,7 @@ const (
 	negTheirTxSigsType     tlv.Type = 5
 	negBroadcastHeightType tlv.Type = 6
 	negLockedType          tlv.Type = 7
+	negInputsType          tlv.Type = 8
 )
 
 // encode serializes a negotiation as a TLV stream.
@@ -208,6 +226,30 @@ func (n *SpliceNegotiation) encode(w io.Writer) error {
 		negLockedType, &locked,
 	))
 
+	if len(n.Inputs) > 0 {
+		var b bytes.Buffer
+		for _, in := range n.Inputs {
+			shared := uint8(0)
+			if in.Shared {
+				shared = 1
+			}
+			err := WriteElements(&b, in.SerialID,
+				uint64(in.Value), shared,
+				uint16(len(in.PkScript)),
+			)
+			if err != nil {
+				return err
+			}
+			if _, err := b.Write(in.PkScript); err != nil {
+				return err
+			}
+		}
+		inputs := b.Bytes()
+		records = append(records, tlv.MakePrimitiveRecord(
+			negInputsType, &inputs,
+		))
+	}
+
 	stream, err := tlv.NewStream(records...)
 	if err != nil {
 		return err
@@ -223,6 +265,7 @@ func decodeSpliceNegotiation(r io.Reader) (*SpliceNegotiation, error) {
 		flags, locked      uint8
 		tx, inputs         []byte
 		ourSigs, theirSigs []byte
+		spliceInputs       []byte
 	)
 	stream, err := tlv.NewStream(
 		tlv.MakePrimitiveRecord(negWeInitiatedType, &flags),
@@ -235,6 +278,7 @@ func decodeSpliceNegotiation(r io.Reader) (*SpliceNegotiation, error) {
 			negBroadcastHeightType, &n.BroadcastHeight,
 		),
 		tlv.MakePrimitiveRecord(negLockedType, &locked),
+		tlv.MakePrimitiveRecord(negInputsType, &spliceInputs),
 	)
 	if err != nil {
 		return nil, err
@@ -264,6 +308,27 @@ func decodeSpliceNegotiation(r io.Reader) (*SpliceNegotiation, error) {
 			return nil, err
 		}
 		n.OurInputs = append(n.OurInputs, op)
+	}
+
+	for rd := bytes.NewReader(spliceInputs); rd.Len() > 0; {
+		var (
+			in        SpliceInput
+			value     uint64
+			shared    uint8
+			scriptLen uint16
+		)
+		err := ReadElements(rd, &in.SerialID, &value, &shared,
+			&scriptLen)
+		if err != nil {
+			return nil, err
+		}
+		in.PkScript = make([]byte, scriptLen)
+		if _, err := io.ReadFull(rd, in.PkScript); err != nil {
+			return nil, err
+		}
+		in.Value = btcutil.Amount(value)
+		in.Shared = shared == 1
+		n.Inputs = append(n.Inputs, in)
 	}
 
 	sigs := func(b []byte) (*lnwire.TxSignatures, error) {
@@ -873,4 +938,113 @@ func (c *OpenChannel) EnsureSpliceRecord(r *SpliceRecord) error {
 
 		return nil
 	}, func() {})
+}
+
+// lastSpliceKey holds the channel's most recent splice that ended.
+var lastSpliceKey = []byte("last-splice")
+
+// LastSplice is a channel's most recent splice that ended: locked, aborted
+// or dead.
+type LastSplice struct {
+	// WeInitiated is true for a splice this node started.
+	WeInitiated bool
+
+	// LocalDelta and RemoteDelta are the changes to each side's balance.
+	LocalDelta, RemoteDelta btcutil.Amount
+
+	// Txid names its transaction, if one was agreed.
+	Txid chainhash.Hash
+
+	// Time is when it ended, in Unix seconds.
+	Time int64
+
+	// Outcome is "locked", "aborted" or "dead".
+	Outcome string
+
+	// Reason is why it didn't lock: a refusal code, or the peer's
+	// printable text when ReasonFromPeer.
+	Reason         string
+	ReasonFromPeer bool
+}
+
+// PutLastSplice records the channel's most recent splice that ended.
+func (c *OpenChannel) PutLastSplice(l *LastSplice) error {
+	c.Lock()
+	defer c.Unlock()
+
+	var b bytes.Buffer
+	err := WriteElements(&b, l.WeInitiated, uint64(l.LocalDelta),
+		uint64(l.RemoteDelta), l.Txid, uint64(l.Time),
+		[]byte(l.Outcome), []byte(l.Reason), l.ReasonFromPeer,
+	)
+	if err != nil {
+		return err
+	}
+
+	return kvdb.Update(c.Db.backend, func(tx kvdb.RwTx) error {
+		chanBucket, err := fetchChanBucketRw(
+			tx, c.IdentityPub, &c.FundingOutpoint, c.ChainHash,
+		)
+		if err != nil {
+			return err
+		}
+
+		return chanBucket.Put(lastSpliceKey, b.Bytes())
+	}, func() {})
+}
+
+// LastSplice returns the channel's most recent splice that ended, if any.
+func (c *OpenChannel) LastSplice() (*LastSplice, error) {
+	c.RLock()
+	defer c.RUnlock()
+
+	if c.Db == nil {
+		return nil, nil
+	}
+
+	var last *LastSplice
+	err := kvdb.View(c.Db.backend, func(tx kvdb.RTx) error {
+		chanBucket, err := fetchChanBucket(
+			tx, c.IdentityPub, &c.FundingOutpoint, c.ChainHash,
+		)
+		switch {
+		case errors.Is(err, ErrNoChanDBExists),
+			errors.Is(err, ErrNoActiveChannels),
+			errors.Is(err, ErrChannelNotFound):
+
+			return nil
+
+		case err != nil:
+			return err
+		}
+
+		v := chanBucket.Get(lastSpliceKey)
+		if v == nil {
+			return nil
+		}
+
+		var (
+			l                 LastSplice
+			local, remote, ts uint64
+			outcome, reason   []byte
+		)
+		err = ReadElements(bytes.NewReader(v), &l.WeInitiated, &local,
+			&remote, &l.Txid, &ts, &outcome, &reason,
+			&l.ReasonFromPeer,
+		)
+		if err != nil {
+			return err
+		}
+		l.LocalDelta = btcutil.Amount(int64(local))
+		l.RemoteDelta = btcutil.Amount(int64(remote))
+		l.Time = int64(ts)
+		l.Outcome, l.Reason = string(outcome), string(reason)
+		last = &l
+
+		return nil
+	}, func() {
+		last = nil
+	})
+
+	return last, err
 }

@@ -274,6 +274,19 @@ func TestSpliceInBetweenMachines(t *testing.T) {
 	p.requireMoved(t, txid, capacity+amount)
 	require.Zero(t, p.alice.wallet.leaseCount())
 
+	// Both channels record it as their last splice.
+	for _, n := range []*node{p.alice, p.bob} {
+		require.Eventually(t, func() bool {
+			last, err := n.ch.State().LastSplice()
+			return err == nil && last != nil &&
+				last.Outcome == "locked" && last.Txid == txid
+		}, 5*time.Second, 10*time.Millisecond)
+	}
+	last, err := p.alice.ch.State().LastSplice()
+	require.NoError(t, err)
+	require.True(t, last.WeInitiated)
+	require.Equal(t, amount, last.LocalDelta)
+
 	_, open := <-updates
 	require.False(t, open)
 }
@@ -489,6 +502,11 @@ func TestSpliceInitiatorRefusesPeerContribution(t *testing.T) {
 		u := requireUpdates(t, updates, StateAborted)
 		require.Contains(t, u.Reason, codePeerContribUnsupp)
 		require.Zero(t, alice.wallet.leaseCount())
+
+		last, err := alice.ch.State().LastSplice()
+		require.NoError(t, err)
+		require.Equal(t, "aborted", last.Outcome)
+		require.Contains(t, last.Reason, codePeerContribUnsupp)
 	})
 
 	t.Run("an input added by the peer", func(t *testing.T) {
@@ -606,4 +624,37 @@ func TestSpliceOutRecheckedWhenQuiescent(t *testing.T) {
 // sha256Hash returns the SHA256 of b.
 func sha256Hash(b []byte) [32]byte {
 	return sha256.Sum256(b)
+}
+
+// TestSpliceCancel checks canceling a splice we started: while preparing it
+// just ends; once the splice is signed it carries on.
+func TestSpliceCancel(t *testing.T) {
+	t.Parallel()
+
+	alice, _ := soloAlice(t)
+	alice.fund(t, 1, 5_000_000)
+	alice.link.stfuGate = make(chan struct{})
+
+	updates, err := alice.machine.Splice(Request{
+		Direction: DirectionIn, Amount: 1_000_000, FeeRate: 2_500,
+	})
+	require.NoError(t, err)
+	requireUpdates(t, updates, StatePreparing)
+	require.True(t, alice.machine.Cancel())
+	u := requireUpdates(t, updates, StateAborted)
+	require.Contains(t, u.Reason, "canceled")
+	require.Zero(t, alice.wallet.leaseCount())
+	require.False(t, alice.machine.Cancel())
+	close(alice.link.stfuGate)
+
+	p := newSplicePair(t)
+	p.alice.fund(t, 1, 5_000_000)
+	updates, err = p.alice.machine.Splice(Request{
+		Direction: DirectionIn, Amount: 1_000_000, FeeRate: 2_500,
+	})
+	require.NoError(t, err)
+	requireUpdates(t, updates, StatePreparing, StateNegotiating,
+		StateSigned)
+	require.False(t, p.alice.machine.Cancel())
+	requireUpdates(t, updates, StateBroadcast)
 }

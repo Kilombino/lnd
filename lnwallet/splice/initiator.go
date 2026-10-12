@@ -58,8 +58,10 @@ const (
 type Update struct {
 	State State
 
-	// Txid names the splice from StateSigned on.
-	Txid chainhash.Hash
+	// Txid names the splice from StateSigned on, and FundingIndex is
+	// its funding output's index.
+	Txid         chainhash.Hash
+	FundingIndex uint32
 
 	// Reason, for StateAborted, is a refusal code or the peer's text.
 	Reason string
@@ -110,6 +112,9 @@ func (m *Machine) report(u Update) {
 	a := m.active
 	if a == nil || a.updates == nil {
 		return
+	}
+	if u.Txid != (chainhash.Hash{}) {
+		u.FundingIndex = a.fundingIndex
 	}
 	select {
 	case a.updates <- u:
@@ -351,8 +356,7 @@ func (m *Machine) failOurs(code string, format string, args ...interface{}) {
 	}
 	log.Infof("ChannelID(%v): splice failed: %v", m.cfg.ChanID, reason)
 
-	m.report(Update{State: StateAborted, Reason: reason})
-
+	// The coins go back before anyone hears of it.
 	a := m.active
 	if a != nil && len(a.ourInputs) > 0 {
 		if err := ReleaseCoins(m.cfg.Wallet, a.ourInputs); err != nil {
@@ -361,6 +365,9 @@ func (m *Machine) failOurs(code string, format string, args ...interface{}) {
 		}
 		a.ourInputs = nil
 	}
+
+	m.recordLast("aborted", reason, false)
+	m.report(Update{State: StateAborted, Reason: reason})
 	m.setActive(nil)
 }
 
@@ -431,4 +438,38 @@ func (m *Machine) handleSpliceAck(msg *lnwire.SpliceAck) {
 	})
 
 	m.advanceConstruction()
+}
+
+// Cancel ends a splice this node started if it hasn't reached the end of
+// the construction: before splice_init nothing was sent; during the
+// construction the peer gets tx_abort. Past that the splice carries on, and
+// Cancel reports false.
+func (m *Machine) Cancel() bool {
+	result := make(chan bool, 1)
+	m.enqueue(func() {
+		a := m.active
+		switch {
+		case a == nil || a.request == nil:
+			result <- false
+
+		case a.phase == phasePreparing:
+			m.failOurs("canceled", "")
+			result <- true
+
+		case a.phase == phaseNegotiating:
+			m.abort("canceled", "")
+			m.forget()
+			result <- true
+
+		default:
+			result <- false
+		}
+	})
+
+	select {
+	case ok := <-result:
+		return ok
+	case <-m.quit:
+		return false
+	}
 }

@@ -5323,6 +5323,10 @@ func createRPCOpenChannel(ctx context.Context, r *rpcServer,
 		return nil, err
 	}
 
+	// A splice moves the funding output; the channel's other fields
+	// come from the same state.
+	r.addSpliceFields(dbChannel, channel)
+
 	return channel, nil
 }
 

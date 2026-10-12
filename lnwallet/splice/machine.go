@@ -489,12 +489,37 @@ func (m *Machine) forget() {
 		}
 	}
 
+	m.recordLast("aborted", a.abortReason, a.reasonFromPeer)
 	m.report(Update{
 		State: StateAborted, Txid: a.txid, Reason: a.abortReason,
 		ReasonFromPeer: a.reasonFromPeer,
 	})
 	m.setActive(nil)
 	m.resume()
+}
+
+// recordLast records how the splice in progress ended, for the channel's
+// listing.
+func (m *Machine) recordLast(outcome, reason string, fromPeer bool) {
+	a := m.active
+	if a == nil {
+		return
+	}
+
+	err := m.cfg.Channel.State().PutLastSplice(&channeldb.LastSplice{
+		WeInitiated:    a.role == interactivetx.Initiator,
+		LocalDelta:     a.ourContribution,
+		RemoteDelta:    a.theirContribution,
+		Txid:           a.txid,
+		Time:           time.Now().Unix(),
+		Outcome:        outcome,
+		Reason:         reason,
+		ReasonFromPeer: fromPeer,
+	})
+	if err != nil {
+		log.Errorf("ChannelID(%v): unable to record the last splice: "+
+			"%v", m.cfg.ChanID, err)
+	}
 }
 
 // handleMessage dispatches a splice message.

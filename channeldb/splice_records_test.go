@@ -310,6 +310,14 @@ func TestSpliceNegotiationRoundTrip(t *testing.T) {
 		OurTxSignatures: ourSigs,
 		BroadcastHeight: 901_000,
 		LockedSent:      true,
+		Inputs: []SpliceInput{
+			{SerialID: 0, Value: 1_000_000, PkScript: []byte{
+				0, 0x20, 1,
+			}, Shared: true},
+			{SerialID: 3, Value: 50_000, PkScript: []byte{
+				0, 0x14, 2,
+			}},
+		},
 	}
 	require.NoError(t, channel.PutSpliceRecord(r))
 
@@ -335,6 +343,7 @@ func TestSpliceNegotiationRoundTrip(t *testing.T) {
 	require.Equal(t, uint32(901_000), got.BroadcastHeight)
 	require.True(t, got.LockedSent)
 	require.False(t, got.LockedReceived)
+	require.Equal(t, r.Negotiation.Inputs, got.Inputs)
 
 	// A record without one has none.
 	r2 := testSpliceRecord(t, channel)
@@ -347,4 +356,38 @@ func TestSpliceNegotiationRoundTrip(t *testing.T) {
 			require.Nil(t, rec.Negotiation)
 		}
 	}
+}
+
+// TestLastSplice checks the record of a channel's most recent splice.
+func TestLastSplice(t *testing.T) {
+	t.Parallel()
+
+	fullDB, err := MakeTestDB(t)
+	require.NoError(t, err)
+	channel := createTestChannel(t, fullDB.ChannelStateDB())
+
+	last, err := channel.LastSplice()
+	require.NoError(t, err)
+	require.Nil(t, last)
+
+	want := &LastSplice{
+		WeInitiated: true, LocalDelta: -250_000, RemoteDelta: 0,
+		Txid: chainhash.Hash{4}, Time: 1_790_000_000,
+		Outcome: "aborted", Reason: "insufficient funds, says the peer",
+		ReasonFromPeer: true,
+	}
+	require.NoError(t, channel.PutLastSplice(want))
+	last, err = channel.LastSplice()
+	require.NoError(t, err)
+	require.Equal(t, want, last)
+
+	// A newer one replaces it.
+	newer := &LastSplice{
+		LocalDelta: 0, RemoteDelta: 1_000_000, Txid: chainhash.Hash{5},
+		Time: 1_790_000_100, Outcome: "locked",
+	}
+	require.NoError(t, channel.PutLastSplice(newer))
+	last, err = channel.LastSplice()
+	require.NoError(t, err)
+	require.Equal(t, newer, last)
 }
