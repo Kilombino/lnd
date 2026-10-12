@@ -2145,6 +2145,17 @@ func LatestDBVersion() uint32 {
 	return getLatestDBVersion(dbVersions)
 }
 
+// OpenableDBVersions returns the channel database versions this build opens
+// as they are: the latest, and the one before the splicing mark, at which a
+// node that never ran with splicing stays. A tool that copies a database
+// for this build (lndinit's SQLite conversion) accepts either.
+func OpenableDBVersions() []uint32 {
+	return []uint32{
+		getLatestDBVersion(targetVersions(false)),
+		getLatestDBVersion(targetVersions(true)),
+	}
+}
+
 // splicingDBVersion is the database version that marks a node that has run
 // with splicing on.
 const splicingDBVersion = 38
