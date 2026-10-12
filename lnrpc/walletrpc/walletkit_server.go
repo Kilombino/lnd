@@ -1336,8 +1336,11 @@ func (w *WalletKit) getWaitingCloseChannel(
 		return nil, err
 	}
 
+	// By either the outpoint it was opened with or, after a splice, the
+	// one it is on now.
 	channel := fn.Find(chans, func(c *channeldb.OpenChannel) bool {
-		return c.FundingOutpoint == chanPoint
+		return c.FundingOutpoint == chanPoint ||
+			c.CurrentFundingOutpoint() == chanPoint
 	})
 
 	return channel.UnwrapOrErr(errors.New("channel not found"))

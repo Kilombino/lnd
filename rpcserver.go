@@ -2807,6 +2807,10 @@ func (r *rpcServer) CloseChannel(in *lnrpc.CloseChannelRequest,
 		return err
 	}
 
+	// Named by its current funding output after a splice, the channel is
+	// known everywhere below by the one it was opened with.
+	*chanPoint = channel.FundingOutpoint
+
 	// We can't coop or force close restored channels or channels that have
 	// experienced local data loss. Normally we would detect this in the
 	// channel arbitrator if the channel has the status
@@ -3288,6 +3292,10 @@ func (r *rpcServer) abandonChan(chanPoint *wire.OutPoint,
 	}
 	r.server.cc.Wallet.CancelRebroadcast(*txid)
 
+	// A splice moved the channel's edge to its current funding output;
+	// read before the channel goes.
+	edgePoint := r.currentFunding(*chanPoint)
+
 	// Abandoning a channel is a three-step process: remove from the open
 	// channel state, remove from the graph, remove from the contract
 	// court. Between any step it's possible that the users restarts the
@@ -3298,7 +3306,7 @@ func (r *rpcServer) abandonChan(chanPoint *wire.OutPoint,
 		return err
 	}
 	// TODO: update to support deletions for v2 channels.
-	err = abandonChanFromGraph(r.server.v1Graph, chanPoint)
+	err = abandonChanFromGraph(r.server.v1Graph, &edgePoint)
 	if err != nil {
 		return err
 	}
@@ -3370,6 +3378,11 @@ func (r *rpcServer) AbandonChannel(_ context.Context,
 	// on-disk state, we'll remove the channel from the switch and peer
 	// state if it's been loaded in.
 	case err == nil:
+		// Named by its current funding output after a splice, the
+		// channel is known everywhere below by the one it was opened
+		// with.
+		*chanPoint = dbChan.FundingOutpoint
+
 		// If the user requested the more safe version that only allows
 		// the removal of externally (shim) funded channels that are
 		// still pending, we enforce this option now that we know the
