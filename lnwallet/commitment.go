@@ -1360,11 +1360,22 @@ func findOutputIndexesFromRemote(revocationPreimage *chainhash.Hash,
 	chanState *channeldb.OpenChannel,
 	leafStore fn.Option[AuxLeafStore]) (uint32, uint32, error) {
 
+	return findOutputIndexesIn(
+		revocationPreimage, chanState, chanState.RemoteCommitment,
+		leafStore,
+	)
+}
+
+// findOutputIndexesIn finds our and their output indexes in chanCommit, a
+// remote commitment: the channel's current one, or the one on a pending
+// splice's funding at the same height.
+func findOutputIndexesIn(revocationPreimage *chainhash.Hash,
+	chanState *channeldb.OpenChannel, chanCommit channeldb.ChannelCommitment,
+	leafStore fn.Option[AuxLeafStore]) (uint32, uint32, error) {
+
 	// Init the output indexes as empty.
 	ourIndex := uint32(channeldb.OutputIndexEmpty)
 	theirIndex := uint32(channeldb.OutputIndexEmpty)
-
-	chanCommit := chanState.RemoteCommitment
 	_, commitmentPoint := btcec.PrivKeyFromBytes(revocationPreimage[:])
 
 	// With the commitment point generated, we can now derive the king ring

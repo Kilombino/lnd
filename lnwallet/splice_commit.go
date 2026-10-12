@@ -14,6 +14,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/fn/v2"
 	"github.com/lightningnetwork/lnd/input"
 	"github.com/lightningnetwork/lnd/keychain"
@@ -190,16 +191,33 @@ func (lc *LightningChannel) AddPendingFunding(f PendingFunding) error {
 		}
 	}
 
+	p, err := lc.newPendingFunding(f)
+	if err != nil {
+		return err
+	}
+	if err := lc.channelState.EnsureSpliceRecord(p.spliceRecord()); err != nil {
+		return err
+	}
+	lc.pendingFundings = append(lc.pendingFundings, p)
+
+	return nil
+}
+
+// newPendingFunding returns a pending splice with its funding script and
+// sign descriptor.
+func (lc *LightningChannel) newPendingFunding(
+	f PendingFunding) (*pendingFunding, error) {
+
 	witnessScript, err := input.GenMultiSigScript(
 		f.LocalKey.PubKey.SerializeCompressed(),
 		f.RemoteKey.SerializeCompressed(),
 	)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	pkScript, err := input.WitnessScriptHash(witnessScript)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	p := &pendingFunding{
@@ -217,9 +235,8 @@ func (lc *LightningChannel) AddPendingFunding(f PendingFunding) error {
 		HashType:      CommitSigHashType(lc.channelState.ChanType),
 		InputIndex:    0,
 	}
-	lc.pendingFundings = append(lc.pendingFundings, p)
 
-	return nil
+	return p, nil
 }
 
 // PendingFundings returns the channel's pending splices.
@@ -513,6 +530,17 @@ func (lc *LightningChannel) SignSpliceCommitment(ctx context.Context,
 	if err != nil {
 		return nil, err
 	}
+
+	err = lc.channelState.UpdateSpliceRecord(txid,
+		func(r *channeldb.SpliceRecord) error {
+			r.RemoteTail = remote.toDiskCommit(lntypes.Remote)
+			r.SpliceSig = lc.commitSigMsg(txid, sigs)
+
+			return nil
+		})
+	if err != nil {
+		return nil, err
+	}
 	p.remote[remote.height] = remote
 
 	return sigs, nil
@@ -549,6 +577,15 @@ func (lc *LightningChannel) ReceiveSpliceCommitment(txid chainhash.Hash,
 	if err := lc.verifyCommitmentOn(p, local, keyRing, sigs); err != nil {
 		return err
 	}
+
+	err = lc.channelState.UpdateSpliceRecord(txid,
+		func(r *channeldb.SpliceRecord) error {
+			r.LocalCommit = local.toDiskCommit(lntypes.Local)
+			return nil
+		})
+	if err != nil {
+		return err
+	}
 	p.local[local.height] = local
 
 	return nil
@@ -581,4 +618,323 @@ func (lc *LightningChannel) SignedSpliceCommitment(
 		TheirKey:  keychain.KeyDescriptor{PubKey: p.RemoteKey},
 		SignDesc:  &signDesc,
 	}, lc.Signer)
+}
+
+// SpliceCommitSigs is a pending splice's member of a commitment batch.
+type SpliceCommitSigs struct {
+	// FundingTxid names the splice.
+	FundingTxid chainhash.Hash
+
+	*CommitSigs
+}
+
+// spliceRecord returns the database record of a pending splice's funding.
+func (p *pendingFunding) spliceRecord() *channeldb.SpliceRecord {
+	return &channeldb.SpliceRecord{
+		OutPoint:    p.OutPoint,
+		Capacity:    p.Capacity,
+		LocalKey:    p.LocalKey,
+		RemoteKey:   p.RemoteKey,
+		LocalDelta:  p.LocalDelta,
+		RemoteDelta: p.RemoteDelta,
+	}
+}
+
+// commitSigMsg returns signatures as the commitment_signed that carries them
+// for a splice's funding.
+func (lc *LightningChannel) commitSigMsg(txid chainhash.Hash,
+	sigs *CommitSigs) *lnwire.CommitSig {
+
+	return &lnwire.CommitSig{
+		ChanID: lnwire.NewChanIDFromOutPoint(
+			lc.channelState.FundingOutpoint,
+		),
+		CommitSig:   sigs.CommitSig,
+		HtlcSigs:    sigs.HtlcSigs,
+		FundingTxid: fn.Some(txid),
+	}
+}
+
+// signPendingFundings signs the peer's next commitment, remote, on every
+// pending splice's funding, in the set's order. Nothing is recorded: the
+// caller persists the results with the commitment step.
+func (lc *LightningChannel) signPendingFundings(ctx context.Context,
+	remote *commitment, keyRing *CommitmentKeyRing) ([]SpliceCommitSigs,
+	[]*commitment, error) {
+
+	var (
+		sigs    []SpliceCommitSigs
+		commits []*commitment
+	)
+	for _, p := range lc.pendingFundings {
+		c, err := lc.rebuildCommitment(remote, keyRing, p.commitFunding())
+		if err != nil {
+			return nil, nil, fmt.Errorf("splice %v: %w", p.txid(),
+				err)
+		}
+		s, err := lc.signCommitmentOn(ctx, p, c, keyRing)
+		if err != nil {
+			return nil, nil, err
+		}
+		sigs = append(sigs, SpliceCommitSigs{
+			FundingTxid: p.txid(), CommitSigs: s,
+		})
+		commits = append(commits, c)
+	}
+
+	return sigs, commits, nil
+}
+
+// spliceRemoteWrites returns the writes recording the peer's next
+// commitments on the pending splices' fundings, and our signatures for them.
+func (lc *LightningChannel) spliceRemoteWrites(sigs []SpliceCommitSigs,
+	commits []*commitment) []channeldb.SpliceCommitWrite {
+
+	writes := make([]channeldb.SpliceCommitWrite, len(sigs))
+	for i, s := range sigs {
+		writes[i] = channeldb.SpliceCommitWrite{
+			Txid:         s.FundingTxid,
+			RemoteTip:    commits[i].toDiskCommit(lntypes.Remote),
+			RemoteTipSig: lc.commitSigMsg(s.FundingTxid, s.CommitSigs),
+		}
+	}
+
+	return writes
+}
+
+// checkBatch checks that a batch's splice members name exactly the pending
+// splices, each once. Anything else is refused before any state changes.
+func (lc *LightningChannel) checkBatch(sigs []SpliceCommitSigs) error {
+	if len(sigs) != len(lc.pendingFundings) {
+		return fmt.Errorf("batch has %d splice signatures for %d "+
+			"pending splices", len(sigs), len(lc.pendingFundings))
+	}
+
+	seen := make(map[chainhash.Hash]bool, len(sigs))
+	for _, s := range sigs {
+		if s.CommitSigs == nil {
+			return fmt.Errorf("no signatures for splice %v",
+				s.FundingTxid)
+		}
+		if seen[s.FundingTxid] {
+			return fmt.Errorf("splice %v signed twice in a batch",
+				s.FundingTxid)
+		}
+		seen[s.FundingTxid] = true
+
+		if _, err := lc.pendingFunding(s.FundingTxid); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// verifyPendingFundings checks the peer's signatures for our next
+// commitment, local, on every pending splice's funding, and returns those
+// commitments in the set's order with the signatures on them.
+func (lc *LightningChannel) verifyPendingFundings(local *commitment,
+	keyRing *CommitmentKeyRing, sigs []SpliceCommitSigs) ([]*commitment,
+	error) {
+
+	byTxid := make(map[chainhash.Hash]*CommitSigs, len(sigs))
+	for _, s := range sigs {
+		byTxid[s.FundingTxid] = s.CommitSigs
+	}
+
+	commits := make([]*commitment, len(lc.pendingFundings))
+	for i, p := range lc.pendingFundings {
+		c, err := lc.rebuildCommitment(local, keyRing, p.commitFunding())
+		if err != nil {
+			return nil, fmt.Errorf("splice %v: %w", p.txid(), err)
+		}
+		err = lc.verifyCommitmentOn(p, c, keyRing, byTxid[p.txid()])
+		if err != nil {
+			return nil, err
+		}
+		commits[i] = c
+	}
+
+	return commits, nil
+}
+
+// requireAllSigned refuses to go on unless we hold the peer's signatures for
+// our commitment at height on every pending splice's funding: revoking the
+// previous state without them would leave a splice that confirms without a
+// commitment we can publish.
+func (lc *LightningChannel) requireAllSigned(height uint64) error {
+	for _, p := range lc.pendingFundings {
+		c, ok := p.local[height]
+		if !ok || c.sig == nil {
+			return fmt.Errorf("no signed commitment at height %d "+
+				"on splice %v", height, p.txid())
+		}
+	}
+
+	return nil
+}
+
+// spliceLocalWrites returns the writes recording our commitments at height
+// on the pending splices' fundings.
+func (lc *LightningChannel) spliceLocalWrites(
+	height uint64) []channeldb.SpliceCommitWrite {
+
+	writes := make([]channeldb.SpliceCommitWrite, len(lc.pendingFundings))
+	for i, p := range lc.pendingFundings {
+		writes[i] = channeldb.SpliceCommitWrite{
+			Txid:        p.txid(),
+			LocalCommit: p.local[height].toDiskCommit(lntypes.Local),
+		}
+	}
+
+	return writes
+}
+
+// spliceRevocationWrites returns the writes moving the peer's commitments at
+// height on the pending splices' fundings into their revocation logs, with
+// their own output indexes.
+func (lc *LightningChannel) spliceRevocationWrites(preimage *chainhash.Hash,
+	height uint64) ([]channeldb.SpliceCommitWrite, error) {
+
+	writes := make([]channeldb.SpliceCommitWrite, len(lc.pendingFundings))
+	for i, p := range lc.pendingFundings {
+		c, ok := p.remote[height]
+		if !ok {
+			return nil, fmt.Errorf("no commitment at height %d on "+
+				"splice %v to revoke", height, p.txid())
+		}
+		ours, theirs, err := findOutputIndexesIn(
+			preimage, lc.channelState,
+			*c.toDiskCommit(lntypes.Remote), lc.leafStore,
+		)
+		if err != nil {
+			return nil, err
+		}
+		writes[i] = channeldb.SpliceCommitWrite{
+			Txid:             p.txid(),
+			OurOutputIndex:   ours,
+			TheirOutputIndex: theirs,
+		}
+	}
+
+	return writes, nil
+}
+
+// pruneFundingCommits forgets the pending splices' commitments below the
+// tails of both chains.
+func (lc *LightningChannel) pruneFundingCommits() {
+	localTail := lc.commitChains.Local.tail().height
+	remoteTail := lc.commitChains.Remote.tail().height
+	for _, p := range lc.pendingFundings {
+		for h := range p.local {
+			if h < localTail {
+				delete(p.local, h)
+			}
+		}
+		for h := range p.remote {
+			if h < remoteTail {
+				delete(p.remote, h)
+			}
+		}
+	}
+}
+
+// restorePendingFundings loads the channel's pending splices after a
+// restart. Their commitments are rebuilt from the restored chains, checked
+// against the stored ones, and given back their signatures.
+func (lc *LightningChannel) restorePendingFundings() error {
+	if lc.channelState.Db == nil {
+		return nil
+	}
+	records, err := lc.channelState.SpliceRecords()
+	if err != nil {
+		return err
+	}
+
+	for _, r := range records {
+		p, err := lc.newPendingFunding(PendingFunding{
+			OutPoint: r.OutPoint, Capacity: r.Capacity,
+			LocalKey: r.LocalKey, RemoteKey: r.RemoteKey,
+			LocalDelta: r.LocalDelta, RemoteDelta: r.RemoteDelta,
+		})
+		if err != nil {
+			return err
+		}
+
+		restore := func(stored *channeldb.ChannelCommitment,
+			base *commitment, keyRing *CommitmentKeyRing,
+			into map[uint64]*commitment) error {
+
+			if stored == nil {
+				return nil
+			}
+			if stored.CommitHeight != base.height {
+				return fmt.Errorf("splice %v commitment at "+
+					"height %d, chain at %d", p.txid(),
+					stored.CommitHeight, base.height)
+			}
+			c, err := lc.rebuildCommitment(
+				base, keyRing, p.commitFunding(),
+			)
+			if err != nil {
+				return err
+			}
+			if c.txn.TxHash() != stored.CommitTx.TxHash() {
+				return fmt.Errorf("splice %v commitment at "+
+					"height %d doesn't rebuild", p.txid(),
+					base.height)
+			}
+			c.sig = stored.CommitSig
+			into[c.height] = c
+
+			return nil
+		}
+
+		localTail := lc.commitChains.Local.tail()
+		keyRing, err := lc.localKeyRing(localTail.height)
+		if err != nil {
+			return err
+		}
+		err = restore(r.LocalCommit, localTail, keyRing, p.local)
+		if err != nil {
+			return err
+		}
+
+		keyRing, err = lc.remoteKeyRing()
+		if err != nil {
+			return err
+		}
+		remoteTail := lc.commitChains.Remote.tail()
+		err = restore(r.RemoteTail, remoteTail, keyRing, p.remote)
+		if err != nil {
+			return err
+		}
+
+		remoteTip := lc.commitChains.Remote.tip()
+		switch {
+		case remoteTip != remoteTail:
+			if r.RemoteTip == nil {
+				return fmt.Errorf("splice %v without the "+
+					"peer's pending commitment", p.txid())
+			}
+			keyRing = DeriveCommitmentKeys(
+				lc.channelState.RemoteNextRevocation,
+				lntypes.Remote, lc.channelState.ChanType,
+				&lc.channelState.LocalChanCfg,
+				&lc.channelState.RemoteChanCfg,
+			)
+			err = restore(r.RemoteTip, remoteTip, keyRing, p.remote)
+			if err != nil {
+				return err
+			}
+
+		case r.RemoteTip != nil:
+			return fmt.Errorf("splice %v has a pending commitment "+
+				"the channel doesn't", p.txid())
+		}
+
+		lc.pendingFundings = append(lc.pendingFundings, p)
+	}
+
+	return nil
 }

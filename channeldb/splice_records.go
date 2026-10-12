@@ -373,7 +373,15 @@ func (c *OpenChannel) SpliceRecords() ([]*SpliceRecord, error) {
 		chanBucket, err := fetchChanBucket(
 			tx, c.IdentityPub, &c.FundingOutpoint, c.ChainHash,
 		)
-		if err != nil {
+		switch {
+		// A channel not yet saved (during funding) has none.
+		case errors.Is(err, ErrNoChanDBExists),
+			errors.Is(err, ErrNoActiveChannels),
+			errors.Is(err, ErrChannelNotFound):
+
+			return nil
+
+		case err != nil:
 			return err
 		}
 		bucket := chanBucket.NestedReadBucket(spliceRecordsBucket)
@@ -511,4 +519,72 @@ func applySpliceWrites(chanBucket kvdb.RwBucket, writes []SpliceCommitWrite,
 	}
 
 	return nil
+}
+
+// UpdateSpliceRecord changes a pending splice's record in one transaction.
+func (c *OpenChannel) UpdateSpliceRecord(txid chainhash.Hash,
+	update func(r *SpliceRecord) error) error {
+
+	c.Lock()
+	defer c.Unlock()
+
+	return kvdb.Update(c.Db.backend, func(tx kvdb.RwTx) error {
+		chanBucket, err := fetchChanBucketRw(
+			tx, c.IdentityPub, &c.FundingOutpoint, c.ChainHash,
+		)
+		if err != nil {
+			return err
+		}
+		r, err := fetchSpliceRecord(chanBucket, txid)
+		if err != nil {
+			return err
+		}
+		if err := update(r); err != nil {
+			return err
+		}
+		if r.Txid() != txid {
+			return errors.New("splice record's outpoint changed")
+		}
+
+		return putSpliceRecord(chanBucket, r)
+	}, func() {})
+}
+
+// EnsureSpliceRecord stores a pending splice's funding unless a record of it
+// exists, which must then name the same funding.
+func (c *OpenChannel) EnsureSpliceRecord(r *SpliceRecord) error {
+	c.Lock()
+	defer c.Unlock()
+
+	return kvdb.Update(c.Db.backend, func(tx kvdb.RwTx) error {
+		chanBucket, err := fetchChanBucketRw(
+			tx, c.IdentityPub, &c.FundingOutpoint, c.ChainHash,
+		)
+		if err != nil {
+			return err
+		}
+
+		have, err := fetchSpliceRecord(chanBucket, r.Txid())
+		switch {
+		case errors.Is(err, ErrSpliceRecordNotFound):
+			return putSpliceRecord(chanBucket, r)
+
+		case err != nil:
+			return err
+		}
+
+		same := have.OutPoint == r.OutPoint &&
+			have.Capacity == r.Capacity &&
+			have.LocalDelta == r.LocalDelta &&
+			have.RemoteDelta == r.RemoteDelta &&
+			have.LocalKey.KeyLocator == r.LocalKey.KeyLocator &&
+			have.LocalKey.PubKey.IsEqual(r.LocalKey.PubKey) &&
+			have.RemoteKey.IsEqual(r.RemoteKey)
+		if !same {
+			return fmt.Errorf("splice %v recorded with another "+
+				"funding", r.Txid())
+		}
+
+		return nil
+	}, func() {})
 }

@@ -1050,6 +1050,13 @@ func NewLightningChannel(signer input.Signer,
 		return nil, err
 	}
 
+	// Pending splices: their commitments are rebuilt from the chains just
+	// restored.
+	if err := lc.restorePendingFundings(); err != nil {
+		return nil, fmt.Errorf("unable to restore pending splices: %w",
+			err)
+	}
+
 	return lc, nil
 }
 
@@ -4134,6 +4141,10 @@ type NewCommitState struct {
 	// PendingHTLCs is the set of new/pending HTLCs produced by this
 	// commitment state.
 	PendingHTLCs []channeldb.HTLC
+
+	// SpliceSigs are the signatures for the same commitment on each
+	// pending splice's funding, sent in the same batch.
+	SpliceSigs []SpliceCommitSigs
 }
 
 // SignNextCommitment signs a new commitment which includes any previous
@@ -4357,6 +4368,15 @@ func (lc *LightningChannel) SignNextCommitment(
 		auxSigs = append(auxSigs, auxJobResp.SigBlob)
 	}
 
+	// The same commitment on every pending splice's funding goes out in
+	// the same batch.
+	spliceSigs, spliceCommits, err := lc.signPendingFundings(
+		ctx, newCommitView, keyRing,
+	)
+	if err != nil {
+		return nil, err
+	}
+
 	// As we're about to proposer a new commitment state for the remote
 	// party, we'll write this pending state to disk before we exit, so we
 	// can retransmit it if necessary.
@@ -4366,10 +4386,20 @@ func (lc *LightningChannel) SignNextCommitment(
 	if err != nil {
 		return nil, err
 	}
+	if len(spliceSigs) > 0 {
+		commitDiff.CommitSig.FundingTxid = fn.Some(
+			lc.channelState.CurrentFundingOutpoint().Hash,
+		)
+	}
 
-	err = lc.channelState.AppendRemoteCommitChain(commitDiff)
+	err = lc.channelState.AppendRemoteCommitChain(
+		commitDiff, lc.spliceRemoteWrites(spliceSigs, spliceCommits)...,
+	)
 	if err != nil {
 		return nil, err
+	}
+	for i, p := range lc.pendingFundings {
+		p.remote[newCommitView.height] = spliceCommits[i]
 	}
 
 	// TODO(roasbeef): check that one eclair bug
@@ -4394,6 +4424,7 @@ func (lc *LightningChannel) SignNextCommitment(
 			AuxSigBlob: auxSigBlob,
 		},
 		PendingHTLCs: commitDiff.Commitment.Htlcs,
+		SpliceSigs:   spliceSigs,
 	}, nil
 }
 
@@ -5400,8 +5431,23 @@ var _ error = (*InvalidCommitSigError)(nil)
 //
 //nolint:funlen
 func (lc *LightningChannel) ReceiveNewCommitment(commitSigs *CommitSigs) error {
+	return lc.ReceiveNewCommitmentBatch(commitSigs, nil)
+}
+
+// ReceiveNewCommitmentBatch is ReceiveNewCommitment for a channel with
+// pending splices: spliceSigs are the same commitment's signatures on each
+// pending splice's funding, and must name exactly those splices. Either every
+// signature checks out and the commitment is accepted on every funding, or
+// none is.
+func (lc *LightningChannel) ReceiveNewCommitmentBatch(commitSigs *CommitSigs,
+	spliceSigs []SpliceCommitSigs) error {
+
 	lc.Lock()
 	defer lc.Unlock()
+
+	if err := lc.checkBatch(spliceSigs); err != nil {
+		return err
+	}
 
 	// Check for empty commit sig. Because of a previously existing bug, it
 	// is possible that we receive an empty commit sig from nodes running an
@@ -5660,6 +5706,14 @@ func (lc *LightningChannel) ReceiveNewCommitment(commitSigs *CommitSigs) error {
 		return fmt.Errorf("unable to validate aux sigs: %w", err)
 	}
 
+	// The same commitment on every pending splice's funding.
+	spliceCommits, err := lc.verifyPendingFundings(
+		localCommitmentView, keyRing, spliceSigs,
+	)
+	if err != nil {
+		return err
+	}
+
 	// The signature checks out, so we can now add the new commitment to
 	// our local commitment chain. For regular channels, we can just
 	// serialize the ECDSA sig. For taproot channels, we'll serialize the
@@ -5684,6 +5738,9 @@ func (lc *LightningChannel) ReceiveNewCommitment(commitSigs *CommitSigs) error {
 	}
 
 	lc.commitChains.Local.addCommitment(localCommitmentView)
+	for i, p := range lc.pendingFundings {
+		p.local[localCommitmentView.height] = spliceCommits[i]
+	}
 
 	return nil
 }
@@ -5835,6 +5892,11 @@ func (lc *LightningChannel) RevokeCurrentCommitment() (*lnwire.RevokeAndAck,
 	lc.Lock()
 	defer lc.Unlock()
 
+	// Never revoke without the next commitment signed on every funding.
+	if err := lc.requireAllSigned(lc.currentHeight + 1); err != nil {
+		return nil, nil, nil, err
+	}
+
 	revocationMsg, err := lc.generateRevocation(lc.currentHeight)
 	if err != nil {
 		return nil, nil, nil, err
@@ -5860,10 +5922,12 @@ func (lc *LightningChannel) RevokeCurrentCommitment() (*lnwire.RevokeAndAck,
 
 	finalHtlcs, err := lc.channelState.UpdateCommitment(
 		newCommitment, unsignedAckedUpdates,
+		lc.spliceLocalWrites(lc.currentHeight)...,
 	)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	lc.pruneFundingCommits()
 
 	lc.log.Tracef("state transition accepted: "+
 		"our_balance=%v, their_balance=%v, unsigned_acked_updates=%v",
@@ -6127,9 +6191,15 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 	// sync now to ensure the revocation producer state is consistent with
 	// the current commitment height and also to advance the on-disk
 	// commitment chain.
+	spliceWrites, err := lc.spliceRevocationWrites(
+		revocation, lc.commitChains.Remote.tail().height,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
 	err = lc.channelState.AdvanceCommitChainTail(
 		fwdPkg, localPeerUpdates,
-		ourOutputIndex, theirOutputIndex,
+		ourOutputIndex, theirOutputIndex, spliceWrites...,
 	)
 	if err != nil {
 		return nil, nil, err
@@ -6138,6 +6208,7 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 	// Since they revoked the current lowest height in their commitment
 	// chain, we can advance their chain by a single commitment.
 	lc.commitChains.Remote.advanceTail()
+	lc.pruneFundingCommits()
 
 	// As we've just completed a new state transition, attempt to see if we
 	// can remove any entries from the update log which have been removed

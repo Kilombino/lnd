@@ -236,3 +236,47 @@ func TestSpliceCommitWrites(t *testing.T) {
 	)
 	require.ErrorIs(t, err, ErrLogEntryNotFound)
 }
+
+// TestEnsureAndUpdateSpliceRecord checks creating a record only once, with
+// the same funding, and changing one in place.
+func TestEnsureAndUpdateSpliceRecord(t *testing.T) {
+	t.Parallel()
+
+	fullDB, err := MakeTestDB(t)
+	require.NoError(t, err)
+	channel := createTestChannel(t, fullDB.ChannelStateDB())
+
+	r := testSpliceRecord(t, channel)
+	r.RemoteTail, r.SpliceSig = nil, nil
+	require.NoError(t, channel.EnsureSpliceRecord(r))
+
+	// Again with the same funding: kept as it is, including what was
+	// added since.
+	sig := &lnwire.CommitSig{ChanID: lnwire.ChannelID{7}, CommitSig: wireSig}
+	require.NoError(t, channel.UpdateSpliceRecord(r.Txid(),
+		func(rec *SpliceRecord) error {
+			rec.SpliceSig = sig
+			return nil
+		}))
+	require.NoError(t, channel.EnsureSpliceRecord(r))
+	records, err := channel.SpliceRecords()
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	requireSigEqual(t, sig, records[0].SpliceSig)
+
+	// With another funding: refused.
+	other := *r
+	other.LocalDelta++
+	require.Error(t, channel.EnsureSpliceRecord(&other))
+
+	// An update can't move the record to another outpoint, and an
+	// unknown splice can't be updated.
+	require.Error(t, channel.UpdateSpliceRecord(r.Txid(),
+		func(rec *SpliceRecord) error {
+			rec.OutPoint.Hash[0] ^= 1
+			return nil
+		}))
+	require.ErrorIs(t, channel.UpdateSpliceRecord(chainhash.Hash{1},
+		func(*SpliceRecord) error { return nil }),
+		ErrSpliceRecordNotFound)
+}

@@ -134,14 +134,14 @@ func addSplice(t *testing.T, alice, bob *LightningChannel, keys spliceKeys,
 
 	require.NoError(t, alice.AddPendingFunding(PendingFunding{
 		OutPoint: op, Capacity: capacity,
-		LocalKey:  keychain.KeyDescriptor{PubKey: keys.alice.PubKey()},
-		RemoteKey: keys.bob.PubKey(),
+		LocalKey:   keychain.KeyDescriptor{PubKey: keys.alice.PubKey()},
+		RemoteKey:  keys.bob.PubKey(),
 		LocalDelta: aliceDelta, RemoteDelta: bobDelta,
 	}))
 	require.NoError(t, bob.AddPendingFunding(PendingFunding{
 		OutPoint: op, Capacity: capacity,
-		LocalKey:  keychain.KeyDescriptor{PubKey: keys.bob.PubKey()},
-		RemoteKey: keys.alice.PubKey(),
+		LocalKey:   keychain.KeyDescriptor{PubKey: keys.bob.PubKey()},
+		RemoteKey:  keys.alice.PubKey(),
 		LocalDelta: bobDelta, RemoteDelta: aliceDelta,
 	}))
 
@@ -475,3 +475,251 @@ func (lc *LightningChannel) SignNextCommitmentForTest() (lnwire.Sig, error) {
 	return lnwire.NewSigFromSignature(raw)
 }
 
+// forceBatchTransition is ForceStateTransition for channels with pending
+// splices: every commitment goes out as a batch.
+func forceBatchTransition(t *testing.T, a, b *LightningChannel) {
+	t.Helper()
+
+	aCommit, err := a.SignNextCommitment(ctxb)
+	require.NoError(t, err)
+	require.NoError(t, b.ReceiveNewCommitmentBatch(
+		aCommit.CommitSigs, aCommit.SpliceSigs,
+	))
+	bRev, _, _, err := b.RevokeCurrentCommitment()
+	require.NoError(t, err)
+	bCommit, err := b.SignNextCommitment(ctxb)
+	require.NoError(t, err)
+	_, _, err = a.ReceiveRevocation(bRev)
+	require.NoError(t, err)
+	require.NoError(t, a.ReceiveNewCommitmentBatch(
+		bCommit.CommitSigs, bCommit.SpliceSigs,
+	))
+	aRev, _, _, err := a.RevokeCurrentCommitment()
+	require.NoError(t, err)
+	_, _, err = b.ReceiveRevocation(aRev)
+	require.NoError(t, err)
+}
+
+// splicedPair returns two channels with HTLCs and a pending splice whose own
+// commitments have been exchanged.
+func splicedPair(t *testing.T, aliceDelta,
+	bobDelta btcutil.Amount) (*LightningChannel, *LightningChannel,
+	chainhash.Hash) {
+
+	t.Helper()
+
+	alice, bob, err := CreateTestChannels(t, spliceChanTypes["anchors"])
+	require.NoError(t, err)
+	withHTLCs(t, alice, bob)
+
+	keys := newSpliceKeys(t, alice, bob)
+	txid := chainhash.Hash{0x5c}
+	addSplice(t, alice, bob, keys, txid, aliceDelta, bobDelta)
+	exchangeSpliceCommitments(t, alice, bob, txid)
+
+	return alice, bob, txid
+}
+
+// TestSpliceBatchTransitions checks state transitions while a splice is
+// pending: every commitment is signed and checked on both fundings, the
+// commitment on the splice's funding follows the channel (a new HTLC shows
+// up on it), the peer's revoked commitments on it are logged with their own
+// txid and output indexes, and all of it survives restarts at rest and with
+// a commitment in flight.
+func TestSpliceBatchTransitions(t *testing.T) {
+	t.Parallel()
+
+	alice, bob, txid := splicedPair(t, 100_000_000, 0)
+
+	before, err := bob.SignedSpliceCommitment(txid)
+	require.NoError(t, err)
+
+	// A new HTLC from Alice, locked in on both fundings.
+	htlc, _ := createHTLC(3, lnwire.NewMSatFromSatoshis(400_000))
+	addAndReceiveHTLC(t, alice, bob, htlc, nil)
+
+	// Bob's commitment on the splice's funding at his current height:
+	// what Alice will log once he revokes it.
+	bobHeight := bob.commitChains.Local.tail().height
+	p, err := bob.pendingFunding(txid)
+	require.NoError(t, err)
+	bobRevoked := p.local[bobHeight]
+	require.NotNil(t, bobRevoked)
+
+	forceBatchTransition(t, alice, bob)
+	forceBatchTransition(t, alice, bob)
+
+	after, err := bob.SignedSpliceCommitment(txid)
+	require.NoError(t, err)
+	requireSpends(t, bob, txid, after)
+	require.Len(t, after.TxOut, len(before.TxOut)+1)
+
+	tx, err := alice.SignedSpliceCommitment(txid)
+	require.NoError(t, err)
+	requireSpends(t, alice, txid, tx)
+
+	// Alice's log of Bob's revoked commitment on the splice's funding.
+	rl, err := alice.channelState.FetchSpliceRevocationLog(
+		txid, bobHeight,
+	)
+	require.NoError(t, err)
+	require.Equal(t, [32]byte(bobRevoked.txn.TxHash()), rl.CommitTxHash.Val)
+	ours := bobRevoked.txn.TxOut[rl.OurOutputIndex.Val]
+	require.Equal(t, int64(bobRevoked.theirBalance.ToSatoshis()),
+		ours.Value)
+	theirs := bobRevoked.txn.TxOut[rl.TheirOutputIndex.Val]
+	require.Equal(t, int64(bobRevoked.ourBalance.ToSatoshis()),
+		theirs.Value)
+
+	// It isn't the channel's own entry at that height.
+	own, _, err := alice.channelState.FindPreviousState(bobHeight)
+	require.NoError(t, err)
+	require.NotEqual(t, own.CommitTxHash.Val, rl.CommitTxHash.Val)
+
+	// Restart both at rest: the same commitments come back.
+	alice, err = restartChannel(alice)
+	require.NoError(t, err)
+	bob, err = restartChannel(bob)
+	require.NoError(t, err)
+	again, err := bob.SignedSpliceCommitment(txid)
+	require.NoError(t, err)
+	require.Equal(t, after.TxHash(), again.TxHash())
+
+	// Restart Alice with her commitment in flight.
+	htlc, _ = createHTLC(4, lnwire.NewMSatFromSatoshis(120_000))
+	addAndReceiveHTLC(t, alice, bob, htlc, nil)
+	aCommit, err := alice.SignNextCommitment(ctxb)
+	require.NoError(t, err)
+	require.Len(t, aCommit.SpliceSigs, 1)
+
+	alice, err = restartChannel(alice)
+	require.NoError(t, err)
+
+	require.NoError(t, bob.ReceiveNewCommitmentBatch(
+		aCommit.CommitSigs, aCommit.SpliceSigs,
+	))
+	bRev, _, _, err := bob.RevokeCurrentCommitment()
+	require.NoError(t, err)
+	_, _, err = alice.ReceiveRevocation(bRev)
+	require.NoError(t, err)
+	forceBatchTransition(t, alice, bob)
+
+	final, err := bob.SignedSpliceCommitment(txid)
+	require.NoError(t, err)
+	requireSpends(t, bob, txid, final)
+	require.Len(t, final.TxOut, len(after.TxOut)+1)
+}
+
+// TestSpliceBatchRefused checks that a commitment batch must name exactly
+// the pending splices, each once, with valid signatures, and that no
+// revocation goes out without the next commitment signed on every funding.
+func TestSpliceBatchRefused(t *testing.T) {
+	t.Parallel()
+
+	alice, bob, txid := splicedPair(t, 0, 60_000_000)
+
+	htlc, _ := createHTLC(3, lnwire.NewMSatFromSatoshis(400_000))
+	addAndReceiveHTLC(t, alice, bob, htlc, nil)
+	aCommit, err := alice.SignNextCommitment(ctxb)
+	require.NoError(t, err)
+	require.Len(t, aCommit.SpliceSigs, 1)
+	member := aCommit.SpliceSigs[0]
+	require.Equal(t, txid, member.FundingTxid)
+
+	// The current funding's signatures alone.
+	require.Error(t, bob.ReceiveNewCommitment(aCommit.CommitSigs))
+
+	// A member for a splice Bob doesn't know.
+	unknown := member
+	unknown.FundingTxid = chainhash.Hash{0xdd}
+	require.ErrorIs(t, bob.ReceiveNewCommitmentBatch(
+		aCommit.CommitSigs, []SpliceCommitSigs{unknown},
+	), ErrUnknownFunding)
+
+	// The same splice twice, or an extra member.
+	require.Error(t, bob.ReceiveNewCommitmentBatch(
+		aCommit.CommitSigs, []SpliceCommitSigs{member, member},
+	))
+	require.Error(t, bob.ReceiveNewCommitmentBatch(
+		aCommit.CommitSigs, []SpliceCommitSigs{member, unknown},
+	))
+
+	// Nothing was accepted: no revocation can go out.
+	_, _, _, err = bob.RevokeCurrentCommitment()
+	require.Error(t, err)
+
+	// The splice member signed for the current funding instead.
+	forged := member
+	forgedSigs := *member.CommitSigs
+	forgedSigs.CommitSig = aCommit.CommitSig
+	forged.CommitSigs = &forgedSigs
+	var sigErr *InvalidCommitSigError
+	require.ErrorAs(t, bob.ReceiveNewCommitmentBatch(
+		aCommit.CommitSigs, []SpliceCommitSigs{forged},
+	), &sigErr)
+
+	_, _, _, err = bob.RevokeCurrentCommitment()
+	require.Error(t, err)
+}
+
+// TestSpliceBatchTwoPending checks a batch with two pending splices (the
+// shape replacement attempts take): both are signed, a batch naming one of
+// them twice is refused, and both commitments follow the channel.
+func TestSpliceBatchTwoPending(t *testing.T) {
+	t.Parallel()
+
+	alice, bob, first := splicedPair(t, 100_000_000, 0)
+
+	keys := newSpliceKeys(t, alice, bob)
+	second := chainhash.Hash{0x5d}
+	addSplice(t, alice, bob, keys, second, 90_000_000, 0)
+	exchangeSpliceCommitments(t, alice, bob, second)
+
+	htlc, _ := createHTLC(3, lnwire.NewMSatFromSatoshis(400_000))
+	addAndReceiveHTLC(t, alice, bob, htlc, nil)
+	aCommit, err := alice.SignNextCommitment(ctxb)
+	require.NoError(t, err)
+	require.Len(t, aCommit.SpliceSigs, 2)
+
+	twice := []SpliceCommitSigs{aCommit.SpliceSigs[0], aCommit.SpliceSigs[0]}
+	require.ErrorContains(t, bob.ReceiveNewCommitmentBatch(
+		aCommit.CommitSigs, twice,
+	), "twice")
+
+	// In either order, the right members pass.
+	reversed := []SpliceCommitSigs{aCommit.SpliceSigs[1], aCommit.SpliceSigs[0]}
+	require.NoError(t, bob.ReceiveNewCommitmentBatch(
+		aCommit.CommitSigs, reversed,
+	))
+	bRev, _, _, err := bob.RevokeCurrentCommitment()
+	require.NoError(t, err)
+	_, _, err = alice.ReceiveRevocation(bRev)
+	require.NoError(t, err)
+	forceBatchTransition(t, bob, alice)
+
+	for _, txid := range []chainhash.Hash{first, second} {
+		for _, lc := range []*LightningChannel{alice, bob} {
+			tx, err := lc.SignedSpliceCommitment(txid)
+			require.NoError(t, err)
+			requireSpends(t, lc, txid, tx)
+		}
+	}
+
+	// Members swapped between the two splices. Last: a signature that
+	// doesn't verify ends the channel's updates, as on any channel.
+	htlc, _ = createHTLC(4, lnwire.NewMSatFromSatoshis(100_000))
+	addAndReceiveHTLC(t, alice, bob, htlc, nil)
+	aCommit, err = alice.SignNextCommitment(ctxb)
+	require.NoError(t, err)
+	swapped := []SpliceCommitSigs{{
+		FundingTxid: aCommit.SpliceSigs[0].FundingTxid,
+		CommitSigs:  aCommit.SpliceSigs[1].CommitSigs,
+	}, {
+		FundingTxid: aCommit.SpliceSigs[1].FundingTxid,
+		CommitSigs:  aCommit.SpliceSigs[0].CommitSigs,
+	}}
+	var sigErr *InvalidCommitSigError
+	require.ErrorAs(t, bob.ReceiveNewCommitmentBatch(
+		aCommit.CommitSigs, swapped,
+	), &sigErr)
+}
