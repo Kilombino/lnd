@@ -24,16 +24,18 @@ import (
 
 // Splice status codes of a channel, as Channel.splice_status reports them.
 const (
-	spliceStatusOK              = "ok"
-	spliceStatusDisabled        = "disabled"
-	spliceStatusPeerOffline     = "peer_offline"
-	spliceStatusPeerUnsupported = "peer_unsupported"
-	spliceStatusNoUnifiedSigs   = "no_unified_sigs"
-	spliceStatusTaproot         = "taproot"
-	spliceStatusZeroConf        = "zero_conf"
-	spliceStatusPending         = "pending"
-	spliceStatusClosing         = "closing"
-	spliceStatusSpentUnknown    = "funding_spent_unknown"
+	spliceStatusOK                = "ok"
+	spliceStatusDisabled          = "disabled"
+	spliceStatusPeerOffline       = "peer_offline"
+	spliceStatusPeerUnsupported   = "peer_unsupported"
+	spliceStatusNoUnifiedSigs     = "no_unified_sigs"
+	spliceStatusTaproot           = "taproot"
+	spliceStatusZeroConf          = "zero_conf"
+	spliceStatusPending           = "pending"
+	spliceStatusClosing           = "closing"
+	spliceStatusPeerNotLocked     = "peer_not_locked"
+	spliceStatusPeerNotAnnouncing = "peer_not_announcing"
+	spliceStatusSpentUnknown      = "funding_spent_unknown"
 )
 
 // spliceChannel finds a channel by its current or original channel point.
@@ -93,7 +95,14 @@ func (r *rpcServer) spliceStatus(
 		return spliceStatusZeroConf, nil
 
 	case pending:
+		if r.peerNotLocked(ch) {
+			return spliceStatusPeerNotLocked, nil
+		}
+
 		return spliceStatusPending, nil
+
+	case r.peerNotAnnouncing(ch):
+		return spliceStatusPeerNotAnnouncing, nil
 
 	case !r.cfg.ProtocolOptions.Splice():
 		return spliceStatusDisabled, nil
@@ -524,6 +533,68 @@ func (r *rpcServer) spliceConfirmations(rec *channeldb.SpliceRecord) uint32 {
 	}
 
 	return confs
+}
+
+// How long a peer may take over the steps after a splice confirms before
+// the channel's status says so: splice_locked within 144 blocks of our
+// lock depth, and its half of the announcement within 72 blocks of the
+// six-block announcement depth.
+const (
+	spliceLockedGrace   = 144
+	spliceAnnounceGrace = 6 + 72
+)
+
+// peerNotLocked reports whether we sent splice_locked for the channel's
+// splice and the peer, spliceLockedGrace blocks past our lock depth, still
+// hasn't.
+func (r *rpcServer) peerNotLocked(ch *channeldb.OpenChannel) bool {
+	records, err := ch.SpliceRecords()
+	if err != nil {
+		return false
+	}
+	for _, rec := range records {
+		n := rec.Negotiation
+		if rec.Retired || n == nil || !n.LockedSent || n.LockedReceived {
+			continue
+		}
+		depth := spliceLockDepth(
+			ch.NumConfsRequired,
+			btcutil.Amount(max(0, int64(rec.RemoteDelta))),
+		)
+		if spliceOverdue(r.spliceConfirmations(rec), depth,
+			spliceLockedGrace) {
+
+			return true
+		}
+	}
+
+	return false
+}
+
+// peerNotAnnouncing reports whether a public channel moved by a splice is
+// still unannounced on its new funding spliceAnnounceGrace blocks after it
+// confirmed: the peer never sent its half.
+func (r *rpcServer) peerNotAnnouncing(ch *channeldb.OpenChannel) bool {
+	if !r.server.spliceAnnouncementPending(ch) {
+		return false
+	}
+	_, best, err := r.server.cc.ChainIO.GetBestBlock()
+	if err != nil || best <= 0 {
+		return false
+	}
+	confirmed := ch.CurrentShortChanID().BlockHeight
+	if confirmed == 0 || uint32(best) < confirmed {
+		return false
+	}
+
+	return spliceOverdue(
+		uint32(best)-confirmed+1, 0, spliceAnnounceGrace,
+	)
+}
+
+// spliceOverdue reports whether confirmations are grace past a depth.
+func spliceOverdue(confs, depth, grace uint32) bool {
+	return confs >= depth+grace
 }
 
 // spliceRelay returns what the channel's splice machine knows of a splice

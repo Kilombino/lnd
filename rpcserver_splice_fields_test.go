@@ -150,3 +150,17 @@ func TestSpliceBalances(t *testing.T) {
 	_, b = spliceBalances(out, confirmations, ours)
 	require.Zero(t, b)
 }
+
+// TestSpliceOverdue checks when a peer is late with the steps after a
+// splice confirms.
+func TestSpliceOverdue(t *testing.T) {
+	t.Parallel()
+
+	// splice_locked: 144 blocks past our lock depth.
+	require.False(t, spliceOverdue(149, 6, spliceLockedGrace))
+	require.True(t, spliceOverdue(150, 6, spliceLockedGrace))
+
+	// The announcement: 72 blocks past the six-block depth.
+	require.False(t, spliceOverdue(77, 0, spliceAnnounceGrace))
+	require.True(t, spliceOverdue(78, 0, spliceAnnounceGrace))
+}
