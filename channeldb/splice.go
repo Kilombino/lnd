@@ -190,6 +190,18 @@ func swapSpliceCommitments(chanBucket kvdb.RwBucket, channel *OpenChannel,
 		return err
 	}
 
+	// The funding being left, with the peer's commitments on it not yet
+	// revoked: they are logged as they are revoked.
+	oldRemote := channel.RemoteCommitment
+	retired := &SpliceRecord{
+		OutPoint:   channel.CurrentFundingOutpoint(),
+		Capacity:   channel.Capacity,
+		LocalKey:   channel.LocalChanCfg.MultiSigKey,
+		RemoteKey:  channel.RemoteChanCfg.MultiSigKey.PubKey,
+		RemoteTail: &oldRemote,
+		Retired:    true,
+	}
+
 	diffBytes := chanBucket.Get(commitDiffKey)
 	switch {
 	case diffBytes == nil && l.RemoteTip != nil:
@@ -210,6 +222,8 @@ func swapSpliceCommitments(chanBucket kvdb.RwBucket, channel *OpenChannel,
 			return errors.New("splice lock pending commitment " +
 				"doesn't match")
 		}
+		oldTip := diff.Commitment
+		retired.RemoteTip = &oldTip
 		diff.Commitment = *l.RemoteTip
 		diff.CommitSig = record.RemoteTipSig
 
@@ -222,7 +236,31 @@ func swapSpliceCommitments(chanBucket kvdb.RwBucket, channel *OpenChannel,
 		}
 	}
 
-	return chanBucket.DeleteNestedBucket(spliceRecordsBucket)
+	// Every pending splice goes; earlier retired fundings stay until
+	// their commitments are logged.
+	bucket := chanBucket.NestedReadWriteBucket(spliceRecordsBucket)
+	var drop [][]byte
+	err = bucket.ForEach(func(k, v []byte) error {
+		r, err := decodeSpliceRecord(bytes.NewReader(v))
+		if err != nil {
+			return err
+		}
+		if !r.Retired {
+			drop = append(drop, append([]byte(nil), k...))
+		}
+
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	for _, k := range drop {
+		if err := bucket.Delete(k); err != nil {
+			return err
+		}
+	}
+
+	return putSpliceRecord(chanBucket, retired)
 }
 
 // splicePreviousFundingsBucket keeps the funding outputs a channel moved

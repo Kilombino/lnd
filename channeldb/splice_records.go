@@ -76,6 +76,13 @@ type SpliceRecord struct {
 	// SpliceSig is our commitment_signed for the splice itself, sent
 	// again if the peer asks for it on reconnecting.
 	SpliceSig *lnwire.CommitSig
+
+	// Retired marks the funding a splice that locked moved the channel
+	// away from, kept only until the peer's commitments on it that were
+	// unrevoked at the lock are revoked and logged: a reorg can bring
+	// that funding back, and a revoked commitment on it must still be
+	// punished. It has no commitments of ours and is never signed for.
+	Retired bool
 }
 
 // Txid returns the splice transaction's id.
@@ -117,6 +124,7 @@ const (
 	spliceRemoteTipType    tlv.Type = 8
 	spliceRemoteTipSigType tlv.Type = 9
 	spliceSpliceSigType    tlv.Type = 10
+	spliceRetiredType      tlv.Type = 11
 )
 
 // encodeSpliceRecord serializes a record as a TLV stream.
@@ -198,6 +206,12 @@ func encodeSpliceRecord(w io.Writer, r *SpliceRecord) error {
 	if err := sig(spliceSpliceSigType, r.SpliceSig); err != nil {
 		return err
 	}
+	if r.Retired {
+		retired := uint8(1)
+		records = append(records, tlv.MakePrimitiveRecord(
+			spliceRetiredType, &retired,
+		))
+	}
 
 	stream, err := tlv.NewStream(records...)
 	if err != nil {
@@ -214,6 +228,7 @@ func decodeSpliceRecord(rd io.Reader) (*SpliceRecord, error) {
 		capacity, localDelta, remoteDelta  uint64
 		localCommit, remoteTail, remoteTip []byte
 		remoteTipSig, spliceSig            []byte
+		retired                            uint8
 		r                                  SpliceRecord
 	)
 	stream, err := tlv.NewStream(
@@ -228,6 +243,7 @@ func decodeSpliceRecord(rd io.Reader) (*SpliceRecord, error) {
 		tlv.MakePrimitiveRecord(spliceRemoteTipType, &remoteTip),
 		tlv.MakePrimitiveRecord(spliceRemoteTipSigType, &remoteTipSig),
 		tlv.MakePrimitiveRecord(spliceSpliceSigType, &spliceSig),
+		tlv.MakePrimitiveRecord(spliceRetiredType, &retired),
 	)
 	if err != nil {
 		return nil, err
@@ -266,6 +282,7 @@ func decodeSpliceRecord(rd io.Reader) (*SpliceRecord, error) {
 	}
 	r.LocalDelta = btcutil.Amount(int64(localDelta))
 	r.RemoteDelta = btcutil.Amount(int64(remoteDelta))
+	r.Retired = retired == 1
 
 	commit := func(b []byte) (*ChannelCommitment, error) {
 		if b == nil {
@@ -425,12 +442,7 @@ func (c *OpenChannel) DeleteSpliceRecord(txid chainhash.Hash) error {
 		if err != nil {
 			return err
 		}
-		bucket := chanBucket.NestedReadWriteBucket(spliceRecordsBucket)
-		if bucket == nil || bucket.Get(txid[:]) == nil {
-			return ErrSpliceRecordNotFound
-		}
-
-		return bucket.Delete(txid[:])
+		return deleteSpliceRecord(chanBucket, txid)
 	}, func() {})
 }
 
@@ -493,7 +505,11 @@ func applySpliceWrites(chanBucket kvdb.RwBucket, writes []SpliceCommitWrite,
 		}
 
 		if revoke {
-			if r.RemoteTail == nil || r.RemoteTip == nil {
+			// A retired funding revokes its last commitment
+			// without a next one.
+			if r.RemoteTail == nil ||
+				(r.RemoteTip == nil && !r.Retired) {
+
 				return fmt.Errorf("splice %v: nothing to "+
 					"revoke", w.Txid)
 			}
@@ -516,6 +532,16 @@ func applySpliceWrites(chanBucket kvdb.RwBucket, writes []SpliceCommitWrite,
 			}
 			r.RemoteTail, r.RemoteTip = r.RemoteTip, nil
 			r.RemoteTipSig = nil
+
+			// Everything on a retired funding is logged.
+			if r.Retired && r.RemoteTail == nil {
+				err := deleteSpliceRecord(chanBucket, w.Txid)
+				if err != nil {
+					return err
+				}
+
+				continue
+			}
 		}
 
 		if err := putSpliceRecord(chanBucket, r); err != nil {
@@ -524,6 +550,38 @@ func applySpliceWrites(chanBucket kvdb.RwBucket, writes []SpliceCommitWrite,
 	}
 
 	return nil
+}
+
+// deleteSpliceRecord removes a record from the channel's bucket.
+func deleteSpliceRecord(chanBucket kvdb.RwBucket, txid chainhash.Hash) error {
+	bucket := chanBucket.NestedReadWriteBucket(spliceRecordsBucket)
+	if bucket == nil || bucket.Get(txid[:]) == nil {
+		return ErrSpliceRecordNotFound
+	}
+
+	return bucket.Delete(txid[:])
+}
+
+// FindPreviousStateFor is FindPreviousState for a revoked commitment that
+// spends funding: the entry of the peer's commitment on that funding at the
+// height. While a splice was pending, and for the funding a lock replaced,
+// those are in the splice's own log; otherwise in the channel's.
+func (c *OpenChannel) FindPreviousStateFor(funding wire.OutPoint,
+	updateNum uint64) (*RevocationLog, *ChannelCommitment, error) {
+
+	rl, err := c.FetchSpliceRevocationLog(funding.Hash, updateNum)
+	switch {
+	case err == nil:
+		return rl, nil, nil
+
+	case !errors.Is(err, ErrLogEntryNotFound) &&
+		!errors.Is(err, ErrNoActiveChannels) &&
+		!errors.Is(err, ErrChannelNotFound):
+
+		return nil, nil, err
+	}
+
+	return c.FindPreviousState(updateNum)
 }
 
 // UpdateSpliceRecord changes a pending splice's record in one transaction.

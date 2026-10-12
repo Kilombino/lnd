@@ -356,7 +356,74 @@ func TestLockSpliceSwapsCommitments(t *testing.T) {
 		diff.Commitment.CommitTx.TxHash())
 	requireSigEqual(t, tipSig, diff.CommitSig)
 
+	// The splice's record is gone; the funding left behind stays as a
+	// retired record with the peer's commitments on it, unrevoked at the
+	// lock.
 	records, err = fetched.SpliceRecords()
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	retired := records[0]
+	require.True(t, retired.Retired)
+	require.Equal(t, channel.FundingOutpoint, retired.OutPoint)
+	oldTail := retired.RemoteTail
+	require.Equal(t, remote.CommitHeight, oldTail.CommitHeight)
+	require.NotEqual(t, remote.CommitTx.TxHash(),
+		oldTail.CommitTx.TxHash())
+	require.Equal(t, pending.CommitTx.TxHash(),
+		retired.RemoteTip.CommitTx.TxHash())
+
+	// The peer revokes both: each goes into the old funding's log, then
+	// the record goes.
+	retiredTxid := channel.FundingOutpoint.Hash
+	for i, height := range []uint64{
+		oldTail.CommitHeight, oldTail.CommitHeight + 1,
+	} {
+		next, err := btcec.NewPrivateKey()
+		require.NoError(t, err)
+		channel.RemoteCurrentRevocation = channel.RemoteNextRevocation
+		channel.RemoteNextRevocation = next.PubKey()
+
+		if i == 1 {
+			pending := channel.RemoteCommitment
+			pending.CommitHeight = height + 1
+			require.NoError(t, channel.AppendRemoteCommitChain(
+				&CommitDiff{
+					Commitment: pending,
+					CommitSig: &lnwire.CommitSig{
+						ChanID:    lnwire.ChannelID(key),
+						CommitSig: wireSig,
+					},
+				},
+			))
+		}
+		require.NoError(t, channel.AdvanceCommitChainTail(
+			NewFwdPkg(channel.ShortChanID(), height, nil, nil),
+			nil, 0, 1, SpliceCommitWrite{
+				Txid: retiredTxid, OurOutputIndex: 1,
+				TheirOutputIndex: 0,
+			},
+		))
+
+		rl, _, err := channel.FindPreviousStateFor(
+			channel.FundingOutpoint, height,
+		)
+		require.NoError(t, err)
+		require.EqualValues(t, 1, rl.OurOutputIndex.Val)
+
+		// The new funding's commitment at that height is in the
+		// channel's own log.
+		own, _, err := channel.FindPreviousStateFor(r.OutPoint, height)
+		require.NoError(t, err)
+		require.NotEqual(t, own.CommitTxHash.Val, rl.CommitTxHash.Val)
+	}
+
+	rl, _, err := channel.FindPreviousStateFor(
+		channel.FundingOutpoint, oldTail.CommitHeight,
+	)
+	require.NoError(t, err)
+	require.Equal(t, [32]byte(oldTail.CommitTx.TxHash()), rl.CommitTxHash.Val)
+
+	records, err = channel.SpliceRecords()
 	require.NoError(t, err)
 	require.Empty(t, records)
 }
