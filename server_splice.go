@@ -3,7 +3,9 @@ package lnd
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
+	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil"
@@ -70,8 +72,13 @@ type utxoDetailer interface {
 	GetUtxoDetails(op *wire.OutPoint) (*wire.TxOut, uint32, bool, error)
 }
 
-// ConfirmedOutput implements splice.Chain. A backend that can't tell refuses
-// every peer input.
+// confirmedOutputTimeout bounds the backend's answer about a peer's coin:
+// the channel is quiescent while the peer's splice is negotiated, and a
+// stalled backend would hold it so.
+var confirmedOutputTimeout = 10 * time.Second
+
+// ConfirmedOutput implements splice.Chain. A backend that can't tell, or
+// doesn't within confirmedOutputTimeout, refuses the peer's coin.
 func (c *spliceChain) ConfirmedOutput(op wire.OutPoint) (*wire.TxOut, uint32,
 	bool, error) {
 
@@ -81,7 +88,34 @@ func (c *spliceChain) ConfirmedOutput(op wire.OutPoint) (*wire.TxOut, uint32,
 			"unspent outputs")
 	}
 
-	return d.GetUtxoDetails(&op)
+	type answer struct {
+		out      *wire.TxOut
+		confs    uint32
+		coinbase bool
+		err      error
+	}
+	done := make(chan answer, 1)
+	go func() {
+		out, confs, coinbase, err := d.GetUtxoDetails(&op)
+		done <- answer{out, confs, coinbase, err}
+	}()
+
+	select {
+	case a := <-done:
+		return a.out, a.confs, a.coinbase, a.err
+
+	case <-time.After(confirmedOutputTimeout):
+		return nil, 0, false, fmt.Errorf("backend didn't answer about "+
+			"%v within %v", op, confirmedOutputTimeout)
+	}
+}
+
+// Synced implements splice.Chain: whether the wallet has caught up with
+// the backend's chain.
+func (c *spliceChain) Synced() bool {
+	synced, _, err := c.wallet.IsSynced()
+
+	return err == nil && synced
 }
 
 // spliceLockDepth is the confirmations at which a splice of a channel locks:

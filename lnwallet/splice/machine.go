@@ -106,6 +106,11 @@ type Chain interface {
 	// and whether a coinbase transaction created it, or an error when
 	// the backend doesn't know it as unspent.
 	ConfirmedOutput(op wire.OutPoint) (*wire.TxOut, uint32, bool, error)
+
+	// Synced reports whether this node has caught up with the chain: a
+	// splice negotiated before would check the peer's coins and fees
+	// against an old view of it.
+	Synced() bool
 }
 
 // Policy is this node's splice policy.
@@ -706,6 +711,9 @@ func (m *Machine) spliceable() string {
 
 	case m.misbehaved || m.cfg.Limits.isMisbehaved(m.cfg.ChanID):
 		return codePeerMisbehaved
+
+	case m.cfg.Chain != nil && !m.cfg.Chain.Synced():
+		return codeChainNotSynced
 
 	case m.active != nil || len(m.cfg.Channel.PendingFundings()) > 0:
 		return codePending

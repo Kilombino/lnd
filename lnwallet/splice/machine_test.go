@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"math"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -137,6 +138,9 @@ type testChain struct {
 	height uint32
 	outs   map[wire.OutPoint]*wire.TxOut
 
+	// behind is set to report the node still catching up.
+	behind atomic.Bool
+
 	mu     sync.Mutex
 	confs  map[confKey][]*chainntnfs.ConfirmationEvent
 	spends map[wire.OutPoint][]chan *chainntnfs.SpendDetail
@@ -175,6 +179,10 @@ func (c *testChain) RegisterConfirmationsNtfn(txid *chainhash.Hash, _ []byte,
 	c.confs[k] = append(c.confs[k], ev)
 
 	return ev, nil
+}
+
+func (c *testChain) Synced() bool {
+	return !c.behind.Load()
 }
 
 func (c *testChain) RegisterSpendNtfn(op *wire.OutPoint, _ []byte,
@@ -848,6 +856,16 @@ func TestAcceptSpliceRefused(t *testing.T) {
 				require.Empty(t, h.bob.PendingFundings())
 			})
 	}
+
+	t.Run("still catching up with the chain", func(t *testing.T) {
+		t.Parallel()
+
+		h := newAcceptorHarness(t)
+		h.chain.behind.Store(true)
+		init(h, 1_000_000, 2_500)
+		require.Contains(t, abortReason(t, h), codeChainNotSynced)
+		requireResumed(t, h)
+	})
 
 	t.Run("locktime as a time", func(t *testing.T) {
 		t.Parallel()

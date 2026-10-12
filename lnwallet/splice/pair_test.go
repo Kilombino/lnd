@@ -384,6 +384,20 @@ func TestSpliceRequestRefused(t *testing.T) {
 		require.Zero(t, p.alice.wallet.leaseCount())
 	})
 
+	t.Run("still catching up with the chain", func(t *testing.T) {
+		t.Parallel()
+
+		p := newSplicePair(t)
+		p.alice.fund(t, 1, 1_000_000)
+		p.chain.behind.Store(true)
+		_, err := p.alice.machine.Splice(Request{
+			Direction: DirectionIn, Amount: 500_000,
+			FeeRate: 2_500,
+		})
+		require.ErrorIs(t, err, ErrRefused)
+		require.ErrorContains(t, err, codeChainNotSynced)
+	})
+
 	t.Run("fee below floor", func(t *testing.T) {
 		t.Parallel()
 
