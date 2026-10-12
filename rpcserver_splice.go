@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/txscript"
@@ -411,6 +412,11 @@ func (r *rpcServer) addSpliceFields(ch *channeldb.OpenChannel,
 			continue
 		}
 		channel.PendingSplice = rpcPendingSplice(rec)
+		if spliceWentOut(rec) {
+			relay := r.spliceRelay(ch, rec.Txid())
+			channel.PendingSplice.RelayStatus = string(relay.State)
+			channel.PendingSplice.RelayReason = relay.Reason
+		}
 		setSpliceDepth(
 			channel.PendingSplice, r.spliceConfirmations(rec),
 			spliceLockDepth(
@@ -464,6 +470,26 @@ func (r *rpcServer) spliceConfirmations(rec *channeldb.SpliceRecord) uint32 {
 	}
 
 	return confs
+}
+
+// spliceRelay returns what the channel's splice machine knows of a splice
+// transaction's relay; unknown while the peer is offline.
+func (r *rpcServer) spliceRelay(ch *channeldb.OpenChannel,
+	txid chainhash.Hash) splice.RelayStatus {
+
+	unknown := splice.RelayStatus{State: splice.RelayUnknown}
+	p, err := r.server.FindPeer(ch.IdentityPub)
+	if err != nil {
+		return unknown
+	}
+	m, ok := p.SpliceMachine(lnwire.NewChanIDFromOutPoint(
+		ch.FundingOutpoint,
+	))
+	if !ok {
+		return unknown
+	}
+
+	return m.RelayStatus(txid)
 }
 
 // spliceWentOut reports whether a splice's transaction is complete, both

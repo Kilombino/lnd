@@ -705,11 +705,30 @@ func TestSpliceRebroadcast(t *testing.T) {
 	u := requireUpdates(t, updates, StatePreparing, StateNegotiating,
 		StateSigned, StateBroadcast)
 
+	require.Equal(t, RelayStatus{State: RelayAccepted},
+		p.alice.machine.RelayStatus(u.Txid))
+	require.Equal(t, RelayUnknown,
+		p.alice.machine.RelayStatus(chainhash.Hash{1}).State)
+
 	before := p.alice.wallet.publishCount()
 	require.Eventually(t, func() bool {
 		p.chain.mine()
 		return p.alice.wallet.publishCount() >= before+2
 	}, 5*time.Second, 20*time.Millisecond)
+
+	// Refused at a later block: the status says so, with the reason.
+	p.alice.wallet.mu.Lock()
+	p.alice.wallet.publish = errors.New("min relay fee not met")
+	p.alice.wallet.mu.Unlock()
+	require.Eventually(t, func() bool {
+		p.chain.mine()
+		st := p.alice.machine.RelayStatus(u.Txid)
+		return st.State == RelayRejected &&
+			st.Reason == "min relay fee not met"
+	}, 5*time.Second, 20*time.Millisecond)
+	p.alice.wallet.mu.Lock()
+	p.alice.wallet.publish = nil
+	p.alice.wallet.mu.Unlock()
 
 	// Confirmed: no more.
 	p.chain.confirm(t, u.Txid, 1, 2, &chainntnfs.TxConfirmation{})

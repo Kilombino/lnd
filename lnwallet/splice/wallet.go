@@ -154,6 +154,33 @@ func Publish(w Wallet, tx *wire.MsgTx, label string) RelayStatus {
 	}
 }
 
+// publish broadcasts the active splice's transaction and keeps its relay
+// status for RelayStatus.
+func (m *Machine) publish(tx *wire.MsgTx) RelayStatus {
+	status := Publish(m.cfg.Wallet, tx, m.label())
+
+	m.mu.Lock()
+	m.relay[tx.TxHash()] = status
+	m.mu.Unlock()
+
+	return status
+}
+
+// RelayStatus returns what is known of a splice transaction's relay: from
+// its last broadcast on this connection, unknown before one. Safe from any
+// goroutine.
+func (m *Machine) RelayStatus(txid chainhash.Hash) RelayStatus {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	status, ok := m.relay[txid]
+	if !ok {
+		return RelayStatus{State: RelayUnknown}
+	}
+
+	return status
+}
+
 // CoinSource lists the wallet's coins.
 type CoinSource interface {
 	// ListUnspentWitness returns the wallet's unspent witness outputs.

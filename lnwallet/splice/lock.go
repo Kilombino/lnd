@@ -424,7 +424,7 @@ func (m *Machine) resumePending(broadcastHeight uint32) {
 	a := m.active
 	tx, err := m.signedTx()
 	if err == nil {
-		Publish(m.cfg.Wallet, tx, m.label())
+		m.publish(tx)
 	} else {
 		log.Errorf("ChannelID(%v): unable to assemble splice %v: %v",
 			m.cfg.ChanID, a.txid, err)
@@ -515,7 +515,7 @@ func (m *Machine) rebroadcastUntilConfirmed(txid chainhash.Hash,
 				if err != nil {
 					return
 				}
-				status := Publish(m.cfg.Wallet, tx, m.label())
+				status := m.publish(tx)
 				if status.State == RelayRejected {
 					log.Warnf("ChannelID(%v): splice %v "+
 						"not relayed: %v", m.cfg.ChanID,

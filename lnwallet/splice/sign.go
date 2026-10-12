@@ -371,7 +371,7 @@ func (m *Machine) signed() {
 		return
 	}
 
-	status := Publish(m.cfg.Wallet, tx, m.label())
+	status := m.publish(tx)
 	if status.State == RelayRejected {
 		log.Errorf("ChannelID(%v): splice %v rejected: %v",
 			m.cfg.ChanID, a.txid, status.Reason)

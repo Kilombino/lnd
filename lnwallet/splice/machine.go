@@ -391,6 +391,9 @@ type Machine struct {
 	// PeerInputConfs deep, by splice. Under mu.
 	holds map[chainhash.Hash]btcutil.Amount
 
+	// relay is each splice transaction's last relay status. Under mu.
+	relay map[chainhash.Hash]RelayStatus
+
 	quit     chan struct{}
 	stopOnce sync.Once
 	wg       sync.WaitGroup
@@ -411,6 +414,7 @@ func NewMachine(cfg Config) *Machine {
 		events: make(chan func(), 64),
 		dead:   make(map[chainhash.Hash]deadSplice),
 		holds:  make(map[chainhash.Hash]btcutil.Amount),
+		relay:  make(map[chainhash.Hash]RelayStatus),
 		quit:   make(chan struct{}),
 	}
 }

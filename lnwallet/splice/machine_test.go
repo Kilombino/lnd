@@ -1052,6 +1052,34 @@ func TestAcceptConstructionRefused(t *testing.T) {
 		require.Empty(t, h.bob.PendingFundings())
 	})
 
+	t.Run("OP_RETURN output", func(t *testing.T) {
+		t.Parallel()
+
+		h := newAcceptorHarness(t)
+		key, _ := btcec.NewPrivateKey()
+		h.machine.HandleSpliceMessage(&lnwire.SpliceInit{
+			ChannelID:           h.machine.cfg.ChanID,
+			FundingContribution: -1_000_000,
+			FundingFeeRatePerKw: 2_500,
+			LockTime:            h.chain.height,
+			FundingPubKey:       key.PubKey(),
+		})
+		next[*lnwire.SpliceAck](t, h)
+
+		script, err := txscript.NullDataScript(
+			bytes.Repeat([]byte{1}, 80),
+		)
+		require.NoError(t, err)
+		h.machine.HandleSpliceMessage(&lnwire.TxAddOutput{
+			ChannelID: h.machine.cfg.ChanID, SerialID: 2,
+			Amount: 10_000, Script: script,
+		})
+		require.Contains(t, abortReason(t, h),
+			"output script not accepted")
+		requireResumed(t, h)
+		require.Empty(t, h.bob.PendingFundings())
+	})
+
 	t.Run("P2WSH input", func(t *testing.T) {
 		t.Parallel()
 
@@ -1238,4 +1266,45 @@ func startReestablished(t *testing.T, m *Machine) {
 
 	require.NoError(t, m.Start())
 	m.HandleReestablish(&lnwire.ChannelReestablish{})
+}
+
+// TestCheckPeerOutput checks the outputs a peer may add: witness v0 and v1
+// programs only, which every relay policy accepts.
+func TestCheckPeerOutput(t *testing.T) {
+	t.Parallel()
+
+	m := &Machine{}
+	opReturn, err := txscript.NullDataScript(bytes.Repeat([]byte{1}, 80))
+	require.NoError(t, err)
+	p2pkh := append([]byte{
+		txscript.OP_DUP, txscript.OP_HASH160, txscript.OP_DATA_20,
+	}, append(make([]byte, 20), txscript.OP_EQUALVERIFY,
+		txscript.OP_CHECKSIG)...)
+	p2sh := append([]byte{txscript.OP_HASH160, txscript.OP_DATA_20},
+		append(make([]byte, 20), txscript.OP_EQUAL)...)
+
+	for _, tc := range []struct {
+		name   string
+		script []byte
+		ok     bool
+	}{
+		{"P2WPKH", append([]byte{0x00, 0x14}, make([]byte, 20)...), true},
+		{"P2WSH", append([]byte{0x00, 0x20}, make([]byte, 32)...), true},
+		{"P2TR", append([]byte{0x51, 0x20}, make([]byte, 32)...), true},
+		{"80-byte OP_RETURN", opReturn, false},
+		{"P2PKH", p2pkh, false},
+		{"P2SH", p2sh, false},
+		{"witness v2", append([]byte{0x52, 0x20}, make([]byte, 32)...),
+			false},
+		{"empty", nil, false},
+	} {
+		err := m.checkPeerOutput(&interactivetx.Output{
+			Value: 10_000, PkScript: tc.script,
+		})
+		if tc.ok {
+			require.NoError(t, err, tc.name)
+		} else {
+			require.Error(t, err, tc.name)
+		}
+	}
 }
