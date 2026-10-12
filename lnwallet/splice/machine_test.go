@@ -1308,3 +1308,25 @@ func TestCheckPeerOutput(t *testing.T) {
 		}
 	}
 }
+
+// TestPrintable checks how the peer's tx_abort text is kept: printable
+// ASCII only, at most 160 bytes of what was sent.
+func TestPrintable(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "no thanks", printable([]byte("no thanks")))
+	require.Equal(t, "a", printable([]byte("a\x00\n\x1b[31mb")[:3]))
+	require.Equal(t, "a[31mb", printable([]byte("a\x1b[31mb")))
+	require.Equal(t, "", printable([]byte{0xff, 0xfe, 0x7f}))
+	require.Equal(t, "caf", printable([]byte("café")))
+
+	long := bytes.Repeat([]byte("x"), 400)
+	require.Len(t, printable(long), 160)
+
+	// The limit counts what was sent, not what is kept.
+	mixed := append(bytes.Repeat([]byte{0x01}, 150), []byte("tail of it")...)
+	require.Equal(t, "tail of it", printable(mixed))
+	mixed = append(bytes.Repeat([]byte{0x01}, 155), []byte("tail of it")...)
+	require.Equal(t, "tail", printable(mixed)[:4])
+	require.Len(t, printable(mixed), 5)
+}
