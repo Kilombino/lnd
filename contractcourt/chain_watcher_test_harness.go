@@ -292,8 +292,28 @@ func newChainWatcherTestHarnessFromReporter(t *testing.T,
 
 // createCoopCloseTx creates a cooperative close transaction with the given
 // output value. The transaction will have the proper sequence number to
-// indicate it's a cooperative close.
+// indicate it's a cooperative close. Like a real close, it is preceded by a
+// shutdown persisted for the channel: both closers write it before producing
+// any closing signature, and the chain watcher relies on it.
 func (h *chainWatcherTestHarness) createCoopCloseTx(
+	outputValue int64) *wire.MsgTx {
+
+	h.t.Helper()
+
+	err := h.aliceChannel.State().MarkShutdownSent(
+		channeldb.NewShutdownInfo([]byte{0x00, 0x14}, true),
+	)
+	if err != nil {
+		h.t.Fatalf("unable to mark shutdown sent: %v", err)
+	}
+
+	return h.createUnnegotiatedSpendTx(outputValue)
+}
+
+// createUnnegotiatedSpendTx creates a transaction spending the funding output
+// with a cooperative close sequence, but without any shutdown having been
+// negotiated: the shape of a splice of the old funding output.
+func (h *chainWatcherTestHarness) createUnnegotiatedSpendTx(
 	outputValue int64) *wire.MsgTx {
 
 	fundingOutpoint := h.aliceChannel.State().FundingOutpoint

@@ -150,6 +150,21 @@ type mockChannel struct {
 	remoteKey keychain.KeyDescriptor
 
 	coopBroadcastTxns []*wire.MsgTx
+
+	// shutdownSent records that the closer persisted its shutdown. The
+	// chain watcher trusts a cooperative close only for a channel with a
+	// shutdown on disk, so the closer must never produce a closing
+	// signature before it: the mock fails any test that does.
+	shutdownSent bool
+}
+
+// requireShutdownSent panics when a closing signature is about to be made
+// before the shutdown was persisted.
+func (m *mockChannel) requireShutdownSent() {
+	if !m.shutdownSent {
+		panic("closing signature produced before the shutdown was " +
+			"persisted")
+	}
 }
 
 func (m *mockChannel) ChannelPoint() wire.OutPoint {
@@ -173,6 +188,8 @@ func (m *mockChannel) MarkCoopBroadcasted(tx *wire.MsgTx,
 }
 
 func (m *mockChannel) MarkShutdownSent(*channeldb.ShutdownInfo) error {
+	m.shutdownSent = true
+
 	return nil
 }
 
@@ -197,6 +214,8 @@ func (m *mockChannel) CreateCloseProposal(fee btcutil.Amount,
 	_ ...lnwallet.ChanCloseOpt) (input.Signature, *wire.MsgTx,
 	btcutil.Amount, error) {
 
+	m.requireShutdownSent()
+
 	if m.chanType.IsTaproot() {
 		return lnwallet.NewMusigPartialSig(
 			&musig2.PartialSignature{
@@ -215,6 +234,8 @@ func (m *mockChannel) CompleteCooperativeClose(localSig,
 	remoteSig input.Signature, localScript, remoteScript []byte,
 	proposedFee btcutil.Amount,
 	_ ...lnwallet.ChanCloseOpt) (*wire.MsgTx, btcutil.Amount, error) {
+
+	m.requireShutdownSent()
 
 	return &wire.MsgTx{}, 0, nil
 }
@@ -596,9 +617,13 @@ func TestMaxFeeBailOut(t *testing.T) {
 
 			// First, we'll make our mock channel, and use that to
 			// instantiate our channel closer.
+			// The test jumps straight to fee negotiation, a
+			// state only reachable after the shutdown was
+			// persisted, so the mock starts with it sent.
 			closeCfg := ChanCloseCfg{
 				Channel: &mockChannel{
-					initiator: isInitiator,
+					initiator:    isInitiator,
+					shutdownSent: true,
 				},
 				FeeEstimator: &mockCoopFeeEstimator{
 					targetFee: absoluteFee,

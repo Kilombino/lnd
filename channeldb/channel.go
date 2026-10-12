@@ -893,6 +893,17 @@ var (
 	// ChanStatusRemoteCloseInitiator indicates that the remote node
 	// initiated closing the channel.
 	ChanStatusRemoteCloseInitiator ChannelStatus = 1 << 6
+
+	// ChanStatusFundingSpentUnknown indicates that the channel's funding
+	// output was spent by a transaction that is neither a commitment nor a
+	// cooperative close this node negotiated. The channel is not treated as
+	// closed: nothing is swept and nothing is broadcast for it, since what
+	// the spend means is unknown to this version. A later version that
+	// recognises the spend (a splice, for instance) clears the flag.
+	//
+	// It uses a high bit so that it can't collide with a flag upstream adds
+	// next.
+	ChanStatusFundingSpentUnknown ChannelStatus = 1 << 40
 )
 
 // chanStatusStrings maps a ChannelStatus to a human friendly string that
@@ -906,6 +917,7 @@ var chanStatusStrings = map[ChannelStatus]string{
 	ChanStatusCoopBroadcasted:      "ChanStatusCoopBroadcasted",
 	ChanStatusLocalCloseInitiator:  "ChanStatusLocalCloseInitiator",
 	ChanStatusRemoteCloseInitiator: "ChanStatusRemoteCloseInitiator",
+	ChanStatusFundingSpentUnknown:  "ChanStatusFundingSpentUnknown",
 }
 
 // orderedChanStatusFlags is an in-order list of all that channel status flags.
@@ -917,6 +929,7 @@ var orderedChanStatusFlags = []ChannelStatus{
 	ChanStatusCoopBroadcasted,
 	ChanStatusLocalCloseInitiator,
 	ChanStatusRemoteCloseInitiator,
+	ChanStatusFundingSpentUnknown,
 }
 
 // String returns a human-readable representation of the ChannelStatus.

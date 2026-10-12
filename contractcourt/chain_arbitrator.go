@@ -28,6 +28,11 @@ import (
 // ErrChainArbExiting signals that the chain arbitrator is shutting down.
 var ErrChainArbExiting = errors.New("ChainArbitrator exiting")
 
+// ErrFundingSpentUnknown is returned when asked to force close a channel whose
+// funding output was spent by a transaction this version doesn't recognise.
+var ErrFundingSpentUnknown = errors.New("funding output spent by an " +
+	"unrecognised transaction")
+
 // ResolutionMsg is a message sent by resolvers to outside sub-systems once an
 // outgoing contract has been fully resolved. For multi-hop contracts, if we
 // resolve the outgoing contract, we'll also need to ensure that the incoming
@@ -406,6 +411,14 @@ func (a *arbChannel) ForceCloseChan() (*wire.MsgTx, error) {
 	channel, err := a.c.chanSource.ChannelStateDB().FetchChannel(chanPoint)
 	if err != nil {
 		return nil, err
+	}
+
+	// A funding output already spent by a transaction this version doesn't
+	// recognise can't be force closed: the commitment would spend an output
+	// that no longer exists, and broadcasting it would only repeat forever.
+	if channel.HasChanStatus(channeldb.ChanStatusFundingSpentUnknown) {
+		return nil, fmt.Errorf("%w: %v", ErrFundingSpentUnknown,
+			chanPoint)
 	}
 
 	var chanOpts []lnwallet.ChannelOpt

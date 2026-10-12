@@ -2,6 +2,7 @@ package contractcourt
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"slices"
 	"sync"
@@ -823,14 +824,19 @@ func (c *chainWatcher) processDetectedSpend(
 
 	// Record the close confirmation height. This is the height at which
 	// the closing tx was first included in a block. We store this so we
-	// can report the remaining confirmations to the user.
-	err := c.cfg.chanState.MarkCloseConfirmationHeight(
-		fn.Some(uint32(spend.SpendingHeight)),
-	)
-	if err != nil {
-		log.Warnf("ChannelPoint(%v): unable to mark close "+
-			"confirmation height: %v",
-			c.cfg.chanState.FundingOutpoint, err)
+	// can report the remaining confirmations to the user. A spend this
+	// version doesn't recognise isn't a close, so it gets no close height;
+	// it still waits for the same confirmations below so that a shallow
+	// reorg can't leave the channel flagged.
+	if !c.isUnknownSpend(spend.SpendingTx) {
+		err := c.cfg.chanState.MarkCloseConfirmationHeight(
+			fn.Some(uint32(spend.SpendingHeight)),
+		)
+		if err != nil {
+			log.Warnf("ChannelPoint(%v): unable to mark close "+
+				"confirmation height: %v",
+				c.cfg.chanState.FundingOutpoint, err)
+		}
 	}
 
 	newConfNtfn, err := c.cfg.notifier.RegisterConfirmationsNtfn(
@@ -1413,12 +1419,14 @@ func (c *chainWatcher) requiredConfsForSpend() uint32 {
 	})
 }
 
-// isCoopCloseSpend reports whether the supplied spending tx looks like a
-// cooperative close. A coop close has a finalized input sequence number
-// (either MaxTxInSequenceNum or MaxRBFSequence); regular commitment txns
-// carry an obfuscated state hint in the sequence + locktime fields and
-// won't match either constant.
-func isCoopCloseSpend(spendingTx *wire.MsgTx) bool {
+// hasCoopCloseSequence reports whether the first input of the supplied
+// spending tx carries a finalized sequence number (MaxTxInSequenceNum or
+// MaxRBFSequence), as a cooperative close does. Regular commitment txns carry
+// an obfuscated state hint in the sequence and locktime fields and won't match
+// either constant. A sequence alone doesn't make a cooperative close: any
+// transaction spending the funding output with the peer's cooperation can use
+// one, a splice for instance.
+func hasCoopCloseSequence(spendingTx *wire.MsgTx) bool {
 	if len(spendingTx.TxIn) == 0 {
 		return false
 	}
@@ -1431,6 +1439,96 @@ func isCoopCloseSpend(spendingTx *wire.MsgTx) bool {
 	}
 
 	return false
+}
+
+// isCommitmentShaped reports whether the supplied spending tx has the shape
+// of a commitment transaction: a single input, with the state hint markers in
+// the upper bytes of its sequence (0x80) and of the locktime (0x20). Every
+// commitment lnd builds, of every channel type, carries them.
+func isCommitmentShaped(spendingTx *wire.MsgTx) bool {
+	if len(spendingTx.TxIn) != 1 {
+		return false
+	}
+
+	const sequenceMarker = uint32(1<<31) >> 24
+	locktimeMarker := lnwallet.TimelockShift >> 24
+
+	return spendingTx.TxIn[0].Sequence>>24 == sequenceMarker &&
+		spendingTx.LockTime>>24 == locktimeMarker
+}
+
+// closeNegotiated reports whether this node took part in closing the channel
+// cooperatively, so that a spend of the funding output with a cooperative
+// close sequence can be trusted to be that close. Both closers persist the
+// shutdown before producing any closing signature, in both roles, and never
+// delete it. A channel restored from a static backup has no shutdown on
+// disk, but nothing could have spent its funding output with this node's
+// cooperation other than a close.
+func (c *chainWatcher) closeNegotiated() bool {
+	chanState := c.cfg.chanState
+	if chanState.HasChanStatus(channeldb.ChanStatusCoopBroadcasted) ||
+		chanState.HasChanStatus(channeldb.ChanStatusRestored) {
+
+		return true
+	}
+
+	shutdown, err := chanState.ShutdownInfo()
+	switch {
+	case errors.Is(err, channeldb.ErrNoShutdownInfo):
+		return false
+
+	case err != nil:
+		log.Errorf("ChannelPoint(%v): unable to read shutdown info: %v",
+			chanState.FundingOutpoint, err)
+
+		return false
+	}
+
+	return shutdown.IsSome()
+}
+
+// isCoopCloseSpend reports whether the supplied spending tx is a cooperative
+// close of this channel: it has a cooperative close sequence, it isn't shaped
+// like a commitment, and this node negotiated a close.
+func (c *chainWatcher) isCoopCloseSpend(spendingTx *wire.MsgTx) bool {
+	return hasCoopCloseSequence(spendingTx) &&
+		!isCommitmentShaped(spendingTx) && c.closeNegotiated()
+}
+
+// isUnknownSpend reports whether the supplied spending tx is neither shaped
+// like a commitment nor a cooperative close this node negotiated. Known
+// commitments, ours or the peer's, current or revoked, are all
+// commitment-shaped, so this needs no commitment lookup.
+func (c *chainWatcher) isUnknownSpend(spendingTx *wire.MsgTx) bool {
+	return !isCommitmentShaped(spendingTx) &&
+		!c.isCoopCloseSpend(spendingTx)
+}
+
+// handleUnknownSpend handles a spend of the funding output by a transaction
+// this version doesn't recognise. Treating it as a close would be wrong in
+// both directions: as a cooperative close it would stop watching an output
+// that may still hold this channel's funds, and as a force close it would
+// start a data loss recovery that sweeps the wrong outputs. So the channel is
+// only flagged: it stays out of the switch and away from the chain, and a
+// version that recognises the spend clears the flag.
+func (c *chainWatcher) handleUnknownSpend(
+	commitSpend *chainntnfs.SpendDetail) error {
+
+	chanState := c.cfg.chanState
+
+	log.Errorf("ChannelPoint(%v): funding output spent by tx %v, which "+
+		"is neither a commitment nor a cooperative close negotiated "+
+		"by this node. The channel is left untouched and flagged; a "+
+		"newer version may recognise the transaction",
+		chanState.FundingOutpoint, commitSpend.SpenderTxHash)
+
+	if chanState.HasChanStatus(channeldb.ChanStatusFundingSpentUnknown) {
+		return nil
+	}
+
+	return chanState.ApplyChanStatus(
+		channeldb.ChanStatusFundingSpentUnknown,
+	)
 }
 
 // maybeDispatchEarlyCoopClose fires a preliminary CLOSED_CHANNEL event over
@@ -1456,7 +1554,7 @@ func (c *chainWatcher) maybeDispatchEarlyCoopClose(
 	// confirmation depth, so an early dispatch here would either deliver
 	// a duplicate event or, worse, surface a "cooperative close" summary
 	// for a unilateral spend.
-	if !isCoopCloseSpend(spend.SpendingTx) {
+	if !c.isCoopCloseSpend(spend.SpendingTx) {
 		return
 	}
 
@@ -1940,14 +2038,11 @@ func (c *chainWatcher) handleCommitSpend(
 	}
 
 	// Next, we'll check to see if this is a cooperative channel closure or
-	// not. This is characterized by having an input sequence number that's
-	// finalized. This won't happen with regular commitment transactions
-	// due to the state hint encoding scheme.
-	switch commitTxBroadcast.TxIn[0].Sequence {
-	case wire.MaxTxInSequenceNum:
-		fallthrough
-	case mempool.MaxRBFSequence:
-		// This is a cooperative close. Dispatch it directly - the
+	// not: a finalized input sequence number, which commitment
+	// transactions never carry because of the state hint encoding, on a
+	// channel whose close this node negotiated.
+	if c.isCoopCloseSpend(commitTxBroadcast) {
+		// This is a cooperative close. Dispatch it directly; the
 		// confirmation waiting and reorg handling is done in the
 		// closeObserver state machine before we reach this point.
 		if err := c.dispatchCooperativeClose(commitSpend); err != nil {
@@ -1955,6 +2050,13 @@ func (c *chainWatcher) handleCommitSpend(
 		}
 
 		return nil
+	}
+
+	// A spend that is neither a cooperative close nor shaped like a
+	// commitment is something this version doesn't recognise. The data
+	// loss recovery below assumes a commitment, so it must not run.
+	if !isCommitmentShaped(commitTxBroadcast) {
+		return c.handleUnknownSpend(commitSpend)
 	}
 
 	log.Warnf("Unknown commitment broadcast for ChannelPoint(%v) ",

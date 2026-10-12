@@ -2796,6 +2796,15 @@ func (r *rpcServer) CloseChannel(in *lnrpc.CloseChannelRequest,
 			channel.ChanStatus())
 	}
 
+	// A channel whose funding output was spent by a transaction this
+	// version doesn't recognise has nothing left to close: the output its
+	// commitments spend is gone. A newer version may recognise the spend.
+	if channel.HasChanStatus(channeldb.ChanStatusFundingSpentUnknown) {
+		return fmt.Errorf("cannot close channel %v: its funding output "+
+			"was spent by a transaction this version doesn't "+
+			"recognise; update lnd", chanPoint)
+	}
+
 	// Retrieve the best height of the chain, which we'll use to complete
 	// either closing flow.
 	_, bestHeight, err := r.server.cc.ChainIO.GetBestBlock()

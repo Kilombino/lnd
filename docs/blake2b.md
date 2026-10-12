@@ -442,6 +442,42 @@ Releases up to `0.21.3-beta-blake2b.12` offered such a coin after 100
 confirmations. A send or channel open built from it was refused by the first
 node it reached; nothing was lost, the operation failed.
 
+## A funding output spent by an unrecognised transaction
+
+A channel's funding output can only be spent with both peers' signatures.
+lnd recognises three kinds of spend: one of the channel's commitment
+transactions, current or revoked, ours or the peer's; and a cooperative close
+this node negotiated. Peers that support splicing can also spend it with a
+splice, which moves the channel to a new funding output without closing it.
+
+Up to `0.21.4-beta-blake2b.18` lnd took any spend whose first input had a
+final or replaceable sequence number for a cooperative close, and any other
+unknown spend for a peer's commitment it had lost track of. A splice is
+neither. Treated as a close, the new funding output would no longer be
+watched; treated as a lost commitment, lnd would start a recovery that sweeps
+the wrong outputs.
+
+From the next release, a spend is a cooperative close only if this node sent
+or received a shutdown for the channel (both closers record it before signing
+anything), or the channel was restored from a static backup. A spend that is
+neither shaped like a commitment nor such a close leaves the channel open but
+flagged `ChanStatusFundingSpentUnknown`:
+
+- `lncli pendingchannels` lists it under `waiting_close_channels`, with
+  `ChanStatusFundingSpentUnknown` in `chan_status_flags` and no closing
+  transaction;
+- it stays out of the switch, so no payment is sent over it;
+- nothing is broadcast or swept for it, and `lncli closechannel` refuses it.
+
+The likely cause is a splice made with a node that supports it, followed by a
+move to an older Lightning Fork, or a backup restored on an older one. Update
+Lightning Fork from the StartOS Marketplace, the Umbrel App Store or the
+release page; a version that recognises the spend clears the flag. As a last
+resort, `lncli abandonchannel` makes the node forget the channel. Use it only
+once you know what the spending transaction is: the channel may still hold
+your funds on a new output, and a forgotten channel's funds are only
+recoverable by hand.
+
 ## Verifying the constants yourself
 
 ```sh
