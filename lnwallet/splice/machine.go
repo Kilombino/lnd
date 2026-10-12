@@ -64,6 +64,9 @@ type Channel interface {
 
 	// RemovePendingFunding drops a splice that will never lock.
 	RemovePendingFunding(txid chainhash.Hash) error
+
+	// AvailableBalance returns what we can send now, on every funding.
+	AvailableBalance() lnwire.MilliSatoshi
 }
 
 // Peer sends messages to the channel's peer.
@@ -134,6 +137,18 @@ type Config struct {
 	Wallet     Wallet
 	CoinSource CoinSource
 
+	// WithCoinSelectLock runs coin selection and leasing under the
+	// wallet's coin selection lock. Nil runs it without.
+	WithCoinSelectLock func(func() error) error
+
+	// ChangeScript returns a fresh change script of the wallet.
+	ChangeScript func() ([]byte, error)
+
+	// CheckMempool tests whether the backend would accept a fully signed
+	// transaction, before our tx_signatures leave when we sign last. Nil
+	// skips the test.
+	CheckMempool func(tx *wire.MsgTx) error
+
 	// IsOurOutpoint reports whether an outpoint is one of this node's own:
 	// a wallet coin, locked or not, or any channel's funding output. The
 	// peer may not add one as its input.
@@ -183,9 +198,13 @@ const (
 type phase uint8
 
 const (
+	// phasePreparing: a splice we start, funds chosen, waiting for the
+	// channel to be quiescent.
+	phasePreparing phase = iota
+
 	// phaseNegotiating: splice_init/splice_ack exchanged, the
 	// interactive construction running.
-	phaseNegotiating phase = iota
+	phaseNegotiating
 
 	// phaseSigning: the transaction is agreed; commitments and
 	// tx_signatures are being exchanged.
@@ -250,6 +269,22 @@ type active struct {
 
 	// timeout ends a negotiation that takes too long.
 	timeout *time.Timer
+
+	// request is the splice we started, nil for the peer's; updates
+	// reports its steps to whoever started it.
+	request *Request
+	updates chan Update
+
+	// ourOutputs are the outputs we add: change, or the destination of
+	// funds moved out.
+	ourOutputs []interactivetx.Output
+
+	// lockTime is the transaction's locktime, from our splice_init.
+	lockTime uint32
+
+	// abortReason is why the splice ended, for the report.
+	abortReason    string
+	reasonFromPeer bool
 }
 
 // Machine is a channel's splice machine.
@@ -392,6 +427,11 @@ func (m *Machine) abort(code string, format string, args ...interface{}) {
 		reason = code + ": " + fmt.Sprintf(format, args...)
 	}
 	log.Infof("ChannelID(%v): splice aborted: %v", m.cfg.ChanID, reason)
+	m.update(func(a *active) {
+		if a.abortReason == "" {
+			a.abortReason = reason
+		}
+	})
 
 	m.send(&lnwire.TxAbort{
 		ChannelID: m.cfg.ChanID, Data: []byte(reason),
@@ -449,6 +489,10 @@ func (m *Machine) forget() {
 		}
 	}
 
+	m.report(Update{
+		State: StateAborted, Txid: a.txid, Reason: a.abortReason,
+		ReasonFromPeer: a.reasonFromPeer,
+	})
 	m.setActive(nil)
 	m.resume()
 }

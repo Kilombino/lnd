@@ -149,6 +149,7 @@ func (m *Machine) maybeComplete() {
 				m.cfg.ChanID, err)
 		}
 	}
+	m.report(Update{State: StateLocked, Txid: a.txid})
 	m.setActive(nil)
 }
 

@@ -39,6 +39,8 @@ func newFakeWallet() *fakeWallet {
 
 func (w *fakeWallet) LeaseOutput(id wtxmgr.LockID, op wire.OutPoint,
 	_ time.Duration) (time.Time, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 
 	if w.failLease[op] {
 		return time.Time{}, wtxmgr.ErrOutputAlreadyLocked
@@ -49,6 +51,9 @@ func (w *fakeWallet) LeaseOutput(id wtxmgr.LockID, op wire.OutPoint,
 }
 
 func (w *fakeWallet) ReleaseOutput(id wtxmgr.LockID, op wire.OutPoint) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
 	if w.leases[op] != id {
 		return wtxmgr.ErrUnknownOutput
 	}
@@ -69,6 +74,14 @@ func (w *fakeWallet) PublishTransaction(tx *wire.MsgTx, label string) error {
 	return nil
 }
 
+// leaseCount returns how many outputs are leased.
+func (w *fakeWallet) leaseCount() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	return len(w.leases)
+}
+
 // publishedTxs returns a copy of what was published.
 func (w *fakeWallet) publishedTxs() map[chainhash.Hash]string {
 	w.mu.Lock()
@@ -83,6 +96,9 @@ func (w *fakeWallet) publishedTxs() map[chainhash.Hash]string {
 }
 
 func (w *fakeWallet) RemoveDescendants(tx *wire.MsgTx) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
 	w.removed = append(w.removed, tx.TxHash())
 
 	return nil
@@ -90,6 +106,8 @@ func (w *fakeWallet) RemoveDescendants(tx *wire.MsgTx) error {
 
 func (w *fakeWallet) ListUnspentWitness(minConfs, _ int32,
 	account string) ([]*lnwallet.Utxo, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 
 	w.minConfs, w.account = minConfs, account
 
@@ -97,6 +115,9 @@ func (w *fakeWallet) ListUnspentWitness(minConfs, _ int32,
 }
 
 func (w *fakeWallet) FetchTx(h chainhash.Hash) (*wire.MsgTx, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
 	tx, ok := w.txs[h]
 	if !ok {
 		return nil, errors.New("not found")

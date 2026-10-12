@@ -155,6 +155,17 @@ type Output struct {
 	Funding bool
 }
 
+// RefusePeerItems makes the session refuse any input or output the peer
+// adds, with reason: for a construction where the peer puts nothing in.
+func (s *Session) RefusePeerItems(reason string) {
+	s.cfg.CheckPeerInput = func(*Input) error {
+		return &AbortError{Reason: reason}
+	}
+	s.cfg.CheckPeerOutput = func(*Output) error {
+		return &AbortError{Reason: reason}
+	}
+}
+
 // addedBy returns the role that added an item with the given serial id.
 func addedBy(serialID uint64) Role {
 	if serialID%2 == 0 {

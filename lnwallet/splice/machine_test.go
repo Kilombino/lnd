@@ -38,11 +38,13 @@ const spliceChanType = channeldb.SingleFunderTweaklessBit |
 // testLink is the channel's link as the machine sees it, run inline on a
 // LightningChannel. Our commitment_signed goes to the test's peer.
 type testLink struct {
-	t         *testing.T
-	ch        *lnwallet.LightningChannel
-	initiator lntypes.ChannelParty
-	commits   chan *lnwire.CommitSig
-	resumed   chan struct{}
+	t          *testing.T
+	ch         *lnwallet.LightningChannel
+	initiator  lntypes.ChannelParty
+	stfuResult lntypes.ChannelParty
+	stfuGate   chan struct{}
+	commits    chan *lnwire.CommitSig
+	resumed    chan struct{}
 }
 
 func done(err error) <-chan error {
@@ -58,7 +60,16 @@ func (l *testLink) QuiescenceInitiator() fn.Result[lntypes.ChannelParty] {
 
 func (l *testLink) InitStfu() <-chan fn.Result[lntypes.ChannelParty] {
 	c := make(chan fn.Result[lntypes.ChannelParty], 1)
-	c <- fn.Ok(lntypes.Local)
+	if l.stfuGate == nil {
+		c <- fn.Ok(l.stfuResult)
+		return c
+	}
+
+	// The test decides when the channel is quiescent.
+	go func() {
+		<-l.stfuGate
+		c <- fn.Ok(l.stfuResult)
+	}()
 
 	return c
 }

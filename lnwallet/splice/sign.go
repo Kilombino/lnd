@@ -73,6 +73,24 @@ func (m *Machine) maybeSendTxSignatures() {
 		return
 	}
 
+	// Signing last, the transaction is complete with ours: it must be
+	// one the backend accepts before ours leave, since after that the
+	// splice can't be dropped.
+	if !m.signsFirst() && m.cfg.CheckMempool != nil {
+		a.ourTxSigs = sigs
+		tx, err := m.signedTx()
+		a.ourTxSigs = nil
+		if err == nil {
+			err = m.cfg.CheckMempool(tx)
+		}
+		if err != nil {
+			m.abort("relay_rejected", "%v", err)
+			m.forget()
+
+			return
+		}
+	}
+
 	// Recorded before it leaves: from then on the splice is ours to
 	// keep.
 	err = m.cfg.Channel.State().UpdateSpliceRecord(a.txid,
@@ -93,6 +111,7 @@ func (m *Machine) maybeSendTxSignatures() {
 	}
 	m.update(func(a *active) { a.ourTxSigs = sigs })
 	m.send(sigs)
+	m.report(Update{State: StateSigned, Txid: a.txid})
 
 	if a.theirTxSigs != nil {
 		m.signed()
@@ -367,6 +386,7 @@ func (m *Machine) signed() {
 	}
 
 	m.update(func(a *active) { a.phase = phasePending })
+	m.report(Update{State: StateBroadcast, Txid: a.txid})
 	m.resume()
 	m.watchConfirmation(height)
 }
@@ -402,6 +422,10 @@ func (m *Machine) handleTxAbort(msg *lnwire.TxAbort) {
 	default:
 		log.Infof("ChannelID(%v): peer aborted the splice: %v",
 			m.cfg.ChanID, reason)
+		m.update(func(a *active) {
+			a.abortReason = reason
+			a.reasonFromPeer = true
+		})
 		m.send(&lnwire.TxAbort{ChannelID: m.cfg.ChanID})
 		m.forget()
 	}
