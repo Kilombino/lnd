@@ -1,0 +1,33 @@
+# 2026/10/12 03:42:32.601110 [TestSelectAddFundsAgreesWithEngine] [rapid] draw coins: 1
+# 2026/10/12 03:42:32.601118 [TestSelectAddFundsAgreesWithEngine] [rapid] draw taproot: false
+# 2026/10/12 03:42:32.601120 [TestSelectAddFundsAgreesWithEngine] [rapid] draw value: 300
+# 2026/10/12 03:42:32.601122 [TestSelectAddFundsAgreesWithEngine] [rapid] draw amount: 1000
+# 2026/10/12 03:42:32.601123 [TestSelectAddFundsAgreesWithEngine] [rapid] draw useMax: true
+# 2026/10/12 03:42:32.601124 [TestSelectAddFundsAgreesWithEngine] [rapid] draw feeRate: 253
+# 2026/10/12 03:42:32.601172 [TestSelectAddFundsAgreesWithEngine] 
+# 	Error Trace:	/mnt/Black/lightning-fork/lnwallet/splice/fund_test.go:230
+# 	            				/home/paul/go/pkg/mod/pgregory.net/rapid@v1.2.0/engine.go:371
+# 	            				/home/paul/go/pkg/mod/pgregory.net/rapid@v1.2.0/engine.go:380
+# 	            				/home/paul/go/pkg/mod/pgregory.net/rapid@v1.2.0/engine.go:205
+# 	            				/home/paul/go/pkg/mod/pgregory.net/rapid@v1.2.0/engine.go:120
+# 	            				/mnt/Black/lightning-fork/lnwallet/splice/fund_test.go:176
+# 	Error:      	Not equal: 
+# 	            	expected: 875
+# 	            	actual  : 873
+# 	Test:       	TestSelectAddFundsAgreesWithEngine
+# 
+v0.4.8#11659188372926349412
+0x0
+0x0
+0x1
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x1
+0x0
+0x0
+0x0

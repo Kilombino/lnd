@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -122,6 +123,18 @@ func (n *node) fund(t *testing.T, tag uint16, value btcutil.Amount) Coin {
 type splicePair struct {
 	alice, bob *node
 	chain      *testChain
+
+	// drop, if set, keeps a message from reaching the other side.
+	dropMu sync.Mutex
+	drop   func(from *node, msg lnwire.Message) bool
+}
+
+// dropped reports whether a message is kept from the other side.
+func (p *splicePair) dropped(from *node, msg lnwire.Message) bool {
+	p.dropMu.Lock()
+	defer p.dropMu.Unlock()
+
+	return p.drop != nil && p.drop(from, msg)
 }
 
 func newSplicePair(t *testing.T) *splicePair {
@@ -143,6 +156,9 @@ func newSplicePair(t *testing.T) *splicePair {
 		for {
 			select {
 			case msg := <-from.peer.msgs:
+				if p.dropped(from, msg) {
+					continue
+				}
 				to.machine.HandleSpliceMessage(msg)
 
 			case sig := <-from.link.commits:
@@ -740,4 +756,62 @@ func TestSpliceDead(t *testing.T) {
 	// The channel works on as before.
 	require.Equal(t, p.alice.ch.State().FundingOutpoint,
 		p.alice.ch.State().CurrentFundingOutpoint())
+}
+
+// TestSpliceWithheldSignatures checks a peer that withholds its
+// tx_signatures after receiving ours, and publishes the splice anyway: the
+// side that signed first follows it to its lock, and refuses the peer's
+// splices afterwards, also on the next connection.
+func TestSpliceWithheldSignatures(t *testing.T) {
+	t.Parallel()
+
+	p := newSplicePair(t)
+	limits := NewLimits()
+	p.bob.machine.cfg.Limits = limits
+
+	// Alice adds funds: Bob put nothing in, so he signs first; Alice
+	// keeps hers.
+	p.dropMu.Lock()
+	p.drop = func(from *node, msg lnwire.Message) bool {
+		_, sigs := msg.(*lnwire.TxSignatures)
+		return from == p.alice && sigs
+	}
+	p.dropMu.Unlock()
+
+	p.alice.fund(t, 1, 40_000_000)
+	updates, err := p.alice.machine.Splice(Request{
+		Direction: DirectionIn, Amount: 20_000_000, FeeRate: 2_500,
+	})
+	require.NoError(t, err)
+	u := requireUpdates(t, updates,
+		StatePreparing, StateNegotiating, StateSigned, StateBroadcast,
+	)
+
+	// Bob never got Alice's signatures, yet the splice confirms (she
+	// published it) and both lock.
+	p.bob.machine.mu.Lock()
+	theirs := p.bob.machine.active.theirTxSigs
+	p.bob.machine.mu.Unlock()
+	require.Nil(t, theirs)
+
+	p.confirm(t, u.Txid)
+	requireUpdates(t, updates, StateLocked)
+	p.requireMoved(t, u.Txid, p.alice.ch.State().Capacity)
+
+	// Bob refuses Alice's splices now, and after a reconnection.
+	require.Eventually(t, func() bool {
+		return statusOf(p.bob.machine) == codePeerMisbehaved
+	}, 5*time.Second, 10*time.Millisecond)
+	next := NewMachine(p.bob.machine.cfg)
+	startReestablished(t, next)
+	t.Cleanup(next.Stop)
+	require.Equal(t, codePeerMisbehaved, statusOf(next))
+}
+
+// statusOf asks a machine, on its loop, why it can't splice now.
+func statusOf(m *Machine) string {
+	code := make(chan string, 1)
+	m.enqueue(func() { code <- m.spliceable() })
+
+	return <-code
 }

@@ -20,9 +20,14 @@ import (
 // the new funding output. Everything here survives restarts: the machine
 // rebuilds the splice in progress from its record.
 
-// watchConfirmation waits for the splice to reach our lock depth.
+// watchConfirmation waits for the splice to reach our lock depth. Once per
+// splice.
 func (m *Machine) watchConfirmation(heightHint uint32) {
 	a := m.active
+	if a.watching {
+		return
+	}
+	a.watching = true
 	depth := uint32(6)
 	if m.cfg.Policy.LockDepth != nil {
 		peer := a.theirContribution
@@ -64,6 +69,16 @@ func (m *Machine) watchConfirmation(heightHint uint32) {
 	}()
 }
 
+// watchWithheld watches a splice whose tx_signatures we sent and the peer
+// didn't: it holds ours, so it can publish the splice, and we must follow
+// it to its lock if it does. The search starts at the current funding's
+// confirmation: the splice spends that output.
+func (m *Machine) watchWithheld() {
+	m.watchConfirmation(
+		m.cfg.Channel.State().CurrentShortChanID().BlockHeight,
+	)
+}
+
 // reachedDepth sends splice_locked once the splice is deep enough.
 func (m *Machine) reachedDepth(txid chainhash.Hash,
 	scid lnwire.ShortChannelID) {
@@ -71,6 +86,17 @@ func (m *Machine) reachedDepth(txid chainhash.Hash,
 	a := m.active
 	if a == nil || a.txid != txid {
 		return
+	}
+
+	// Confirmed without the peer's tx_signatures ever reaching us: the
+	// peer published it with our signatures and withheld its own. The
+	// splice goes on to its lock; the peer's next ones are refused.
+	if a.phase == phaseSigning {
+		log.Warnf("ChannelID(%v): splice %v confirmed without the "+
+			"peer's tx_signatures", m.cfg.ChanID, txid)
+		m.setMisbehaved()
+		m.update(func(a *active) { a.phase = phasePending })
+		m.resume()
 	}
 
 	err := m.cfg.Channel.State().UpdateSpliceRecord(txid,
@@ -112,7 +138,11 @@ func (m *Machine) handleSpliceLocked(txid chainhash.Hash) {
 		// Already completed: the peer sent it again on reconnecting.
 		return
 
-	case a.txid != txid || a.phase != phasePending:
+	// A peer withholding its tx_signatures can still publish the splice
+	// and lock it: ours are out.
+	case a.txid != txid ||
+		(a.phase != phasePending && a.ourTxSigs == nil):
+
 		m.warnAndDisconnect("splice_locked for %v, not the pending "+
 			"splice", txid)
 		return
@@ -370,9 +400,15 @@ func (m *Machine) restore() error {
 			)
 		}
 
-		if a.ourTxSigs != nil && a.theirTxSigs != nil {
+		switch {
+		case a.ourTxSigs != nil && a.theirTxSigs != nil:
 			a.phase = phasePending
 			m.resumePending(n.BroadcastHeight)
+
+		// Ours went out and the peer's never came: it may publish
+		// the splice.
+		case a.ourTxSigs != nil:
+			m.watchWithheld()
 		}
 
 		// One splice at a time in M1.

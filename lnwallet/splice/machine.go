@@ -326,6 +326,9 @@ type active struct {
 	lockedSent, lockedReceived bool
 	scid                       fn.Option[lnwire.ShortChannelID]
 
+	// watching is set once the splice's confirmations are watched.
+	watching bool
+
 	// timeout ends a negotiation that takes too long.
 	timeout *time.Timer
 
@@ -675,6 +678,13 @@ func (m *Machine) currentFunding() (wire.OutPoint, btcutil.Amount, []byte,
 		out.PkScript, nil
 }
 
+// setMisbehaved refuses the peer's splices on the channel from now on, on
+// this connection and the next ones.
+func (m *Machine) setMisbehaved() {
+	m.misbehaved = true
+	m.cfg.Limits.markMisbehaved(m.cfg.ChanID)
+}
+
 // spliceable returns why the channel can't be spliced now, or "".
 func (m *Machine) spliceable() string {
 	state := m.cfg.Channel.State()
@@ -691,7 +701,7 @@ func (m *Machine) spliceable() string {
 	case state.ChanType.HasZeroConf():
 		return codeZeroConf
 
-	case m.misbehaved:
+	case m.misbehaved || m.cfg.Limits.isMisbehaved(m.cfg.ChanID):
 		return codePeerMisbehaved
 
 	case m.active != nil || len(m.cfg.Channel.PendingFundings()) > 0:

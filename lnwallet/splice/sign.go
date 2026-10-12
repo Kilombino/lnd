@@ -116,7 +116,12 @@ func (m *Machine) maybeSendTxSignatures() {
 
 	if a.theirTxSigs != nil {
 		m.signed()
+		return
 	}
+
+	// We went first: the peer holds what it needs to publish the
+	// splice, with its tx_signatures or without sending them.
+	m.watchWithheld()
 }
 
 // ourTxSignatures signs our part of the splice transaction: the shared
@@ -233,7 +238,7 @@ func (m *Machine) handleTxSignatures(msg *lnwire.TxSignatures) {
 			log.Errorf("ChannelID(%v): invalid tx_signatures for "+
 				"splice %v after ours: %v", m.cfg.ChanID,
 				a.txid, err)
-			m.misbehaved = true
+			m.setMisbehaved()
 		}
 
 		return
@@ -419,7 +424,7 @@ func (m *Machine) handleTxAbort(msg *lnwire.TxAbort) {
 	case a.phase == phasePending || a.ourTxSigs != nil:
 		log.Errorf("ChannelID(%v): peer aborted splice %v after our "+
 			"tx_signatures: %v", m.cfg.ChanID, a.txid, reason)
-		m.misbehaved = true
+		m.setMisbehaved()
 
 	default:
 		log.Infof("ChannelID(%v): peer aborted the splice: %v",

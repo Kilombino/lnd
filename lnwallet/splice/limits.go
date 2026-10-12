@@ -47,6 +47,10 @@ type Limits struct {
 	mu      sync.Mutex
 	pending map[lnwire.ChannelID]place
 	aborts  map[lnwire.ChannelID][]time.Time
+
+	// misbehaved are channels whose peer broke a splice after we had
+	// signed it: no more splices on them until a restart.
+	misbehaved map[lnwire.ChannelID]struct{}
 }
 
 // place is a peer-started splice in progress: the peer, and the machine
@@ -145,4 +149,36 @@ func (l *Limits) recentAborts(chanID lnwire.ChannelID) int {
 	}
 
 	return len(recent)
+}
+
+// markMisbehaved refuses splices on the channel from now on: its peer
+// broke one after we had signed it. A channel's machine is replaced on every
+// reconnection, so the mark lives here.
+func (l *Limits) markMisbehaved(chanID lnwire.ChannelID) {
+	if l == nil {
+		return
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.misbehaved == nil {
+		l.misbehaved = make(map[lnwire.ChannelID]struct{})
+	}
+	l.misbehaved[chanID] = struct{}{}
+}
+
+// isMisbehaved reports whether the channel's peer broke a splice after we
+// had signed it.
+func (l *Limits) isMisbehaved(chanID lnwire.ChannelID) bool {
+	if l == nil {
+		return false
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	_, ok := l.misbehaved[chanID]
+
+	return ok
 }
