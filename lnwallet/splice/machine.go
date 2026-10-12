@@ -219,6 +219,9 @@ func (m *Machine) notify(kind string, txid chainhash.Hash, reason string,
 	}
 }
 
+// maxMoney is the most satoshis that can exist.
+const maxMoney = btcutil.Amount(21_000_000 * btcutil.SatoshiPerBitcoin)
+
 // Refusal codes, sent as tx_abort's reason and reported to the user.
 const (
 	codeDisabled          = "disabled"

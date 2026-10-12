@@ -101,6 +101,12 @@ func (m *Machine) checkSpliceInit(msg *lnwire.SpliceInit) (string, string) {
 		return codeInternal, "no funding key"
 	}
 
+	// Before any arithmetic on it: more than can exist is no amount.
+	if c := msg.FundingContribution; c < -maxMoney || c > maxMoney {
+		return codePeerMisbehaved, fmt.Sprintf("contribution %d out "+
+			"of range", int64(c))
+	}
+
 	feeRate := chainfee.SatPerKWeight(msg.FundingFeeRatePerKw)
 	if err := CheckAcceptorFeeRate(feeRate, m.cfg.Estimator); err != nil {
 		return codeFeeBelowFloor, err.Error()
@@ -110,7 +116,13 @@ func (m *Machine) checkSpliceInit(msg *lnwire.SpliceInit) (string, string) {
 	if err != nil {
 		return codeChainNotSynced, err.Error()
 	}
-	if msg.LockTime > height+1 && msg.LockTime < txscript.LockTimeThreshold {
+	// A locktime as a time would need the chain's median time past to
+	// know the transaction final; peers use heights.
+	if msg.LockTime >= txscript.LockTimeThreshold {
+		return codeLocktime, fmt.Sprintf("locktime %d is a time",
+			msg.LockTime)
+	}
+	if msg.LockTime > height+1 {
 		return codeLocktime, fmt.Sprintf("locktime %d past tip %d",
 			msg.LockTime, height)
 	}

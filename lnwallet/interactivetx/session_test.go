@@ -3,6 +3,7 @@ package interactivetx
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/btcsuite/btcd/btcutil"
@@ -1052,4 +1053,96 @@ func TestHooksRequired(t *testing.T) {
 		_, err := NewSession(cfg)
 		require.Error(t, err)
 	}
+}
+
+// TestAdversarialInitiatorProperty runs splices where the peer, as
+// initiator, claims one contribution in its splice_init (what our session
+// is configured with) and builds the transaction for another, with random
+// inputs and outputs of its own. Whenever our side accepts, the funding
+// output is the old capacity plus the claimed contribution, and the peer's
+// own inputs, less its own outputs, pay for that contribution and a fee at
+// the rate: nothing of our balance went anywhere.
+func TestAdversarialInitiatorProperty(t *testing.T) {
+	t.Parallel()
+
+	var accepted, lied int
+	rapid.Check(t, func(rt *rapid.T) {
+		amount := func(label string, lo, hi int) btcutil.Amount {
+			return btcutil.Amount(rapid.IntRange(lo, hi).Draw(
+				rt, label,
+			))
+		}
+
+		ours := defaultParams()
+		ours.feeRate = chainfee.SatPerKWeight(
+			rapid.IntRange(253, 5_000).Draw(rt, "feeRate"),
+		)
+		ours.initContrib = amount("claimed", -500_000, 500_000)
+
+		// Mostly honest, so that splices get through; often not.
+		theirs := ours
+		if rapid.Bool().Draw(rt, "lies") {
+			theirs.initContrib = amount("real", -500_000, 500_000)
+		}
+		theirs.initBalance = 10_000_000
+
+		init, err := NewSession(config(Initiator, theirs))
+		if err != nil {
+			return
+		}
+		acc, err := NewSession(config(Acceptor, ours))
+		if err != nil {
+			return
+		}
+		require.NoError(rt, init.AddSharedInputAndFunding())
+
+		var in, out btcutil.Amount
+		for i := 0; i < rapid.IntRange(0, 3).Draw(rt, "inputs"); i++ {
+			v := amount(fmt.Sprintf("in%d", i), 1_000, 900_000)
+			tag := byte(10 + i)
+			prev := prevTx(tag, p2wpkh(tag), v)
+			init.AddLocalInput(Input{
+				OutPoint: wire.OutPoint{Hash: prev.TxHash()},
+				Value:    v, PkScript: p2wpkh(tag),
+				Sequence:         MaxSequence,
+				MaxWitnessWeight: input.P2WKHWitnessSize,
+				PrevTx:           prev,
+			})
+			in += v
+		}
+		for i := 0; i < rapid.IntRange(0, 3).Draw(rt, "outputs"); i++ {
+			v := amount(fmt.Sprintf("out%d", i), 330, 900_000)
+			init.AddLocalOutput(Output{
+				Value: v, PkScript: p2tr(byte(20 + i)),
+			})
+			out += v
+		}
+
+		if run(init, acc) != nil {
+			return
+		}
+		res, err := acc.Build()
+		if err != nil {
+			return
+		}
+
+		accepted++
+		if theirs.initContrib != ours.initContrib {
+			lied++
+		}
+		require.Equal(rt, ours.capacity+ours.initContrib,
+			btcutil.Amount(res.Tx.TxOut[res.FundingIndex].Value),
+			"the funding output isn't what the peer claimed")
+
+		// We put nothing in, so what the peer's own coins pay beyond
+		// its contribution is the whole fee, at least the rate.
+		paid := in - out - ours.initContrib
+		require.Equal(rt, res.Fee, paid)
+		require.GreaterOrEqual(rt, int64(paid),
+			int64(ours.feeRate)*res.Weight/1000,
+			"the peer didn't pay for its contribution")
+	})
+	require.Positive(t, accepted, "no splice got through")
+	t.Logf("%d accepted, %d of them with the claim the peer built for "+
+		"a different one", accepted, lied)
 }

@@ -8,6 +8,8 @@ package splice
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -826,6 +828,40 @@ func TestAcceptSpliceRefused(t *testing.T) {
 		balance := h.bob.State().LocalCommitment.RemoteBalance
 		init(h, -balance.ToSatoshis()-1, 2_500)
 		require.Contains(t, abortReason(t, h), codeAboveBalance)
+		requireResumed(t, h)
+	})
+
+	// Contributions no amount can be, before any arithmetic on them:
+	// the extremes would overflow the balance and capacity sums.
+	for _, c := range []btcutil.Amount{
+		math.MinInt64, math.MaxInt64, -maxMoney - 1, maxMoney + 1,
+	} {
+		t.Run(fmt.Sprintf("contribution %d", int64(c)),
+			func(t *testing.T) {
+				t.Parallel()
+
+				h := newAcceptorHarness(t)
+				init(h, c, 2_500)
+				require.Contains(t, abortReason(t, h),
+					codePeerMisbehaved)
+				requireResumed(t, h)
+				require.Empty(t, h.bob.PendingFundings())
+			})
+	}
+
+	t.Run("locktime as a time", func(t *testing.T) {
+		t.Parallel()
+
+		h := newAcceptorHarness(t)
+		key, _ := btcec.NewPrivateKey()
+		h.machine.HandleSpliceMessage(&lnwire.SpliceInit{
+			ChannelID:           h.machine.cfg.ChanID,
+			FundingContribution: 1_000_000,
+			FundingFeeRatePerKw: 2_500,
+			LockTime:            1_600_000_000,
+			FundingPubKey:       key.PubKey(),
+		})
+		require.Contains(t, abortReason(t, h), codeLocktime)
 		requireResumed(t, h)
 	})
 
