@@ -9,6 +9,9 @@ import (
 	"github.com/lightningnetwork/lnd/chainntnfs"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/input"
+	"github.com/lightningnetwork/lnd/keychain"
+	"github.com/lightningnetwork/lnd/labels"
+	"github.com/lightningnetwork/lnd/lnwallet"
 )
 
 // A splice's transaction spends the channel's funding output, but it doesn't
@@ -184,5 +187,63 @@ func (c *chainWatcher) maybeFollowSplice(spend *chainntnfs.SpendDetail,
 	c.fundingSpendNtfn = moved
 	c.splice = w
 
+	// We had force closed on the previous funding: that commitment can't
+	// confirm now, ours on the splice's funding can.
+	if c.cfg.chanState.HasChanStatus(channeldb.ChanStatusCommitBroadcasted) {
+		c.publishSpliceCommitment(r)
+	}
+
 	return moved, true
+}
+
+// publishSpliceCommitment publishes our signed commitment on a splice's
+// funding output.
+func (c *chainWatcher) publishSpliceCommitment(r *channeldb.SpliceRecord) {
+	if c.cfg.publishTx == nil || r.LocalCommit == nil {
+		return
+	}
+
+	witness, out, err := input.GenFundingPkScript(
+		r.LocalKey.PubKey.SerializeCompressed(),
+		r.RemoteKey.SerializeCompressed(), int64(r.Capacity),
+	)
+	if err != nil {
+		log.Errorf("ChannelPoint(%v): splice funding script: %v",
+			c.cfg.chanState.FundingOutpoint, err)
+		return
+	}
+
+	tx, err := lnwallet.GetSignedCommitTx(lnwallet.SignedCommitTxInputs{
+		CommitTx:  r.LocalCommit.CommitTx,
+		CommitSig: r.LocalCommit.CommitSig,
+		OurKey:    r.LocalKey,
+		TheirKey:  keychain.KeyDescriptor{PubKey: r.RemoteKey},
+		SignDesc: &input.SignDescriptor{
+			KeyDesc:       r.LocalKey,
+			WitnessScript: witness,
+			Output:        out,
+			HashType: lnwallet.CommitSigHashType(
+				c.cfg.chanState.ChanType,
+			),
+			InputIndex: 0,
+		},
+	}, c.cfg.signer)
+	if err != nil {
+		log.Errorf("ChannelPoint(%v): unable to sign our commitment "+
+			"on splice %v: %v", c.cfg.chanState.FundingOutpoint,
+			r.Txid(), err)
+		return
+	}
+
+	log.Infof("ChannelPoint(%v): splice %v confirmed after our force "+
+		"close; publishing our commitment %v on it",
+		c.cfg.chanState.FundingOutpoint, r.Txid(), tx.TxHash())
+
+	err = c.cfg.publishTx(tx, labels.MakeLabel(
+		labels.LabelTypeChannelClose, &c.cfg.chanState.ShortChannelID,
+	))
+	if err != nil {
+		log.Errorf("ChannelPoint(%v): unable to publish commitment: "+
+			"%v", c.cfg.chanState.FundingOutpoint, err)
+	}
 }

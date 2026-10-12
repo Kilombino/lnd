@@ -6,9 +6,11 @@ import (
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightningnetwork/lnd/input"
 	"github.com/lightningnetwork/lnd/keychain"
+	"github.com/lightningnetwork/lnd/lntypes"
 	"github.com/lightningnetwork/lnd/lnwallet"
 	"github.com/stretchr/testify/require"
 )
@@ -201,4 +203,48 @@ func TestChainWatcherSpliceBreach(t *testing.T) {
 
 	breach := h.waitForBreach(5 * time.Second)
 	h.assertBreachTx(breach, revoked)
+}
+
+// TestChainWatcherSpliceAfterForceClose checks a force close racing a
+// splice: we published our commitment on the old funding, the splice
+// confirmed instead, so our commitment on the splice's funding is published,
+// valid under the chain's rules.
+func TestChainWatcherSpliceAfterForceClose(t *testing.T) {
+	t.Parallel()
+
+	h := newChainWatcherTestHarness(t, withRequiredConfs(1))
+	splice := pendSplice(t, h)
+
+	published := make(chan *wire.MsgTx, 1)
+	h.chainWatcher.cfg.publishTx = func(tx *wire.MsgTx, _ string) error {
+		published <- tx
+		return nil
+	}
+
+	oldCommit := h.aliceChannel.State().LocalCommitment.CommitTx
+	require.NoError(t, h.aliceChannel.State().MarkCommitmentBroadcasted(
+		oldCommit, lntypes.Local,
+	))
+
+	followSplice(t, h, splice)
+
+	var tx *wire.MsgTx
+	select {
+	case tx = <-published:
+	case <-time.After(5 * time.Second):
+		t.Fatal("nothing published")
+	}
+	require.Equal(t, wire.OutPoint{Hash: splice.TxHash()},
+		tx.TxIn[0].PreviousOutPoint)
+
+	prevOut := splice.TxOut[0]
+	fetcher := txscript.NewCannedPrevOutputFetcher(
+		prevOut.PkScript, prevOut.Value,
+	)
+	vm, err := txscript.NewEngine(
+		prevOut.PkScript, tx, 0, txscript.StandardVerifyFlags, nil,
+		txscript.NewTxSigHashes(tx, fetcher), prevOut.Value, fetcher,
+	)
+	require.NoError(t, err)
+	require.NoError(t, vm.Execute())
 }

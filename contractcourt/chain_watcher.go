@@ -291,6 +291,11 @@ type chainWatcherConfig struct {
 	// the full required confirmation depth via the existing async path.
 	notifyEarlyCoopClose func(*channeldb.ChannelCloseSummary)
 
+	// publishTx broadcasts a transaction. When a splice confirms after we
+	// force closed the channel on its previous funding, our commitment on
+	// the splice's funding is published with it. Nil skips that.
+	publishTx func(*wire.MsgTx, string) error
+
 	// markLinkInactive takes the channel's link out of the switch. It is
 	// called as soon as the funding output is seen spent by a transaction
 	// this version doesn't recognise: from then on no payment may be

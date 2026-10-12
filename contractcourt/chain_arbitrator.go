@@ -1221,6 +1221,7 @@ func (c *ChainArbitrator) WatchNewChannel(newChan *channeldb.OpenChannel) error 
 			markLinkInactive: func() error {
 				return c.cfg.MarkLinkInactive(chanPoint)
 			},
+			publishTx: c.cfg.PublishTx,
 		},
 	)
 	if err != nil {
@@ -1407,6 +1408,7 @@ func (c *ChainArbitrator) loadOpenChannels() error {
 						chanPoint,
 					)
 				},
+				publishTx: c.cfg.PublishTx,
 			},
 		)
 		if err != nil {
