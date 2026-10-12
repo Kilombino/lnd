@@ -2,6 +2,7 @@ package chainreg
 
 import (
 	"github.com/btcsuite/btcd/rpcclient"
+	"github.com/lightninglabs/neutrino"
 	"github.com/lightningnetwork/lnd/lncfg"
 )
 
@@ -24,6 +25,28 @@ func chainIdentityStatusPath(cfg *Config) string {
 // quit is closed. It returns an error when the node is not on the Bitcoin
 // BLAKE2b chain, or cannot be shown to be.
 func verifyBlake2bBackend(rpc *rpcclient.Client, cfg *Config,
+	quit <-chan struct{}) error {
+
+	return verifyBlake2bChain(rpc, cfg, quit)
+}
+
+// verifyBlake2bNeutrino runs the same check against the neutrino light
+// client: once its headers reach the activation height, the header there must
+// be a v2 header whose id this daemon reproduces, and on mainnet the pinned
+// activation block. The status file is written as for bitcoind, so wrappers
+// read the same state whichever backend runs.
+func verifyBlake2bNeutrino(cs *neutrino.ChainService, cfg *Config,
+	quit <-chan struct{}) error {
+
+	return verifyBlake2bChain(&neutrinoIdentityRPC{
+		src:   cs,
+		chain: bitcoindChainName(cfg.ActiveNetParams.Params),
+	}, cfg, quit)
+}
+
+// verifyBlake2bChain is the check itself, against whatever answers the
+// calls it makes.
+func verifyBlake2bChain(rpc blake2bChainRPC, cfg *Config,
 	quit <-chan struct{}) error {
 
 	params := cfg.ActiveNetParams

@@ -1743,15 +1743,19 @@ func initNeutrinoBackend(ctx context.Context, cfg *Config, chainDir string,
 	// is the inverse of each other. Therefore both cannot be true. For
 	// every other case, the neutrino.validatechannels overwrites the
 	// routing.assumechanvalid value.
-	if cfg.NeutrinoMode.ValidateChannels && cfg.Routing.AssumeChannelValid {
-		return nil, nil, fmt.Errorf("can't set both " +
-			"neutrino.validatechannels and routing." +
-			"assumechanvalid to true at the same time")
+	// On this fork neutrino.validatechannels defaults to true: a light
+	// client would otherwise route over channels nobody checked against
+	// the chain. routing.assumechanvalid=true still turns the check off.
+	if cfg.Routing.AssumeChannelValid {
+		cfg.NeutrinoMode.ValidateChannels = false
 	}
 	cfg.Routing.AssumeChannelValid = !cfg.NeutrinoMode.ValidateChannels
 
 	// Validate neutrino headers import configuration.
 	if err := cfg.NeutrinoMode.Validate(); err != nil {
+		return nil, nil, err
+	}
+	if err := checkNeutrinoBlake2b(cfg); err != nil {
 		return nil, nil, err
 	}
 
@@ -1823,7 +1827,9 @@ func initNeutrinoBackend(ctx context.Context, cfg *Config, chainDir string,
 	config := neutrino.Config{
 		DataDir:      dbPath,
 		Database:     db,
-		ChainParams:  *cfg.ActiveNetParams.Params,
+		// With a checkpoint at the BLAKE2b activation block where it
+		// is pinned (mainnet); see chainreg.NeutrinoChainParams.
+		ChainParams:  *chainreg.NeutrinoChainParams(cfg.ActiveNetParams),
 		AddPeers:     cfg.NeutrinoMode.AddPeers,
 		ConnectPeers: cfg.NeutrinoMode.ConnectPeers,
 		Dialer: func(addr net.Addr) (net.Conn, error) {
