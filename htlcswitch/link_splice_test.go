@@ -859,3 +859,28 @@ func TestLinkPeerInputHold(t *testing.T) {
 	pay(t, n, amount)
 	waitClean(t, n)
 }
+
+// TestLinkBatchAcrossLock checks a batch the peer signed before it learned
+// that the splice locked: its member for the funding the lock replaced is
+// ignored, the one for the splice's funding, now the channel's, is the
+// commitment, and the link revokes as usual.
+func TestLinkBatchAcrossLock(t *testing.T) {
+	t.Parallel()
+
+	s := newSpliceLinkHarness(t)
+	old := s.link.channel.State().CurrentFundingOutpoint().Hash
+	txid := pendSplice(t, s.link.channel, s.bob, 50_000_000)
+
+	main, members := bobBatch(t, s)
+	require.Len(t, members, 1)
+	require.Equal(t, fn.Some(old), main.FundingTxid)
+
+	scid := lnwire.ShortChannelID{BlockHeight: 900_000, TxIndex: 1}
+	require.NoError(t, <-s.link.LockSplice(txid, scid))
+	require.Equal(t, txid,
+		s.link.channel.State().CurrentFundingOutpoint().Hash)
+
+	sendBatch(s, main, members[0])
+	nextSent[*lnwire.RevokeAndAck](t, s)
+	s.requireNoFailure(t)
+}
