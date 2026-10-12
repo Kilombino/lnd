@@ -838,10 +838,11 @@ func (cb *CommitmentBuilder) createUnsignedCommitmentTx(ourBalance,
 	if cb.chanState.ChanType.HasLeaseExpiration() {
 		leaseExpiry = cb.chanState.ThawHeight
 	}
+	localCfg, remoteCfg := funding.configs(cb.chanState)
 	if whoseCommit.IsLocal() {
 		commitTx, err = CreateCommitTx(
 			cb.chanState.ChanType, funding.txIn, keyRing,
-			&cb.chanState.LocalChanCfg, &cb.chanState.RemoteChanCfg,
+			localCfg, remoteCfg,
 			ourBalance.ToSatoshis(), theirBalance.ToSatoshis(),
 			numHTLCs, cb.chanState.IsInitiator, leaseExpiry,
 			auxResult.AuxLeaves,
@@ -849,7 +850,7 @@ func (cb *CommitmentBuilder) createUnsignedCommitmentTx(ourBalance,
 	} else {
 		commitTx, err = CreateCommitTx(
 			cb.chanState.ChanType, funding.txIn, keyRing,
-			&cb.chanState.RemoteChanCfg, &cb.chanState.LocalChanCfg,
+			remoteCfg, localCfg,
 			theirBalance.ToSatoshis(), ourBalance.ToSatoshis(),
 			numHTLCs, !cb.chanState.IsInitiator, leaseExpiry,
 			auxResult.AuxLeaves,

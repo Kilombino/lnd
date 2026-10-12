@@ -9192,6 +9192,10 @@ type AnchorResolutions struct {
 	// commitment tx. The value will be non-nil iff we've created a new
 	// commitment tx for the remote party which they haven't ACKed yet.
 	RemotePending *AnchorResolution
+
+	// Splices are the same for the commitments on each pending splice's
+	// funding output: if the splice confirms, they are the ones that can.
+	Splices []*AnchorResolutions
 }
 
 // NewAnchorResolutions returns a set of anchor resolutions wrapped in the
@@ -9249,8 +9253,9 @@ func (lc *LightningChannel) NewAnchorResolutions() (*AnchorResolutions,
 		return nil, err
 	}
 
+	var pendingRemoteKeyRing *CommitmentKeyRing
 	if remotePendingCommit != nil {
-		pendingRemoteKeyRing := DeriveCommitmentKeys(
+		pendingRemoteKeyRing = DeriveCommitmentKeys(
 			lc.channelState.RemoteNextRevocation, lntypes.Remote,
 			lc.channelState.ChanType, &lc.channelState.LocalChanCfg,
 			&lc.channelState.RemoteChanCfg,
@@ -9264,6 +9269,13 @@ func (lc *LightningChannel) NewAnchorResolutions() (*AnchorResolutions,
 			return nil, err
 		}
 		resolutions.RemotePending = remotePendingRes
+	}
+
+	resolutions.Splices, err = lc.spliceAnchorResolutions(
+		localKeyRing, remoteKeyRing, pendingRemoteKeyRing,
+	)
+	if err != nil {
+		return nil, err
 	}
 
 	return &resolutions, nil

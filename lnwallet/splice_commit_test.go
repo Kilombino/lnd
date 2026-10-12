@@ -255,6 +255,8 @@ func TestSpliceCommitmentExchange(t *testing.T) {
 					requireMovedBalances(
 						t, current, tx, side.ownDelta,
 						side.peerDel,
+						keys.alice.PubKey(),
+						keys.bob.PubKey(),
 					)
 				}
 			})
@@ -263,16 +265,32 @@ func TestSpliceCommitmentExchange(t *testing.T) {
 }
 
 // requireMovedBalances checks that tx is the commitment current on another
-// funding with our and the peer's balance outputs moved by the deltas, and
-// every other output (HTLCs, anchors) the same.
+// funding with our and the peer's balance outputs moved by the deltas, every
+// HTLC output the same, and the anchors, if any, each locked to one of the
+// other funding's keys.
 func requireMovedBalances(t *testing.T, current *commitment, tx *wire.MsgTx,
-	ourDelta, theirDelta btcutil.Amount) {
+	ourDelta, theirDelta btcutil.Amount,
+	fundingKeys ...*btcec.PublicKey) {
 
 	t.Helper()
 
-	before := outputValues(current.txn)
-	after := outputValues(tx)
+	split := func(tx *wire.MsgTx) (map[string]int64, []string) {
+		others := make(map[string]int64)
+		var anchors []string
+		for _, out := range tx.TxOut {
+			if out.Value == int64(AnchorSize) {
+				anchors = append(anchors, string(out.PkScript))
+				continue
+			}
+			others[string(out.PkScript)] = out.Value
+		}
+
+		return others, anchors
+	}
+	before, beforeAnchors := split(current.txn)
+	after, afterAnchors := split(tx)
 	require.Equal(t, len(before), len(after))
+	require.Equal(t, len(beforeAnchors), len(afterAnchors))
 
 	var moved int
 	for script, v := range before {
@@ -284,16 +302,35 @@ func requireMovedBalances(t *testing.T, current *commitment, tx *wire.MsgTx,
 	}
 	require.LessOrEqual(t, moved, 2)
 
-	var totalBefore, totalAfter int64
-	for _, v := range before {
-		totalBefore += v
+	if len(afterAnchors) > 0 {
+		allowed := make(map[string]bool)
+		for _, key := range fundingKeys {
+			script, err := input.CommitScriptAnchor(key)
+			require.NoError(t, err)
+			pkScript, err := input.WitnessScriptHash(script)
+			require.NoError(t, err)
+			allowed[string(pkScript)] = true
+		}
+		for _, a := range afterAnchors {
+			require.True(t, allowed[a], "anchor not on the "+
+				"splice's funding keys")
+		}
 	}
-	for _, v := range after {
-		totalAfter += v
-	}
-	require.Equal(t, totalBefore+int64(ourDelta+theirDelta), totalAfter)
+
+	require.Equal(t, totalOut(current.txn)+int64(ourDelta+theirDelta),
+		totalOut(tx))
 	require.Equal(t, current.txn.LockTime, tx.LockTime)
 	require.Equal(t, current.txn.TxIn[0].Sequence, tx.TxIn[0].Sequence)
+}
+
+// totalOut sums a transaction's outputs.
+func totalOut(tx *wire.MsgTx) int64 {
+	var total int64
+	for _, out := range tx.TxOut {
+		total += out.Value
+	}
+
+	return total
 }
 
 // TestSpliceCommitmentRefused checks what the splice's own commitments
@@ -1215,4 +1252,47 @@ func TestSpliceTowerRetributions(t *testing.T) {
 	splices, err := alice.channelState.SpliceRevocationsAt(atLockHeight)
 	require.NoError(t, err)
 	require.Equal(t, []chainhash.Hash{oldTxid}, splices)
+}
+
+// TestSpliceAnchorResolutions checks the anchors of the commitments on a
+// pending splice's funding output are offered too, each on its own
+// commitment and signed with the splice's funding key, and none once the
+// splice locked.
+func TestSpliceAnchorResolutions(t *testing.T) {
+	t.Parallel()
+
+	alice, bob, txid := splicedPair(t, 100_000_000, 0)
+
+	res, err := alice.NewAnchorResolutions()
+	require.NoError(t, err)
+	require.NotNil(t, res.Local)
+	require.Len(t, res.Splices, 1)
+	splice := res.Splices[0]
+	require.NotNil(t, splice.Local)
+	require.NotNil(t, splice.Remote)
+
+	p, err := alice.pendingFunding(txid)
+	require.NoError(t, err)
+	localTx := p.local[alice.commitChains.Local.tail().height].txn
+	remoteTx := p.remote[alice.commitChains.Remote.tail().height].txn
+	require.Equal(t, localTx.TxHash(), splice.Local.CommitAnchor.Hash)
+	require.Equal(t, remoteTx.TxHash(), splice.Remote.CommitAnchor.Hash)
+	require.NotEqual(t, res.Local.CommitAnchor.Hash,
+		splice.Local.CommitAnchor.Hash)
+
+	// The anchor is ours on that commitment, by the splice's key.
+	require.True(t, p.LocalKey.PubKey.IsEqual(
+		splice.Local.AnchorSignDescriptor.KeyDesc.PubKey,
+	))
+	out := localTx.TxOut[splice.Local.CommitAnchor.Index]
+	require.Equal(t, splice.Local.AnchorSignDescriptor.Output.PkScript,
+		out.PkScript)
+
+	scid := lnwire.ShortChannelID{BlockHeight: 900_300}
+	require.NoError(t, alice.LockPendingFunding(txid, scid))
+	require.NoError(t, bob.LockPendingFunding(txid, scid))
+	res, err = alice.NewAnchorResolutions()
+	require.NoError(t, err)
+	require.Empty(t, res.Splices)
+	require.Equal(t, localTx.TxHash(), res.Local.CommitAnchor.Hash)
 }

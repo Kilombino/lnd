@@ -65,6 +65,27 @@ type commitFunding struct {
 	// to each side's balance, in millisatoshis; zero for the current
 	// funding.
 	localDelta, remoteDelta int64
+
+	// localKey and remoteKey are a pending splice's funding keys, nil for
+	// the current funding's. Each side's anchor locks to its key in the
+	// funding output the commitment spends (BOLT 3).
+	localKey, remoteKey *btcec.PublicKey
+}
+
+// configs returns the channel configurations a commitment on this funding is
+// built with: the channel's, with a pending splice's funding keys.
+func (f commitFunding) configs(ch *channeldb.OpenChannel) (
+	*channeldb.ChannelConfig, *channeldb.ChannelConfig) {
+
+	local, remote := ch.LocalChanCfg, ch.RemoteChanCfg
+	if f.localKey != nil {
+		local.MultiSigKey.PubKey = f.localKey
+	}
+	if f.remoteKey != nil {
+		remote.MultiSigKey.PubKey = f.remoteKey
+	}
+
+	return &local, &remote
 }
 
 // applyDeltas moves pre-fee balances by the funding's deltas. A balance that
@@ -168,6 +189,8 @@ func (p *pendingFunding) commitFunding() commitFunding {
 		capacity:    p.Capacity,
 		localDelta:  int64(p.LocalDelta) * 1000,
 		remoteDelta: int64(p.RemoteDelta) * 1000,
+		localKey:    p.LocalKey.PubKey,
+		remoteKey:   p.RemoteKey,
 	}
 }
 
@@ -1388,4 +1411,64 @@ func (lc *LightningChannel) SpliceCommitSig(
 
 	return nil, fmt.Errorf("no commitment_signed sent for splice %v",
 		txid)
+}
+
+// spliceAnchorResolutions returns the anchor resolutions of the commitments
+// on each pending splice's funding output: the same commitments as the
+// channel's, so the same keys, but anchored with the splice's funding key.
+// pendingRemote is nil without a remote pending commitment.
+//
+// NOTE: must be called with lc's lock held.
+func (lc *LightningChannel) spliceAnchorResolutions(local, remote,
+	pendingRemote *CommitmentKeyRing) ([]*AnchorResolutions, error) {
+
+	if !lc.channelState.ChanType.HasAnchors() {
+		return nil, nil
+	}
+
+	var all []*AnchorResolutions
+	for _, p := range lc.pendingFundings {
+		view := lc.channelState.Copy()
+		view.LocalChanCfg.MultiSigKey = p.LocalKey
+		view.RemoteChanCfg.MultiSigKey = keychain.KeyDescriptor{
+			PubKey: p.RemoteKey,
+		}
+
+		var (
+			res AnchorResolutions
+			err error
+		)
+		localHeight := lc.commitChains.Local.tail().height
+		if c, ok := p.local[localHeight]; ok {
+			res.Local, err = NewAnchorResolution(
+				view, c.txn, local, lntypes.Local,
+			)
+			if err != nil {
+				return nil, err
+			}
+		}
+		remoteHeight := lc.commitChains.Remote.tail().height
+		if c, ok := p.remote[remoteHeight]; ok {
+			res.Remote, err = NewAnchorResolution(
+				view, c.txn, remote, lntypes.Remote,
+			)
+			if err != nil {
+				return nil, err
+			}
+		}
+		tipHeight := lc.commitChains.Remote.tip().height
+		c, ok := p.remote[tipHeight]
+		if pendingRemote != nil && tipHeight != remoteHeight && ok {
+			res.RemotePending, err = NewAnchorResolution(
+				view, c.txn, pendingRemote, lntypes.Remote,
+			)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		all = append(all, &res)
+	}
+
+	return all, nil
 }

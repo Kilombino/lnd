@@ -333,3 +333,45 @@ func TestChainWatcherPreviousFundingBreach(t *testing.T) {
 		t.Fatal("no breach")
 	}
 }
+
+// TestChainWatcherSpliceAfterForceCloseRestart checks our commitment on a
+// splice that beat our force close is published after a restart too: the
+// new watcher sees the splice's spend of the old output again and publishes
+// it, the arbitrator's own broadcast of the old commitment being doomed.
+func TestChainWatcherSpliceAfterForceCloseRestart(t *testing.T) {
+	t.Parallel()
+
+	h := newChainWatcherTestHarness(t, withRequiredConfs(1))
+	splice := pendSplice(t, h)
+
+	oldCommit := h.aliceChannel.State().LocalCommitment.CommitTx
+	require.NoError(t, h.aliceChannel.State().MarkCommitmentBroadcasted(
+		oldCommit, lntypes.Local,
+	))
+
+	// A restart: a new watcher for the channel as it is now.
+	require.NoError(t, h.chainWatcher.Stop())
+	published := make(chan *wire.MsgTx, 1)
+	cfg := h.chainWatcher.cfg
+	cfg.chanState = h.aliceChannel.State()
+	cfg.publishTx = func(tx *wire.MsgTx, _ string) error {
+		published <- tx
+		return nil
+	}
+	w, err := newChainWatcher(cfg)
+	require.NoError(t, err)
+	require.NoError(t, w.Start())
+	t.Cleanup(func() { _ = w.Stop() })
+	h.chainWatcher = w
+	h.waitForSpendRegistration()
+
+	followSplice(t, h, splice)
+
+	select {
+	case tx := <-published:
+		require.Equal(t, wire.OutPoint{Hash: splice.TxHash()},
+			tx.TxIn[0].PreviousOutPoint)
+	case <-time.After(5 * time.Second):
+		t.Fatal("nothing published")
+	}
+}

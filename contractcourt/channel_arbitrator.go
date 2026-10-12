@@ -3350,6 +3350,33 @@ func (c *ChannelArbitrator) createSweepRequest(
 func (c *ChannelArbitrator) prepareAnchorSweeps(heightHint uint32,
 	anchors *lnwallet.AnchorResolutions) ([]sweepRequest, error) {
 
+	requests, err := c.prepareAnchorSweepSet(heightHint, anchors, "")
+	if err != nil {
+		return nil, err
+	}
+
+	// The same commitments on each pending splice's funding output: the
+	// ones that can confirm if the splice does. Their HTLCs, and so their
+	// deadlines, are the channel's.
+	for _, splice := range anchors.Splices {
+		reqs, err := c.prepareAnchorSweepSet(
+			heightHint, splice, "splice ",
+		)
+		if err != nil {
+			return nil, err
+		}
+		requests = append(requests, reqs...)
+	}
+
+	return requests, nil
+}
+
+// prepareAnchorSweepSet prepares the anchor sweeps of one set of commitment
+// versions, its descriptions prefixed by label.
+func (c *ChannelArbitrator) prepareAnchorSweepSet(heightHint uint32,
+	anchors *lnwallet.AnchorResolutions, label string) ([]sweepRequest,
+	error) {
+
 	// requests holds all the possible anchor sweep requests. We can have
 	// up to 3 different versions of commitments (local/remote/remote
 	// dangling) to be CPFPed by the anchors.
@@ -3367,7 +3394,7 @@ func (c *ChannelArbitrator) prepareAnchorSweeps(heightHint uint32,
 	htlcs, ok := c.activeHTLCs[RemotePendingHtlcSet]
 	if ok && anchors.RemotePending != nil {
 		req, err := c.createSweepRequest(
-			anchors.RemotePending, htlcs, "remote pending",
+			anchors.RemotePending, htlcs, label+"remote pending",
 			heightHint,
 		)
 		if err != nil {
@@ -3387,7 +3414,7 @@ func (c *ChannelArbitrator) prepareAnchorSweeps(heightHint uint32,
 	htlcs, ok = c.activeHTLCs[LocalHtlcSet]
 	if ok && anchors.Local != nil {
 		req, err := c.createSweepRequest(
-			anchors.Local, htlcs, "local", heightHint,
+			anchors.Local, htlcs, label+"local", heightHint,
 		)
 		if err != nil {
 			return nil, err
@@ -3424,7 +3451,7 @@ func (c *ChannelArbitrator) prepareAnchorSweeps(heightHint uint32,
 	htlcs, ok = c.activeHTLCs[RemoteHtlcSet]
 	if ok && anchors.Remote != nil {
 		req, err := c.createSweepRequest(
-			anchors.Remote, htlcs, "remote", heightHint,
+			anchors.Remote, htlcs, label+"remote", heightHint,
 		)
 		if err != nil {
 			return nil, err
