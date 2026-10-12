@@ -824,6 +824,10 @@ type LightningChannel struct {
 	// fundingOutput is the funding output (script+value).
 	fundingOutput wire.TxOut
 
+	// pendingFundings are the splices that have not locked yet: every
+	// commitment is also signed on each of their funding outputs.
+	pendingFundings []*pendingFunding
+
 	// opts is the set of options that channel was initialized with.
 	opts *channelOpts
 
@@ -2909,7 +2913,7 @@ func (lc *LightningChannel) fetchCommitmentView(
 	commitTx, err := lc.commitBuilder.createUnsignedCommitmentTx(
 		ourBalance, theirBalance, whoseCommitChain, feePerKw,
 		nextHeight, htlcView, filteredHTLCView, keyRing,
-		commitChain.tip(),
+		commitChain.tip(), lc.currentCommitFunding(),
 	)
 	if err != nil {
 		return nil, err

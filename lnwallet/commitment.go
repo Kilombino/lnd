@@ -736,12 +736,21 @@ type unsignedCommitmentTx struct {
 // createUnsignedCommitmentTx generates the unsigned commitment transaction for
 // a commitment view and returns it as part of the unsignedCommitmentTx. The
 // passed in balances should be balances *before* subtracting any commitment
-// fees, but after anchor outputs.
+// fees, but after anchor outputs. funding is the funding output the
+// commitment spends, with the change a pending splice makes to the balances.
 func (cb *CommitmentBuilder) createUnsignedCommitmentTx(ourBalance,
 	theirBalance lnwire.MilliSatoshi, whoseCommit lntypes.ChannelParty,
 	feePerKw chainfee.SatPerKWeight, height uint64, originalHtlcView,
 	filteredHTLCView *HtlcView, keyRing *CommitmentKeyRing,
-	prevCommit *commitment) (*unsignedCommitmentTx, error) {
+	prevCommit *commitment, funding commitFunding) (*unsignedCommitmentTx,
+	error) {
+
+	ourBalance, theirBalance, err := funding.applyDeltas(
+		ourBalance, theirBalance,
+	)
+	if err != nil {
+		return nil, err
+	}
 
 	dustLimit := cb.chanState.LocalChanCfg.DustLimit
 	if whoseCommit.IsRemote() {
@@ -831,7 +840,7 @@ func (cb *CommitmentBuilder) createUnsignedCommitmentTx(ourBalance,
 	}
 	if whoseCommit.IsLocal() {
 		commitTx, err = CreateCommitTx(
-			cb.chanState.ChanType, fundingTxIn(cb.chanState), keyRing,
+			cb.chanState.ChanType, funding.txIn, keyRing,
 			&cb.chanState.LocalChanCfg, &cb.chanState.RemoteChanCfg,
 			ourBalance.ToSatoshis(), theirBalance.ToSatoshis(),
 			numHTLCs, cb.chanState.IsInitiator, leaseExpiry,
@@ -839,7 +848,7 @@ func (cb *CommitmentBuilder) createUnsignedCommitmentTx(ourBalance,
 		)
 	} else {
 		commitTx, err = CreateCommitTx(
-			cb.chanState.ChanType, fundingTxIn(cb.chanState), keyRing,
+			cb.chanState.ChanType, funding.txIn, keyRing,
 			&cb.chanState.RemoteChanCfg, &cb.chanState.LocalChanCfg,
 			theirBalance.ToSatoshis(), ourBalance.ToSatoshis(),
 			numHTLCs, !cb.chanState.IsInitiator, leaseExpiry,
@@ -964,11 +973,11 @@ func (cb *CommitmentBuilder) createUnsignedCommitmentTx(ourBalance,
 	for _, txOut := range commitTx.TxOut {
 		totalOut += btcutil.Amount(txOut.Value)
 	}
-	if totalOut+commitFee > cb.chanState.Capacity {
+	if totalOut+commitFee > funding.capacity {
 		return nil, fmt.Errorf("height=%v, for ChannelPoint(%v) "+
 			"attempts to consume %v while channel capacity is %v",
 			height, cb.chanState.FundingOutpoint,
-			totalOut+commitFee, cb.chanState.Capacity)
+			totalOut+commitFee, funding.capacity)
 	}
 
 	return &unsignedCommitmentTx{
