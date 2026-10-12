@@ -3,6 +3,8 @@ package splice
 import (
 	"errors"
 	"fmt"
+	"github.com/btcsuite/btcd/btcutil"
+	"sort"
 
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
@@ -23,7 +25,12 @@ import (
 // watchConfirmation waits for the splice to reach our lock depth. Once per
 // splice.
 func (m *Machine) watchConfirmation(heightHint uint32) {
-	a := m.active
+	m.watchConfirmationOf(m.active, heightHint)
+}
+
+// watchConfirmationOf waits for a transaction of the splice, the latest or
+// an earlier one a replacement may lose to, to reach our lock depth.
+func (m *Machine) watchConfirmationOf(a *active, heightHint uint32) {
 	if a.watching {
 		return
 	}
@@ -84,8 +91,15 @@ func (m *Machine) reachedDepth(txid chainhash.Hash,
 	scid lnwire.ShortChannelID) {
 
 	a := m.active
-	if a == nil || a.txid != txid {
+	if a == nil {
 		return
+	}
+	if a.txid != txid {
+		// An earlier transaction of the splice won over its
+		// replacement.
+		if a = m.adopt(txid); a == nil {
+			return
+		}
 	}
 
 	// Confirmed without the peer's tx_signatures reaching us: the peer
@@ -137,6 +151,12 @@ func (m *Machine) handleSpliceLocked(txid chainhash.Hash) {
 	switch {
 	case a == nil:
 		// Already completed: the peer sent it again on reconnecting.
+		return
+
+	// For an earlier transaction of the splice: noted, the lock waits
+	// for our own depth.
+	case a.txid != txid && m.candidate(txid) != nil:
+		m.candidateLocked(m.candidate(txid))
 		return
 
 	// A peer withholding its tx_signatures can still publish the splice
@@ -335,96 +355,137 @@ func (m *Machine) restore() error {
 		return err
 	}
 
+	// The splice's transactions: one, or several when the peer replaced
+	// it, the latest paying the highest fee rate.
+	var attempts []*active
 	for _, r := range records {
 		n := r.Negotiation
 		if r.Retired || n == nil || n.Tx == nil {
 			continue
 		}
-
-		res := &interactivetx.Result{
-			Tx:           n.Tx,
-			FundingIndex: r.OutPoint.Index,
-		}
-		for i, in := range n.Inputs {
-			if i >= len(n.Tx.TxIn) {
-				return errors.New("splice record inputs don't " +
-					"match its transaction")
-			}
-			res.Inputs = append(res.Inputs, &interactivetx.Input{
-				SerialID: in.SerialID,
-				OutPoint: n.Tx.TxIn[i].PreviousOutPoint,
-				Value:    in.Value,
-				PkScript: in.PkScript,
-				Shared:   in.Shared,
-			})
-			if in.Shared {
-				res.SharedIndex = uint32(i)
-			}
-		}
-
-		witness, out, err := input.GenFundingPkScript(
-			r.LocalKey.PubKey.SerializeCompressed(),
-			r.RemoteKey.SerializeCompressed(), int64(r.Capacity),
-		)
+		a, err := restoredActive(r)
 		if err != nil {
 			return err
 		}
+		attempts = append(attempts, a)
+	}
+	if len(attempts) == 0 {
+		return nil
+	}
+	sort.Slice(attempts, func(i, j int) bool {
+		return attempts[i].feeRate < attempts[j].feeRate
+	})
+	a := attempts[len(attempts)-1]
+	for _, c := range attempts[:len(attempts)-1] {
+		// Only a transaction signed both ways was replaced.
+		if c.ourTxSigs == nil || c.theirTxSigs == nil {
+			log.Warnf("ChannelID(%v): splice %v replaced unsigned, "+
+				"left out", m.cfg.ChanID, c.txid)
+			continue
+		}
+		c.phase = phasePending
+		a.replaced = append(a.replaced, c)
+	}
 
-		role := interactivetx.Acceptor
-		if n.WeInitiated {
-			role = interactivetx.Initiator
-		}
-		a := &active{
-			phase:             phaseSigning,
-			role:              role,
-			res:               res,
-			txid:              r.Txid(),
-			fundingIndex:      r.OutPoint.Index,
-			fundingScript:     out.PkScript,
-			fundingWitness:    witness,
-			ourKey:            r.LocalKey,
-			theirKey:          r.RemoteKey,
-			ourContribution:   r.LocalDelta,
-			theirContribution: r.RemoteDelta,
-			capacity:          r.Capacity,
-			feeRate:           chainfee.SatPerKWeight(n.FeeRate),
-			commitSent:        r.SpliceSig != nil,
-			commitReceived:    r.LocalCommit != nil,
-			ourTxSigs:         n.OurTxSignatures,
-			theirTxSigs:       n.TheirTxSignatures,
-			lockedSent:        n.LockedSent,
-			lockedReceived:    n.LockedReceived,
-		}
-		for _, op := range n.OurInputs {
-			a.ourInputs = append(a.ourInputs, Coin{OutPoint: op})
-		}
-		m.active = a
-		if role == interactivetx.Acceptor {
-			m.cfg.Limits.admit(
-				m, m.cfg.ChanID, m.cfg.TheirNodeID, true,
-			)
-		}
+	m.active = a
+	if a.role == interactivetx.Acceptor {
+		m.cfg.Limits.admit(m, m.cfg.ChanID, m.cfg.TheirNodeID, true)
+	}
+	for _, c := range a.replaced {
+		m.watchConfirmationOf(c, c.broadcastHeight)
+	}
 
-		switch {
-		case a.ourTxSigs != nil && a.theirTxSigs != nil:
+	switch {
+	case a.ourTxSigs != nil && a.theirTxSigs != nil:
+		a.phase = phasePending
+		m.resumePending(a.broadcastHeight)
+
+	// Ours went out and the peer's never came: it may publish the
+	// splice. Once we had locked it, it is pending (we owe splice_locked
+	// on reconnecting, not next_funding).
+	case a.ourTxSigs != nil:
+		if a.lockedSent {
 			a.phase = phasePending
-			m.resumePending(n.BroadcastHeight)
-
-		// Ours went out and the peer's never came: it may publish
-		// the splice. Once we had locked it, it is pending (we owe
-		// splice_locked on reconnecting, not next_funding).
-		case a.ourTxSigs != nil:
-			if a.lockedSent {
-				a.phase = phasePending
-			}
-			m.watchWithheld()
 		}
-
-		// One splice at a time in M1.
-		break
+		m.watchWithheld()
 	}
 
 	return nil
+}
+
+// restoredActive rebuilds a splice transaction from its record.
+func restoredActive(r *channeldb.SpliceRecord) (*active, error) {
+	n := r.Negotiation
+	res := &interactivetx.Result{
+		Tx:           n.Tx,
+		FundingIndex: r.OutPoint.Index,
+	}
+	for i, in := range n.Inputs {
+		if i >= len(n.Tx.TxIn) {
+			return nil, errors.New("splice record inputs don't " +
+				"match its transaction")
+		}
+		res.Inputs = append(res.Inputs, &interactivetx.Input{
+			SerialID: in.SerialID,
+			OutPoint: n.Tx.TxIn[i].PreviousOutPoint,
+			Value:    in.Value,
+			PkScript: in.PkScript,
+			Shared:   in.Shared,
+		})
+		if in.Shared {
+			res.SharedIndex = uint32(i)
+		}
+	}
+
+	witness, out, err := input.GenFundingPkScript(
+		r.LocalKey.PubKey.SerializeCompressed(),
+		r.RemoteKey.SerializeCompressed(), int64(r.Capacity),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	role := interactivetx.Acceptor
+	if n.WeInitiated {
+		role = interactivetx.Initiator
+	}
+	a := &active{
+		phase:             phaseSigning,
+		role:              role,
+		res:               res,
+		txid:              r.Txid(),
+		fundingIndex:      r.OutPoint.Index,
+		fundingScript:     out.PkScript,
+		fundingWitness:    witness,
+		ourKey:            r.LocalKey,
+		theirKey:          r.RemoteKey,
+		ourContribution:   r.LocalDelta,
+		theirContribution: r.RemoteDelta,
+		capacity:          r.Capacity,
+		feeRate:           chainfee.SatPerKWeight(n.FeeRate),
+		commitSent:        r.SpliceSig != nil,
+		commitReceived:    r.LocalCommit != nil,
+		ourTxSigs:         n.OurTxSignatures,
+		theirTxSigs:       n.TheirTxSignatures,
+		lockedSent:        n.LockedSent,
+		lockedReceived:    n.LockedReceived,
+		broadcastHeight:   n.BroadcastHeight,
+	}
+	for _, op := range n.OurInputs {
+		a.ourInputs = append(a.ourInputs, Coin{OutPoint: op})
+	}
+
+	// The fee, which a replacement must at least pay.
+	var paid, kept int64
+	for _, i := range n.Inputs {
+		paid += int64(i.Value)
+	}
+	for _, o := range n.Tx.TxOut {
+		kept += o.Value
+	}
+	res.Fee = btcutil.Amount(paid - kept)
+
+	return a, nil
 }
 
 // resumePending picks a signed splice up again after a restart: published
@@ -634,6 +695,12 @@ func (m *Machine) waitDepth(txid chainhash.Hash, script []byte,
 func (m *Machine) spliceDead(txid, conflict chainhash.Hash) {
 	a := m.active
 	if a == nil || a.txid != txid {
+		return
+	}
+
+	// Spent by an earlier transaction of the same splice: that one is
+	// the splice, adopted at its lock depth.
+	if m.candidate(conflict) != nil {
 		return
 	}
 

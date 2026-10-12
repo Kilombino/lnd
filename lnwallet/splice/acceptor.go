@@ -335,6 +335,19 @@ func (m *Machine) advanceConstruction() {
 		m.constructionFailed(err)
 		return
 	}
+	if err := m.checkReplacementFee(res); err != nil {
+		m.abort(codeFeeBelowFloor, "%v", err)
+		m.forget()
+
+		return
+	}
+	if m.candidate(res.Tx.TxHash()) != nil {
+		m.abort(codeRbfUnsupported, "replacement is the transaction "+
+			"it replaces")
+		m.forget()
+
+		return
+	}
 	m.constructionDone(res)
 }
 

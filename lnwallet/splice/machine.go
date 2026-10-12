@@ -337,6 +337,15 @@ type active struct {
 	// watching is set once the splice's confirmations are watched.
 	watching bool
 
+	// broadcastHeight is when we first published it, from its record
+	// after a restart.
+	broadcastHeight uint32
+
+	// replaced are the splice's earlier transactions, signed both ways,
+	// which a replacement (the peer's tx_init_rbf) may yet lose to:
+	// whichever confirms is the splice.
+	replaced []*active
+
 	// timeout ends a negotiation that takes too long.
 	timeout *time.Timer
 
@@ -580,6 +589,13 @@ func (m *Machine) forget() {
 		return
 	}
 
+	// A replacement we hadn't signed: the transaction it replaced is
+	// the splice again.
+	if len(a.replaced) > 0 && a.ourTxSigs == nil {
+		m.forgetReplacement()
+		return
+	}
+
 	// Out of the channel's funding set, which deletes its record; one
 	// that never got in has only its record.
 	if a.res != nil {
@@ -655,9 +671,7 @@ func (m *Machine) handleMessage(msg lnwire.Message) {
 		m.handleTxAbort(msg)
 
 	case *lnwire.TxInitRbf:
-		// Replacing a pending splice comes later; the spec lets us
-		// refuse it.
-		m.abort(codeRbfUnsupported, "")
+		m.handleTxInitRbf(msg)
 
 	case *lnwire.TxAckRbf:
 		m.warnAndDisconnect("tx_ack_rbf without our tx_init_rbf")

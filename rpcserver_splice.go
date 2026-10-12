@@ -473,31 +473,38 @@ func (r *rpcServer) addSpliceFields(ch *channeldb.OpenChannel,
 		rpcsLog.Errorf("ChannelPoint(%v): unable to read splices: %v",
 			ch.FundingOutpoint, err)
 	}
+	// A splice the peer replaced has a record per transaction: the
+	// latest, at the highest fee rate, is the one shown. What we can
+	// count on is the least on any of them.
+	var latest *channeldb.SpliceRecord
 	for _, rec := range records {
 		if rec.Retired {
 			continue
 		}
-		channel.PendingSplice = rpcPendingSplice(rec)
-		if spliceWentOut(rec) {
-			relay := r.spliceRelay(ch, rec.Txid())
-			channel.PendingSplice.RelayStatus = string(relay.State)
-			channel.PendingSplice.RelayReason = relay.Reason
+		if latest == nil || spliceFeeRate(rec) >= spliceFeeRate(latest) {
+			latest = rec
 		}
-		setSpliceDepth(
-			channel.PendingSplice, r.spliceConfirmations(rec),
-			spliceLockDepth(
-				ch.NumConfsRequired,
-				btcutil.Amount(max(0, int64(rec.RemoteDelta))),
-			),
-		)
-
-		// What we can count on is the least on any funding.
 		if rec.LocalCommit != nil {
 			local := int64(rec.LocalCommit.LocalBalance.ToSatoshis())
 			if local < channel.LocalBalance {
 				channel.LocalBalance = local
 			}
 		}
+	}
+	if latest != nil {
+		channel.PendingSplice = rpcPendingSplice(latest)
+		if spliceWentOut(latest) {
+			relay := r.spliceRelay(ch, latest.Txid())
+			channel.PendingSplice.RelayStatus = string(relay.State)
+			channel.PendingSplice.RelayReason = relay.Reason
+		}
+		setSpliceDepth(
+			channel.PendingSplice, r.spliceConfirmations(latest),
+			spliceLockDepth(
+				ch.NumConfsRequired,
+				btcutil.Amount(max(0, int64(latest.RemoteDelta))),
+			),
+		)
 	}
 
 	last, err := ch.LastSplice()
@@ -618,6 +625,15 @@ func (r *rpcServer) spliceRelay(ch *channeldb.OpenChannel,
 	}
 
 	return m.RelayStatus(txid)
+}
+
+// spliceFeeRate returns a splice record's fee rate, 0 before it has one.
+func spliceFeeRate(rec *channeldb.SpliceRecord) uint64 {
+	if rec.Negotiation == nil {
+		return 0
+	}
+
+	return rec.Negotiation.FeeRate
 }
 
 // spliceWentOut reports whether a splice's transaction is complete, both
