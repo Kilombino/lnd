@@ -997,6 +997,7 @@ func (l *channelLink) syncChanStates(ctx context.Context) error {
 		return fmt.Errorf("unable to generate chan sync message for "+
 			"ChannelPoint(%v)", l.channel.ChannelPoint())
 	}
+	l.amendChanSync(localChanSyncMsg)
 	if err := l.cfg.Peer.SendMessage(true, localChanSyncMsg); err != nil {
 		return fmt.Errorf("unable to send chan sync message for "+
 			"ChannelPoint(%v): %v", l.channel.ChannelPoint(), err)
@@ -1025,7 +1026,8 @@ func (l *channelLink) syncChanStates(ctx context.Context) error {
 		// ChannelReady message.
 		if remoteChanSyncMsg.NextLocalCommitHeight == 1 &&
 			localChanSyncMsg.NextLocalCommitHeight == 1 &&
-			!l.channel.IsPending() {
+			!l.channel.IsPending() &&
+			!l.namesSplice(localChanSyncMsg, remoteChanSyncMsg) {
 
 			l.log.Infof("resending ChannelReady message to peer")
 
@@ -1147,6 +1149,13 @@ func (l *channelLink) syncChanStates(ctx context.Context) error {
 				l.log.Errorf("failed to send %v: %v",
 					msg.MsgType(), err)
 			}
+		}
+
+		// The splice's part: our commitment_signed for it if asked
+		// for, then the machine's.
+		if l.cfg.SpliceHandler != nil {
+			l.resendSpliceCommitSig(remoteChanSyncMsg)
+			l.cfg.SpliceHandler.HandleReestablish(remoteChanSyncMsg)
 		}
 
 	case <-l.cg.Done():

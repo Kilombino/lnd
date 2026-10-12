@@ -17,11 +17,34 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// recordingSpliceHandler records what the link hands the splice machine.
+// recordingSpliceHandler records what the link hands the splice machine,
+// and gives it the reestablish fields to send.
 type recordingSpliceHandler struct {
-	mu       sync.Mutex
-	messages []lnwire.Message
-	commits  []error
+	mu            sync.Mutex
+	messages      []lnwire.Message
+	commits       []error
+	reestablish   []*lnwire.ChannelReestablish
+	nextFunding   fn.Option[lnwire.FundingTxidFlags]
+	fundingLocked fn.Option[lnwire.FundingTxidFlags]
+}
+
+func (h *recordingSpliceHandler) ReestablishTLVs() (
+	fn.Option[lnwire.FundingTxidFlags],
+	fn.Option[lnwire.FundingTxidFlags]) {
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	return h.nextFunding, h.fundingLocked
+}
+
+func (h *recordingSpliceHandler) HandleReestablish(
+	msg *lnwire.ChannelReestablish) {
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	h.reestablish = append(h.reestablish, msg)
 }
 
 func (h *recordingSpliceHandler) HandleSpliceMessage(msg lnwire.Message) {
@@ -638,4 +661,119 @@ func TestLinkSpliceCommitSig(t *testing.T) {
 		return len(s.handler.commits) == 2
 	}, 5*time.Second, 20*time.Millisecond)
 	require.Error(t, s.handler.commits[1])
+}
+
+// TestLinkReestablishSplice checks reconnecting in the middle of a splice:
+// Bob's commitment_signed for it was lost, so Alice's next_funding asks for
+// it again. Bob's link resends it, Alice's link records it, each machine gets
+// the other's channel_reestablish with its splice fields, channel_ready isn't
+// resent because a splice is named, and the channel then updates in batches.
+func TestLinkReestablishSplice(t *testing.T) {
+	t.Parallel()
+
+	alice, bob, err := createMirroredChannel(
+		t, btcutil.SatoshiPerBitcoin*3, btcutil.SatoshiPerBitcoin*5,
+	)
+	require.NoError(t, err)
+
+	aliceKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	bobKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	as := alice.channel.Signer.(*input.MockSigner)
+	as.Privkeys = append(as.Privkeys, aliceKey)
+	bs := bob.channel.Signer.(*input.MockSigner)
+	bs.Privkeys = append(bs.Privkeys, bobKey)
+
+	const added = btcutil.Amount(30_000_000)
+	txid := chainhash.Hash{0x5e, 0x44}
+	op := wire.OutPoint{Hash: txid}
+	capacity := alice.channel.State().Capacity + added
+	require.NoError(t, alice.channel.AddPendingFunding(
+		lnwallet.PendingFunding{
+			OutPoint: op, Capacity: capacity,
+			LocalKey: keychain.KeyDescriptor{
+				PubKey: aliceKey.PubKey(),
+			},
+			RemoteKey: bobKey.PubKey(), LocalDelta: added,
+		},
+	))
+	require.NoError(t, bob.channel.AddPendingFunding(lnwallet.PendingFunding{
+		OutPoint: op, Capacity: capacity,
+		LocalKey:    keychain.KeyDescriptor{PubKey: bobKey.PubKey()},
+		RemoteKey:   aliceKey.PubKey(),
+		RemoteDelta: added,
+	}))
+
+	// Alice's reached Bob; Bob's was signed and sent, then lost.
+	sigs, err := alice.channel.SignSpliceCommitment(t.Context(), txid)
+	require.NoError(t, err)
+	require.NoError(t, bob.channel.ReceiveSpliceCommitment(txid, sigs))
+	_, err = bob.channel.SignSpliceCommitment(t.Context(), txid)
+	require.NoError(t, err)
+
+	original := alice.channel.State().FundingOutpoint.Hash
+	aliceHandler := &recordingSpliceHandler{
+		nextFunding: fn.Some(lnwire.FundingTxidFlags{
+			Txid:            txid,
+			RetransmitFlags: lnwire.RetransmitCommitSig,
+		}),
+		fundingLocked: fn.Some(lnwire.FundingTxidFlags{
+			Txid: original,
+		}),
+	}
+	bobHandler := &recordingSpliceHandler{
+		nextFunding: fn.Some(lnwire.FundingTxidFlags{Txid: txid}),
+		fundingLocked: fn.Some(lnwire.FundingTxidFlags{
+			Txid: original,
+		}),
+	}
+	n := newTwoHopNetwork(
+		t, alice.channel, bob.channel, testStartingHeight,
+		func(c *ChannelLinkConfig) { c.SpliceHandler = aliceHandler },
+		func(c *ChannelLinkConfig) { c.SpliceHandler = bobHandler },
+	)
+
+	// Alice gets Bob's commitment_signed for the splice.
+	require.Eventually(t, func() bool {
+		aliceHandler.mu.Lock()
+		defer aliceHandler.mu.Unlock()
+
+		return len(aliceHandler.commits) == 1
+	}, 10*time.Second, 20*time.Millisecond)
+	require.NoError(t, aliceHandler.commits[0])
+
+	// Each machine saw the other's splice fields.
+	for _, h := range []*recordingSpliceHandler{aliceHandler, bobHandler} {
+		h.mu.Lock()
+		require.Len(t, h.reestablish, 1)
+		got := h.reestablish[0]
+		h.mu.Unlock()
+
+		require.Equal(t, txid,
+			got.NextFunding.UnsafeFromSome().Txid)
+		require.Equal(t, original,
+			got.MyCurrentFundingLocked.UnsafeFromSome().Txid)
+	}
+
+	// No channel_ready resent: a splice was named.
+	for _, s := range []*mockServer{n.aliceServer, n.bobServer} {
+		s.protocolTraceMtx.Lock()
+		for _, m := range s.protocolTrace {
+			require.NotEqual(t,
+				lnwire.MessageType(lnwire.MsgChannelReady),
+				m.MsgType())
+		}
+		s.protocolTraceMtx.Unlock()
+	}
+
+	// The channel carries on, in batches.
+	pay(t, n, lnwire.NewMSatFromSatoshis(2_000_000))
+	waitClean(t, n)
+	for _, link := range []*channelLink{
+		n.aliceChannelLink, n.bobChannelLink,
+	} {
+		_, err := link.channel.SignedSpliceCommitment(txid)
+		require.NoError(t, err)
+	}
 }

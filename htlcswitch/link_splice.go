@@ -30,6 +30,20 @@ type SpliceHandler interface {
 	// splice: nil once its signatures checked out and were recorded, the
 	// reason otherwise. It must not block.
 	SpliceCommitReceived(txid chainhash.Hash, err error)
+
+	// ReestablishTLVs returns this node's splice fields of
+	// channel_reestablish: next_funding while a splice's tx_signatures
+	// haven't been received, and my_current_funding_locked, which is
+	// always sent once splicing is negotiated.
+	ReestablishTLVs() (nextFunding,
+		currentLocked fn.Option[lnwire.FundingTxidFlags])
+
+	// HandleReestablish takes the peer's channel_reestablish after the
+	// link has resent what it owes (commitments, and the splice's
+	// commitment_signed if asked for): the machine resends tx_signatures,
+	// answers an unknown next_funding with tx_abort, and treats
+	// my_current_funding_locked as splice_locked. It must not block.
+	HandleReestablish(msg *lnwire.ChannelReestablish)
 }
 
 var (
@@ -192,11 +206,13 @@ func (l *channelLink) handleBatchedCommitSig(ctx context.Context,
 }
 
 // isSpliceCommitSig reports whether msg is the commitment_signed for a
-// splice's own transaction: outside a batch, naming a pending splice, while
-// the channel is quiescent for its negotiation.
+// splice's own transaction: outside a batch and naming a pending splice.
+// Every other commitment_signed while a splice is pending comes in a batch,
+// and one outside names the current funding. It can come after a
+// reconnection too, when the peer resends it for next_funding.
 func (l *channelLink) isSpliceCommitSig(msg *lnwire.CommitSig) bool {
 	txid, err := msg.FundingTxid.UnwrapOrErr(errors.New("none"))
-	if err != nil || l.batch != nil || !l.quiescer.IsQuiescent() {
+	if err != nil || l.batch != nil {
 		return false
 	}
 	for _, f := range l.channel.PendingFundings() {
@@ -333,4 +349,58 @@ func (l *channelLink) LockSplice(txid chainhash.Hash,
 	return l.runSpliceReq(func(context.Context) error {
 		return l.channel.LockPendingFunding(txid, scid)
 	})
+}
+
+// amendChanSync adds the splice machine's fields to our channel_reestablish.
+func (l *channelLink) amendChanSync(msg *lnwire.ChannelReestablish) {
+	if l.cfg.SpliceHandler == nil {
+		return
+	}
+
+	msg.NextFunding, msg.MyCurrentFundingLocked =
+		l.cfg.SpliceHandler.ReestablishTLVs()
+}
+
+// namesSplice reports whether either channel_reestablish names a splice
+// transaction: then channel_ready isn't sent again.
+func (l *channelLink) namesSplice(msgs ...*lnwire.ChannelReestablish) bool {
+	original := l.channel.State().FundingOutpoint.Hash
+	for _, m := range msgs {
+		for _, f := range []fn.Option[lnwire.FundingTxidFlags]{
+			m.NextFunding, m.MyCurrentFundingLocked,
+		} {
+			named := fn.MapOptionZ(f,
+				func(f lnwire.FundingTxidFlags) bool {
+					return f.Txid != original
+				},
+			)
+			if named {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// resendSpliceCommitSig sends our commitment_signed for a splice again when
+// the peer's next_funding asks for it and we have one, before the splice
+// machine resends anything that follows it.
+func (l *channelLink) resendSpliceCommitSig(remote *lnwire.ChannelReestablish) {
+	next, err := remote.NextFunding.UnwrapOrErr(errors.New("none"))
+	if err != nil || next.RetransmitFlags&lnwire.RetransmitCommitSig == 0 {
+		return
+	}
+
+	sig, err := l.channel.SpliceCommitSig(next.Txid)
+	if err != nil {
+		l.log.Debugf("no commitment_signed to resend for splice "+
+			"%v: %v", next.Txid, err)
+
+		return
+	}
+	if err := l.cfg.Peer.SendMessage(false, sig); err != nil {
+		l.log.Errorf("failed to resend splice commitment_signed: %v",
+			err)
+	}
 }

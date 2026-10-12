@@ -1363,3 +1363,29 @@ func attachHtlcSigs(c *commitment, stored *channeldb.ChannelCommitment) error {
 
 	return attach(c.incomingHTLCs, true)
 }
+
+// SpliceCommitSig returns our commitment_signed for a pending splice's own
+// transaction, as first sent, to send again when the peer asks for it on
+// reconnecting.
+func (lc *LightningChannel) SpliceCommitSig(
+	txid chainhash.Hash) (*lnwire.CommitSig, error) {
+
+	lc.RLock()
+	defer lc.RUnlock()
+
+	if _, err := lc.pendingFunding(txid); err != nil {
+		return nil, err
+	}
+	records, err := lc.channelState.SpliceRecords()
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range records {
+		if r.Txid() == txid && r.SpliceSig != nil {
+			return r.SpliceSig, nil
+		}
+	}
+
+	return nil, fmt.Errorf("no commitment_signed sent for splice %v",
+		txid)
+}
