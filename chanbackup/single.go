@@ -839,9 +839,7 @@ func (s *Single) UnpackFromReader(r io.Reader, keyRing keychain.KeyRing) error {
 	}
 
 	singles := []Single{*s}
-	if err := readSpliceTrailer(backupReader, singles); err != nil {
-		return err
-	}
+	readSpliceTrailer(backupReader, singles)
 	s.Splice = singles[0].Splice
 
 	return nil

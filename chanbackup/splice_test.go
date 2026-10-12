@@ -200,7 +200,7 @@ func TestSpliceTrailerOlderVersion(t *testing.T) {
 }
 
 // TestSpliceTrailerUnknown checks data after the backups that this version
-// doesn't know is skipped, and a damaged trailer refused.
+// doesn't know is skipped, and a damaged trailer skipped whole.
 func TestSpliceTrailerUnknown(t *testing.T) {
 	t.Parallel()
 
@@ -239,8 +239,10 @@ func TestSpliceTrailerUnknown(t *testing.T) {
 	stranger := singles[0]
 	stranger.FundingOutpoint.Index++
 	require.NoError(t, writeSpliceTrailer(&trailer, []Single{stranger}))
-	_, err = unpack(append(append([]byte{}, base...), trailer.Bytes()...))
-	require.ErrorContains(t, err, "has no backup")
+	m, err = unpack(append(append([]byte{}, base...), trailer.Bytes()...))
+	require.NoError(t, err)
+	require.Len(t, m.StaticBackups, 1)
+	require.Nil(t, m.StaticBackups[0].Splice)
 
 	// A cut trailer.
 	trailer.Reset()
@@ -251,8 +253,19 @@ func TestSpliceTrailerUnknown(t *testing.T) {
 	m, err = unpack(full)
 	require.NoError(t, err)
 	requireSpliceEqual(t, own.Splice, m.StaticBackups[0].Splice)
-	_, err = unpack(full[:len(full)-3])
-	require.Error(t, err)
+	m, err = unpack(full[:len(full)-3])
+	require.NoError(t, err)
+	require.Len(t, m.StaticBackups, 1)
+	require.Nil(t, m.StaticBackups[0].Splice)
+
+	// So is a damaged one: the channels restore without it. Here one
+	// entry is fine and the next names no backup: neither is taken.
+	var both bytes.Buffer
+	stranger.Splice = own.Splice
+	require.NoError(t, writeSpliceTrailer(&both, []Single{own, stranger}))
+	m, err = unpack(append(append([]byte{}, base...), both.Bytes()...))
+	require.NoError(t, err)
+	require.Nil(t, m.StaticBackups[0].Splice)
 }
 
 // TestBuildSingleSpliced checks the backup of a channel a splice moved

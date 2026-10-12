@@ -1412,6 +1412,9 @@ func (c *chainWatcher) toSelfAmount(tx *wire.MsgTx) btcutil.Amount {
 	//
 	// isWalletOutput :: *TxOut -> bool
 	isWalletOutput := func(out *wire.TxOut) bool {
+		if c.cfg.isOurAddr == nil {
+			return false
+		}
 		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
 			// Doesn't matter what net we actually pass in.
 			out.PkScript, &chaincfg.TestNet3Params,
@@ -1591,9 +1594,21 @@ func (c *chainWatcher) isCoopCloseSpend(spendingTx *wire.MsgTx) bool {
 	if len(spendingTx.TxIn) != 1 {
 		return false
 	}
+	if !hasCoopCloseSequence(spendingTx) || isCommitmentShaped(spendingTx) {
+		return false
+	}
+	if c.closeNegotiated() {
+		return true
+	}
 
-	return hasCoopCloseSequence(spendingTx) &&
-		!isCommitmentShaped(spendingTx) && c.closeNegotiated()
+	// A restored channel knows of no shutdown, and its backup may predate
+	// a splice, which spends the funding output alone too when it only
+	// moves funds out.
+	if c.cfg.chanState.HasChanStatus(channeldb.ChanStatusRestored) {
+		return c.restoredCoopClose(spendingTx)
+	}
+
+	return false
 }
 
 // isUnknownSpend reports whether the supplied spending tx is neither shaped

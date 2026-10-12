@@ -24,8 +24,10 @@ import (
 // The trailer follows the last Single of a Multi, or the Single of a packed
 // single backup. A version that doesn't know it stops reading before it: a
 // Multi is read by count, a Single by its fields. So an older version restores
-// every channel of the file, a spliced one as it was opened, and the spend of
-// its original funding output is then something it doesn't take for a close.
+// every channel of the file, a spliced one as it was opened. Restored that
+// way, a spliced channel's funds need this version's handling of a funding
+// output a splice moved: a version before it may take the splice for a
+// cooperative close.
 
 // spliceTrailerMagic starts the trailer.
 var spliceTrailerMagic = [4]byte{'L', 'F', 'S', 'P'}
@@ -253,20 +255,39 @@ func writeSpliceTrailer(w *bytes.Buffer, singles []Single) error {
 }
 
 // readSpliceTrailer reads the trailer, if r holds one, onto the singles it
-// names. A trailer of a later format is skipped.
-func readSpliceTrailer(r *bytes.Reader, singles []Single) error {
+// names. A trailer of a later format is skipped; a damaged one too, with a
+// warning: the channels restore without it, onto the outputs they were
+// opened on, and a splice since is found on chain.
+func readSpliceTrailer(r *bytes.Reader, singles []Single) {
+	splices, err := parseSpliceTrailer(r, singles)
+	if err != nil {
+		log.Warnf("Skipping damaged splice data in the channel "+
+			"backup: %v", err)
+
+		return
+	}
+	for i, b := range splices {
+		singles[i].Splice = b
+	}
+}
+
+// parseSpliceTrailer parses the trailer, if r holds one, returning the splice
+// data of the singles it names by index.
+func parseSpliceTrailer(r *bytes.Reader,
+	singles []Single) (map[int]*SpliceBackup, error) {
+
 	if r.Len() == 0 {
-		return nil
+		return nil, nil
 	}
 
 	var magic [4]byte
 	if _, err := io.ReadFull(r, magic[:]); err != nil {
-		return fmt.Errorf("backup trailer: %w", err)
+		return nil, fmt.Errorf("backup trailer: %w", err)
 	}
 	if magic != spliceTrailerMagic {
 		log.Warnf("Skipping unknown data after the channel backups")
 
-		return nil
+		return nil, nil
 	}
 
 	var (
@@ -274,46 +295,48 @@ func readSpliceTrailer(r *bytes.Reader, singles []Single) error {
 		count   uint32
 	)
 	if err := lnwire.ReadElements(r, &version); err != nil {
-		return err
+		return nil, err
 	}
 	if version != spliceTrailerVersion {
 		log.Warnf("Skipping splice data of an unknown format %v in "+
 			"the channel backup", version)
 
-		return nil
+		return nil, nil
 	}
 	if err := lnwire.ReadElements(r, &count); err != nil {
-		return err
+		return nil, err
 	}
 
-	byOutpoint := make(map[wire.OutPoint]*Single, len(singles))
+	byOutpoint := make(map[wire.OutPoint]int, len(singles))
 	for i := range singles {
-		byOutpoint[singles[i].FundingOutpoint] = &singles[i]
+		byOutpoint[singles[i].FundingOutpoint] = i
 	}
+	splices := make(map[int]*SpliceBackup)
 	for range count {
 		var (
 			op     wire.OutPoint
 			length uint16
 		)
 		if err := lnwire.ReadElements(r, &op, &length); err != nil {
-			return err
+			return nil, err
 		}
 		body := make([]byte, length)
 		if _, err := io.ReadFull(r, body); err != nil {
-			return err
+			return nil, err
 		}
 
-		s, ok := byOutpoint[op]
+		i, ok := byOutpoint[op]
 		if !ok {
-			return fmt.Errorf("splice data for %v, which has no "+
-				"backup", op)
+			return nil, fmt.Errorf("splice data for %v, which has "+
+				"no backup", op)
 		}
 		b, err := decodeSpliceBackup(body)
 		if err != nil {
-			return fmt.Errorf("splice data for %v: %w", op, err)
+			return nil, fmt.Errorf("splice data for %v: %w", op,
+				err)
 		}
-		s.Splice = b
+		splices[i] = b
 	}
 
-	return nil
+	return splices, nil
 }

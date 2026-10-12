@@ -228,3 +228,54 @@ func TestRestoreUnsplicedChannel(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, records)
 }
+
+// TestPendingSplicesRestored checks a restored channel's splice records don't
+// keep splicing advertised: they only say what its backup knew. (A restored
+// channel isn't among the open channels read.)
+func TestPendingSplicesRestored(t *testing.T) {
+	db, err := channeldb.MakeTestDB(t)
+	require.NoError(t, err)
+	cdb := db.ChannelStateDB()
+
+	priv, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	remote := priv.PubKey()
+	chainHash := chainreg.BitcoinMainNetParams.ChainHash
+	candidate := chanbackup.SpliceFunding{
+		OutPoint:  wire.OutPoint{Hash: chainhash.Hash{8}},
+		Capacity:  2_000_000,
+		LocalKey:  multiSigLoc(6),
+		RemoteKey: remote,
+	}
+	single := chanbackup.Single{
+		Version:         chanbackup.AnchorsZeroFeeHtlcTxCommitVersion,
+		ChainHash:       chainHash,
+		FundingOutpoint: wire.OutPoint{Hash: chainhash.Hash{7}},
+		RemoteNodePub:   remote,
+		Capacity:        1_000_000,
+		LocalChanCfg:    channeldb.ChannelConfig{MultiSigKey: multiSigLoc(1)},
+		RemoteChanCfg: channeldb.ChannelConfig{
+			MultiSigKey:         keychain.KeyDescriptor{PubKey: remote},
+			RevocationBasePoint: keychain.KeyDescriptor{PubKey: remote},
+			PaymentBasePoint:    keychain.KeyDescriptor{PubKey: remote},
+			DelayBasePoint:      keychain.KeyDescriptor{PubKey: remote},
+			HtlcBasePoint:       keychain.KeyDescriptor{PubKey: remote},
+		},
+		Splice: &chanbackup.SpliceBackup{
+			Candidates: []chanbackup.SpliceFunding{candidate},
+		},
+	}
+	restorer := &chanDBRestorer{
+		db: cdb, secretKeys: &locatorKeyRing{}, chainHash: chainHash,
+	}
+	shell, err := restorer.openChannelShell(single)
+	require.NoError(t, err)
+	require.NoError(t, cdb.RestoreChannelShells(shell))
+
+	channel, err := cdb.FetchChannel(single.FundingOutpoint)
+	require.NoError(t, err)
+	records, err := channel.SpliceRecords()
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	require.False(t, pendingSplices(cdb))
+}

@@ -1,6 +1,8 @@
 package contractcourt
 
 import (
+	"github.com/btcsuite/btcd/txscript"
+	"github.com/btcsuite/btcd/wire"
 	"github.com/lightningnetwork/lnd/chainntnfs"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/input"
@@ -66,44 +68,61 @@ func (c *chainWatcher) watchMovedFunding(heightHint uint32) {
 			return
 		}
 
-		conf, err := c.cfg.notifier.RegisterConfirmationsNtfn(
-			nil, script, c.requiredConfsForSpend(), heightHint,
-		)
-		if err != nil {
-			log.Errorf("ChannelPoint(%v): unable to watch our "+
-				"output script: %v", chanState.FundingOutpoint,
-				err)
-			return
-		}
-
 		log.Warnf("ChannelPoint(%v): restored channel moved after "+
 			"its backup; looking for the peer's commitment by our "+
 			"output on it", chanState.FundingOutpoint)
 
 		c.wg.Add(1)
-		go c.waitMovedCommitment(conf)
+		go c.waitMovedCommitment(
+			chanState.FundingOutpoint, script,
+			c.requiredConfsForSpend(), heightHint,
+		)
 	})
 }
 
 // waitMovedCommitment waits for the peer's commitment watchMovedFunding looks
-// for and hands it to the close observer.
-func (c *chainWatcher) waitMovedCommitment(
-	conf *chainntnfs.ConfirmationEvent) {
+// for and hands it to the close observer. Anything else paying our output's
+// script is passed over.
+//
+// NOTE: the peer knows the script too, and can pay it from a commitment-
+// shaped transaction of its own making: we'd take that for its commitment,
+// sweep what it paid us, and leave the real one's output to be swept by hand.
+// It gains nothing by it.
+func (c *chainWatcher) waitMovedCommitment(chanPoint wire.OutPoint,
+	script []byte, numConfs, heightHint uint32) {
 
 	defer c.wg.Done()
-	defer conf.Cancel()
 
-	select {
-	case txConf, ok := <-conf.Confirmed:
-		if !ok || txConf.Tx == nil {
+	for {
+		conf, err := c.cfg.notifier.RegisterConfirmationsNtfn(
+			nil, script, numConfs, heightHint,
+		)
+		if err != nil {
+			log.Errorf("ChannelPoint(%v): unable to watch our "+
+				"output script: %v", chanPoint, err)
 			return
 		}
+
+		var txConf *chainntnfs.TxConfirmation
+		select {
+		case txConf = <-conf.Confirmed:
+			conf.Cancel()
+		case <-c.quit:
+			conf.Cancel()
+			return
+		}
+		if txConf == nil || txConf.Tx == nil {
+			return
+		}
+
 		tx := txConf.Tx
 		if !isCommitmentShaped(tx) {
-			log.Errorf("ChannelPoint(%v): tx %v pays our output "+
-				"script but isn't a commitment",
-				c.cfg.chanState.FundingOutpoint, tx.TxHash())
-			return
+			log.Warnf("ChannelPoint(%v): tx %v pays our output "+
+				"script but isn't a commitment", chanPoint,
+				tx.TxHash())
+
+			heightHint = txConf.BlockHeight + 1
+			continue
 		}
 
 		txid := tx.TxHash()
@@ -118,7 +137,7 @@ func (c *chainWatcher) waitMovedCommitment(
 		case <-c.quit:
 		}
 
-	case <-c.quit:
+		return
 	}
 }
 
@@ -143,4 +162,26 @@ func (c *chainWatcher) handleMovedCommitment(spend *chainntnfs.SpendDetail) {
 		log.Errorf("ChannelPoint(%v): unable to handle the peer's "+
 			"commitment: %v", c.cfg.chanState.FundingOutpoint, err)
 	}
+}
+
+// restoredCoopClose reports whether a spend of a restored channel's funding
+// output, alone and with a cooperative close's sequence, is a close rather
+// than a splice after the backup. A splice creates the channel's new funding
+// output, a P2WSH 2-of-2 on every channel type that can be spliced; a close
+// this node took part in pays it. So: a close when something pays us and no
+// output is P2WSH. A close paying a P2WSH script is left flagged: what it
+// paid us the wallet finds anyway.
+func (c *chainWatcher) restoredCoopClose(tx *wire.MsgTx) bool {
+	// Never spliced.
+	if c.cfg.chanState.ChanType.IsTaproot() {
+		return true
+	}
+
+	for _, out := range tx.TxOut {
+		if txscript.IsPayToWitnessScriptHash(out.PkScript) {
+			return false
+		}
+	}
+
+	return c.toSelfAmount(tx) > 0
 }

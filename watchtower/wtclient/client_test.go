@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1142,10 +1143,16 @@ var clientTests = []clientTest{
 			h.makeChannel(1, localBalance, remoteBalance)
 
 			require.NoError(h.t, h.clientMgr.Stop())
+			var failOnce atomic.Bool
+			failOnce.Store(true)
+			errRead := errors.New("unable to read")
 			h.clientCfg.FetchSpliceRevocations = func(
 				id lnwire.ChannelID,
 				_ uint64) ([]chainhash.Hash, error) {
 
+				if failOnce.Swap(false) {
+					return nil, errRead
+				}
 				if id != chanIDFromInt(0) {
 					return nil, nil
 				}
@@ -1172,6 +1179,9 @@ var clientTests = []clientTest{
 
 			hints := h.advanceChannelN(0, numUpdates)
 			spliceHints := h.advanceChannelN(1, numUpdates)
+
+			// A failure to read them leaves the height to a retry.
+			h.backupState(0, 0, errRead)
 			h.backupStates(0, 0, numUpdates, nil)
 
 			h.server.waitForUpdates(

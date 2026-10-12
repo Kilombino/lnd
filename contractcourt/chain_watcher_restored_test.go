@@ -1,9 +1,11 @@
 package contractcourt
 
 import (
+	"bytes"
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightningnetwork/lnd/chainntnfs"
 	"github.com/lightningnetwork/lnd/channeldb"
@@ -182,4 +184,86 @@ func TestChainWatcherRestoredNoPreviousFundings(t *testing.T) {
 		}
 		require.NoError(t, w.Stop())
 	}
+}
+
+// TestChainWatcherRestoredCoopClose checks a restored channel still takes a
+// close for one: its funding output spent alone with a close's sequence,
+// paying our wallet and no P2WSH script. With a P2WSH output, the shape of a
+// splice's new funding output, it is flagged instead.
+func TestChainWatcherRestoredCoopClose(t *testing.T) {
+	t.Parallel()
+
+	ourScript := append([]byte{0x00, 0x14}, make([]byte, 20)...)
+	p2wsh := append([]byte{0x00, 0x20}, make([]byte, 32)...)
+
+	for _, splice := range []bool{false, true} {
+		h := newChainWatcherTestHarness(t, withRequiredConfs(1))
+		alice := h.aliceChannel.State()
+		require.NoError(t, alice.ApplyChanStatus(
+			channeldb.ChanStatusRestored,
+		))
+		h.chainWatcher.cfg.isOurAddr = func(a btcutil.Address) bool {
+			return bytes.Equal(a.ScriptAddress(), ourScript[2:])
+		}
+
+		tx := wire.NewMsgTx(2)
+		tx.AddTxIn(&wire.TxIn{
+			PreviousOutPoint: alice.FundingOutpoint,
+			Sequence:         wire.MaxTxInSequenceNum,
+		})
+		tx.AddTxOut(&wire.TxOut{Value: 50_000, PkScript: ourScript})
+		if splice {
+			tx.AddTxOut(&wire.TxOut{Value: 900_000, PkScript: p2wsh})
+		}
+		h.sendSpend(tx)
+
+		if !splice {
+			closeInfo := h.waitForCoopClose(5 * time.Second)
+			require.Equal(t, tx.TxHash(), closeInfo.ClosingTXID)
+			continue
+		}
+		h.assertNoCoopClose(200 * time.Millisecond)
+		require.Eventually(t, func() bool {
+			return alice.HasChanStatus(
+				channeldb.ChanStatusFundingSpentUnknown,
+			)
+		}, 5*time.Second, 10*time.Millisecond)
+	}
+}
+
+// TestChainWatcherRestoredMovedKeepsWatching checks the search for the peer's
+// commitment carries on past a transaction paying our output script that
+// isn't one.
+func TestChainWatcherRestoredMovedKeepsWatching(t *testing.T) {
+	t.Parallel()
+
+	h := newChainWatcherTestHarness(t, withRequiredConfs(1))
+	alice := h.aliceChannel.State()
+	require.NoError(t, alice.ApplyChanStatus(channeldb.ChanStatusRestored))
+
+	h.sendSpend(h.createUnnegotiatedSpendTx(95_000))
+	script, _, err := restoredToRemoteScript(alice)
+	require.NoError(t, err)
+	event := waitForScriptConf(t, h, script)
+
+	payment := wire.NewMsgTx(2)
+	payment.AddTxIn(&wire.TxIn{Sequence: wire.MaxTxInSequenceNum})
+	payment.AddTxOut(&wire.TxOut{Value: 1000, PkScript: script})
+	event.confirmedChan <- &chainntnfs.TxConfirmation{
+		Tx: payment, BlockHeight: 500,
+	}
+
+	// Watched again, past it.
+	var next *mockConfirmationEvent
+	require.Eventually(t, func() bool {
+		next = h.notifier.confEventForScript(script)
+		return next != nil && next != event
+	}, 5*time.Second, 10*time.Millisecond)
+
+	bobCommit := h.bobChannel.State().LocalCommitment.CommitTx
+	next.confirmedChan <- &chainntnfs.TxConfirmation{
+		Tx: bobCommit, BlockHeight: 510,
+	}
+	closeInfo := h.waitForRemoteUnilateralClose(5 * time.Second)
+	h.assertRemoteUnilateralCloseTx(closeInfo, bobCommit)
 }

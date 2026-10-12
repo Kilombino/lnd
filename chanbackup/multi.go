@@ -166,10 +166,7 @@ func (m *Multi) UnpackFromReader(r io.Reader, keyRing keychain.KeyRing) error {
 			m.StaticBackups = append(m.StaticBackups, chanBackup)
 		}
 
-		err := readSpliceTrailer(backupReader, m.StaticBackups)
-		if err != nil {
-			return err
-		}
+		readSpliceTrailer(backupReader, m.StaticBackups)
 
 	default:
 		return fmt.Errorf("unable to unpack unknown multi-version "+
