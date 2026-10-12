@@ -7,6 +7,7 @@ import (
 
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/lightningnetwork/lnd/fn/v2"
+	"github.com/lightningnetwork/lnd/lntypes"
 	"github.com/lightningnetwork/lnd/lnwallet"
 	"github.com/lightningnetwork/lnd/lnwire"
 )
@@ -403,4 +404,11 @@ func (l *channelLink) resendSpliceCommitSig(remote *lnwire.ChannelReestablish) {
 		l.log.Errorf("failed to resend splice commitment_signed: %v",
 			err)
 	}
+}
+
+// QuiescenceInitiator returns which side started the channel's current
+// quiescence, or an error when it isn't quiescent: only that side may send
+// splice_init.
+func (l *channelLink) QuiescenceInitiator() fn.Result[lntypes.ChannelParty] {
+	return l.quiescer.QuiescenceInitiator()
 }

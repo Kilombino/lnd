@@ -2,6 +2,7 @@ package splice
 
 import (
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 
 // fakeWallet keeps leases, published and removed transactions, and coins.
 type fakeWallet struct {
+	mu        sync.Mutex
 	leases    map[wire.OutPoint]wtxmgr.LockID
 	failLease map[wire.OutPoint]bool
 	published map[chainhash.Hash]string
@@ -56,12 +58,28 @@ func (w *fakeWallet) ReleaseOutput(id wtxmgr.LockID, op wire.OutPoint) error {
 }
 
 func (w *fakeWallet) PublishTransaction(tx *wire.MsgTx, label string) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
 	if w.publish != nil {
 		return w.publish
 	}
 	w.published[tx.TxHash()] = label
 
 	return nil
+}
+
+// publishedTxs returns a copy of what was published.
+func (w *fakeWallet) publishedTxs() map[chainhash.Hash]string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	out := make(map[chainhash.Hash]string, len(w.published))
+	for k, v := range w.published {
+		out[k] = v
+	}
+
+	return out
 }
 
 func (w *fakeWallet) RemoveDescendants(tx *wire.MsgTx) error {
