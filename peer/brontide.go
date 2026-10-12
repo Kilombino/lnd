@@ -4366,7 +4366,9 @@ func (p *Brontide) initRbfChanCloser(
 	}
 
 	spendEvent := protofsm.RegisterSpend[chancloser.ProtocolEvent]{
-		OutPoint:   channel.ChannelPoint(),
+		// The funding output on chain now, which a splice may have
+		// moved.
+		OutPoint:   channel.State().CurrentFundingOutpoint(),
 		PkScript:   channel.FundingTxOut().PkScript,
 		HeightHint: channel.DeriveHeightHint(),
 		PostSpendEvent: fn.Some[chancloser.RbfSpendMapper](

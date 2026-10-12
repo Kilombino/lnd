@@ -401,9 +401,10 @@ func newChainWatcher(cfg chainWatcherConfig) (*chainWatcher, error) {
 	heightHint := chanState.DeriveHeightHint()
 
 	// We'll register for a notification to be dispatched if the funding
-	// output is spent.
+	// output is spent: the one on chain now, which a splice may have moved.
+	currentFunding := chanState.CurrentFundingOutpoint()
 	spendNtfn, err := cfg.notifier.RegisterSpendNtfn(
-		&chanState.FundingOutpoint, fundingPkScript, heightHint,
+		&currentFunding, fundingPkScript, heightHint,
 	)
 	if err != nil {
 		return nil, err
@@ -422,8 +423,7 @@ func newChainWatcher(cfg chainWatcherConfig) (*chainWatcher, error) {
 	// `fundingConfirmedNtfn` for details.
 	if c.cfg.chanState.IsPending && c.cfg.chanState.ChanType.IsTaproot() {
 		confNtfn, err := cfg.notifier.RegisterConfirmationsNtfn(
-			&chanState.FundingOutpoint.Hash, fundingPkScript, 1,
-			heightHint,
+			&currentFunding.Hash, fundingPkScript, 1, heightHint,
 		)
 		if err != nil {
 			return nil, err
@@ -902,8 +902,10 @@ func (c *chainWatcher) closeObserver() {
 
 		heightHint := c.cfg.chanState.DeriveHeightHint()
 
+		currentFunding := c.cfg.chanState.CurrentFundingOutpoint()
+
 		return c.cfg.notifier.RegisterSpendNtfn(
-			&c.cfg.chanState.FundingOutpoint,
+			&currentFunding,
 			fundingPkScript,
 			heightHint,
 		)

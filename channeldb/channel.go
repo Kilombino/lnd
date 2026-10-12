@@ -272,6 +272,11 @@ type openChannelTlvData struct {
 	// Note: if not set, it means either the channel has not been
 	// closed yet, or it was closed before this field was introduced.
 	closeConfirmationHeight tlv.OptionalRecordT[tlv.TlvType9, uint32]
+
+	// spliceFunding is the channel's current funding output and short
+	// channel id once a splice has replaced the original. A fork record:
+	// its type is far above upstream's, which grow from 1.
+	spliceFunding tlv.OptionalRecordT[tlv.TlvType65600, tlv.Blob]
 }
 
 // encode serializes the openChannelTlvData to the given io.Writer.
@@ -299,6 +304,11 @@ func (c *openChannelTlvData) encode(w io.Writer) error {
 			tlvRecords = append(tlvRecords, h.Record())
 		},
 	)
+	c.spliceFunding.WhenSome(
+		func(f tlv.RecordT[tlv.TlvType65600, tlv.Blob]) {
+			tlvRecords = append(tlvRecords, f.Record())
+		},
+	)
 
 	tlv.SortRecords(tlvRecords)
 
@@ -317,6 +327,7 @@ func (c *openChannelTlvData) decode(r io.Reader) error {
 	tapscriptRoot := c.tapscriptRoot.Zero()
 	blob := c.customBlob.Zero()
 	closeConfHeight := c.closeConfirmationHeight.Zero()
+	spliceFunding := c.spliceFunding.Zero()
 
 	// Create the tlv stream.
 	tlvStream, err := tlv.NewStream(
@@ -329,6 +340,7 @@ func (c *openChannelTlvData) decode(r io.Reader) error {
 		blob.Record(),
 		c.confirmationHeight.Record(),
 		closeConfHeight.Record(),
+		spliceFunding.Record(),
 	)
 	if err != nil {
 		return err
@@ -350,6 +362,9 @@ func (c *openChannelTlvData) decode(r io.Reader) error {
 	}
 	if _, ok := tlvs[closeConfHeight.TlvType()]; ok {
 		c.closeConfirmationHeight = tlv.SomeRecordT(closeConfHeight)
+	}
+	if _, ok := tlvs[spliceFunding.TlvType()]; ok {
+		c.spliceFunding = tlv.SomeRecordT(spliceFunding)
 	}
 
 	return nil
@@ -1158,6 +1173,12 @@ type OpenChannel struct {
 	// default ShortChannelID. This is only set for zero-conf channels.
 	confirmedScid lnwire.ShortChannelID
 
+	// spliceFunding is the channel's current funding output once a splice
+	// has locked; none for a channel never spliced. FundingOutpoint keeps
+	// naming the channel (database keys, channel id), and ShortChannelID
+	// keeps the scid forwarding packages and circuits use.
+	spliceFunding fn.Option[SpliceFunding]
+
 	// Memo is any arbitrary information we wish to store locally about the
 	// channel that will be useful to our future selves.
 	Memo []byte
@@ -1222,6 +1243,67 @@ func (c *OpenChannel) ShortChanID() lnwire.ShortChannelID {
 	defer c.RUnlock()
 
 	return c.ShortChannelID
+}
+
+// SpliceFunding is a channel's funding output after a splice: the outpoint
+// on chain and the short channel id it confirmed at.
+type SpliceFunding struct {
+	// OutPoint is the current funding output.
+	OutPoint wire.OutPoint
+
+	// Scid is the short channel id of the current funding output.
+	Scid lnwire.ShortChannelID
+}
+
+// spliceFundingSize is the encoded size of a SpliceFunding.
+const spliceFundingSize = 32 + 4 + 8
+
+// encodeSpliceFunding encodes a SpliceFunding as txid, index, scid.
+func encodeSpliceFunding(f SpliceFunding) []byte {
+	b := make([]byte, spliceFundingSize)
+	copy(b[:32], f.OutPoint.Hash[:])
+	binary.BigEndian.PutUint32(b[32:36], f.OutPoint.Index)
+	binary.BigEndian.PutUint64(b[36:], f.Scid.ToUint64())
+
+	return b
+}
+
+// decodeSpliceFunding decodes a SpliceFunding.
+func decodeSpliceFunding(b []byte) (SpliceFunding, error) {
+	var f SpliceFunding
+	if len(b) != spliceFundingSize {
+		return f, fmt.Errorf("splice funding record of %d bytes, "+
+			"expected %d", len(b), spliceFundingSize)
+	}
+	copy(f.OutPoint.Hash[:], b[:32])
+	f.OutPoint.Index = binary.BigEndian.Uint32(b[32:36])
+	f.Scid = lnwire.NewShortChanIDFromInt(
+		binary.BigEndian.Uint64(b[36:]),
+	)
+
+	return f, nil
+}
+
+// CurrentFundingOutpoint returns the funding output on chain now: the one a
+// splice moved the channel to, or the original. Use it for everything that
+// watches or spends the funding output on chain; FundingOutpoint names the
+// channel.
+func (c *OpenChannel) CurrentFundingOutpoint() wire.OutPoint {
+	c.RLock()
+	defer c.RUnlock()
+
+	return c.spliceFunding.UnwrapOr(SpliceFunding{
+		OutPoint: c.FundingOutpoint,
+	}).OutPoint
+}
+
+// SpliceFundingInfo returns the funding output a splice moved the channel to,
+// if any.
+func (c *OpenChannel) SpliceFundingInfo() fn.Option[SpliceFunding] {
+	c.RLock()
+	defer c.RUnlock()
+
+	return c.spliceFunding
 }
 
 // ZeroConfRealScid returns the zero-conf channel's confirmed scid. This should
@@ -1354,6 +1436,19 @@ func (c *OpenChannel) amendTlvData(auxData openChannelTlvData) {
 	auxData.closeConfirmationHeight.WhenSomeV(func(h uint32) {
 		c.CloseConfirmationHeight = fn.Some(h)
 	})
+	auxData.spliceFunding.WhenSomeV(func(b tlv.Blob) {
+		f, err := decodeSpliceFunding(b)
+		if err != nil {
+			// A record this node wrote can't be malformed; if it
+			// were, the original funding stays in use and the
+			// chain watcher flags a spend it doesn't recognise.
+			log.Errorf("ChannelPoint(%v): unreadable splice "+
+				"funding record: %v", c.FundingOutpoint, err)
+
+			return
+		}
+		c.spliceFunding = fn.Some(f)
+	})
 }
 
 // extractTlvData creates a new openChannelTlvData from the given channel.
@@ -1394,6 +1489,13 @@ func (c *OpenChannel) extractTlvData() openChannelTlvData {
 	c.CloseConfirmationHeight.WhenSome(func(h uint32) {
 		auxData.closeConfirmationHeight = tlv.SomeRecordT(
 			tlv.NewPrimitiveRecord[tlv.TlvType9](h),
+		)
+	})
+	c.spliceFunding.WhenSome(func(f SpliceFunding) {
+		auxData.spliceFunding = tlv.SomeRecordT(
+			tlv.NewPrimitiveRecord[tlv.TlvType65600](
+				encodeSpliceFunding(f),
+			),
 		)
 	})
 

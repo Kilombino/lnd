@@ -3015,7 +3015,11 @@ func (lc *LightningChannel) fetchCommitmentView(
 // returned by this function uses a max sequence number, so it isn't able to be
 // used with RBF by default.
 func fundingTxIn(chanState *channeldb.OpenChannel) wire.TxIn {
-	return *wire.NewTxIn(&chanState.FundingOutpoint, nil, nil)
+	// The funding output on chain now, which a splice may have moved;
+	// FundingOutpoint keeps naming the channel.
+	current := chanState.CurrentFundingOutpoint()
+
+	return *wire.NewTxIn(&current, nil, nil)
 }
 
 // evaluateHTLCView processes all update entries in both HTLC update logs,
