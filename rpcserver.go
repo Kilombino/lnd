@@ -4033,6 +4033,7 @@ func (r *rpcServer) ChannelBalance(ctx context.Context,
 		Balance:            int64(localBalance.ToSatoshis()),
 		PendingOpenBalance: int64(pendingOpenLocalBalance.ToSatoshis()),
 	}
+	r.addSpliceBalances(openChannels, resp)
 
 	err = fn.MapOptionZ(
 		r.server.implCfg.AuxDataParser,
@@ -4489,8 +4490,10 @@ func (r *rpcServer) fetchWaitingCloseChannels(
 		unifiedSigs := waitingClose.ChanType.HasUnifiedSigs()
 		channel := &lnrpc.PendingChannelsResponse_PendingChannel{
 			RemoteNodePub: hex.EncodeToString(pub),
-			ChannelPoint:  chanPoint.String(),
-			Capacity:      int64(waitingClose.Capacity),
+			ChannelPoint: waitingClose.CurrentFundingOutpoint().
+				String(),
+			OriginalChannelPoint: chanPoint.String(),
+			Capacity:             int64(waitingClose.Capacity),
 			LocalBalance: int64(
 				localCommit.LocalBalance.ToSatoshis(),
 			),
@@ -5388,6 +5391,10 @@ func (r *rpcServer) createRPCClosedChannel(
 		OpenInitiator:     openInit,
 		CloseInitiator:    closeInitiator,
 		AliasScids:        make([]uint64, 0, len(channelAliases)),
+
+		// The channel's name: the funding output it was opened
+		// with, whatever a splice later moved it to.
+		OriginalChannelPoint: dbChannel.ChanPoint.String(),
 	}
 
 	// Populate the set of aliases.

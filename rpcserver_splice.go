@@ -487,3 +487,85 @@ func rpcPendingSplice(rec *channeldb.SpliceRecord) *lnrpc.PendingSplice {
 
 	return ps
 }
+
+// addSpliceBalances adds the splice amounts to a channel balance: our
+// contributions to splices that haven't locked (in a channel once they do),
+// our wallet outputs in splices not yet confirmed, and the local balance as
+// the least over every funding of a channel with a splice pending.
+func (r *rpcServer) addSpliceBalances(channels []*channeldb.OpenChannel,
+	resp *lnrpc.ChannelBalanceResponse) {
+
+	var (
+		in, toWallet btcutil.Amount
+		lower        lnwire.MilliSatoshi
+	)
+	for _, ch := range channels {
+		records, err := ch.SpliceRecords()
+		if err != nil {
+			rpcsLog.Errorf("ChannelPoint(%v): unable to read "+
+				"splices: %v", ch.FundingOutpoint, err)
+			continue
+		}
+
+		var least lnwire.MilliSatoshi
+		for _, rec := range records {
+			if rec.Retired {
+				continue
+			}
+			if rec.LocalDelta > 0 {
+				in += rec.LocalDelta
+			}
+			if rec.LocalCommit != nil {
+				local := ch.LocalCommitment.LocalBalance
+				cand := rec.LocalCommit.LocalBalance
+				if cand < local && local-cand > least {
+					least = local - cand
+				}
+			}
+			if rec.LocalDelta < 0 && rec.Negotiation != nil &&
+				rec.Negotiation.Tx != nil {
+
+				toWallet += r.ourOutputs(
+					rec.Negotiation.Tx, rec.OutPoint.Index,
+				)
+			}
+		}
+		lower += least
+	}
+
+	resp.PendingSpliceInSat = int64(in)
+	resp.PendingSpliceToWalletSat = int64(toWallet)
+	if lower > 0 && resp.LocalBalance != nil &&
+		lnwire.MilliSatoshi(resp.LocalBalance.Msat) >= lower {
+
+		local := lnwire.MilliSatoshi(resp.LocalBalance.Msat) - lower
+		resp.LocalBalance = &lnrpc.Amount{
+			Sat: uint64(local.ToSatoshis()), Msat: uint64(local),
+		}
+		resp.Balance = int64(local.ToSatoshis())
+	}
+}
+
+// ourOutputs sums the outputs of a splice transaction paying this node's
+// wallet, the funding output aside.
+func (r *rpcServer) ourOutputs(tx *wire.MsgTx,
+	fundingIndex uint32) btcutil.Amount {
+
+	var sum btcutil.Amount
+	for i, out := range tx.TxOut {
+		if uint32(i) == fundingIndex {
+			continue
+		}
+		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+			out.PkScript, r.cfg.ActiveNetParams.Params,
+		)
+		if err != nil || len(addrs) != 1 {
+			continue
+		}
+		if r.server.cc.Wallet.IsOurAddress(addrs[0]) {
+			sum += btcutil.Amount(out.Value)
+		}
+	}
+
+	return sum
+}
