@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"errors"
+	"github.com/btcsuite/btcd/txscript"
+	"github.com/lightningnetwork/lnd/lnwallet/interactivetx"
 	"sync"
 	"testing"
 	"time"
@@ -938,4 +940,44 @@ func TestSpliceOneAtATime(t *testing.T) {
 		Direction: DirectionIn, Amount: 1_000_000, FeeRate: 2_500,
 	})
 	require.ErrorContains(t, err, codePending)
+}
+
+// wrongDigestSigner signs the shared input for the ordinary digest instead
+// of the shared input's, as a misconfigured remote signer could.
+type wrongDigestSigner struct {
+	*input.MockSigner
+}
+
+func (s *wrongDigestSigner) SignOutputRaw(tx *wire.MsgTx,
+	desc *input.SignDescriptor) (input.Signature, error) {
+
+	if desc.HashType == interactivetx.SharedInputHashType {
+		wrong := *desc
+		wrong.HashType = txscript.SigHashAll
+		desc = &wrong
+	}
+
+	return s.MockSigner.SignOutputRaw(tx, desc)
+}
+
+// TestSpliceOwnSharedSignatureChecked checks that our shared input
+// signature is checked against the shared input's digest before our
+// tx_signatures leave: a signer that signs another digest stops the splice
+// while it can still be dropped.
+func TestSpliceOwnSharedSignatureChecked(t *testing.T) {
+	t.Parallel()
+
+	p := newSplicePair(t)
+	p.alice.fund(t, 1, 5_000_000)
+	p.alice.machine.cfg.Signer = &wrongDigestSigner{p.alice.signer}
+
+	updates, err := p.alice.machine.Splice(Request{
+		Direction: DirectionIn, Amount: 1_000_000, FeeRate: 2_500,
+	})
+	require.NoError(t, err)
+	u := requireUpdates(t, updates, StatePreparing, StateNegotiating,
+		StateAborted)
+	require.Contains(t, u.Reason, codeInternal)
+	require.Empty(t, p.alice.wallet.publishedTxs())
+	require.Zero(t, p.alice.wallet.leaseCount())
 }

@@ -354,6 +354,14 @@ for what the watch-only node asks: its own `FundPsbt`, `SignPsbt` and
 chain. Keep a remote signer for signing only, and spend from the watch-only
 node, whose sends opt in before they reach the signer.
 
+A splice works with a remote signer the same way: the watch-only node asks for
+the shared input's signature with the `0x21` hash type, compares the hash type
+it gets back, and checks the signature against that digest before its
+`tx_signatures` leave, since after that the splice can't be dropped. A
+signer that applies a policy to what it signs (rather than signing what the
+watch-only node asks) has no rules for splices, and would need them before
+it can take part in one.
+
 Two things stay as they were. Bare and P2SH inputs, which the wallet never
 hands out addresses for, are signed with `SIGHASH_ALL`: the legacy signer
 has no way to opt in, and a legacy digest with the bit appended is what

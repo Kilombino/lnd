@@ -154,6 +154,22 @@ func (m *Machine) ourTxSignatures() (*lnwire.TxSignatures, error) {
 	if err != nil {
 		return nil, fmt.Errorf("shared input: %w", err)
 	}
+
+	// Checked against the shared input's digest before it leaves: a
+	// remote signer that signed another digest would give the peer a
+	// signature that can't complete the splice once ours is out.
+	ecSig, ok := rawSig.(*ecdsa.Signature)
+	if !ok {
+		return nil, errors.New("shared input signature isn't ECDSA")
+	}
+	err = interactivetx.VerifySharedInputSig(
+		res, witnessScript, ecSig, state.LocalChanCfg.MultiSigKey.PubKey,
+		interactivetx.SharedInputHashType,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("our shared input signature: %w", err)
+	}
+
 	sharedSig, err := lnwire.NewSigFromSignature(rawSig)
 	if err != nil {
 		return nil, err
