@@ -436,6 +436,10 @@ type server struct {
 	// channelNotifier to be notified of newly opened and closed channels.
 	chanSubSwapper *chanbackup.SubSwapper
 
+	// spliceGraph keeps what the graph and the switch need of the
+	// channels' splices.
+	spliceGraph *spliceGraph
+
 	// chanEventStore tracks the behaviour of channels and their remote peers to
 	// provide insights into their health and performance.
 	chanEventStore *chanfitness.ChannelEventStore
@@ -811,6 +815,7 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 		graphDB:        dbs.GraphDB,
 		v1Graph:        v1Graph,
 		chanStateDB:    dbs.ChanStateDB.ChannelStateDB(),
+		spliceGraph:    newSpliceGraph(dbs.ChanStateDB.ChannelStateDB()),
 		addrSource:     addrSource,
 		miscDB:         dbs.ChanStateDB,
 		invoicesDB:     dbs.InvoiceDB,
@@ -1109,7 +1114,10 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 		IsChannelActive:          s.htlcSwitch.HasActiveLink,
 		ApplyChannelUpdate:       s.applyChannelUpdate,
 		DB:                       s.chanStateDB,
-		Graph:                    dbs.GraphDB,
+		Graph: &spliceAwareGraph{
+			ChannelGraph: dbs.GraphDB,
+			db:           s.chanStateDB,
+		},
 	}
 
 	chanStatusMgr, err := netann.NewChanStatusManager(chanStatusMgrCfg)
@@ -1287,6 +1295,7 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 		AssumeChannelValid:  cfg.Routing.AssumeChannelValid,
 		StrictZombiePruning: strictPruning,
 		IsAlias:             aliasmgr.IsAlias,
+		IsOwnSplice:         s.spliceGraph.isOwnSplice,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("can't create graph builder: %w", err)
@@ -1425,7 +1434,7 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 			)
 		},
 		PropagateChanPolicyUpdate: s.authGossiper.PropagateChanPolicyUpdate,
-		UpdateForwardingPolicies:  s.htlcSwitch.UpdateForwardingPolicies,
+		UpdateForwardingPolicies:  s.updateForwardingPolicies,
 		FetchChannel:              s.chanStateDB.FetchChannel,
 		AddEdge: func(ctx context.Context,
 			edge *models.ChannelEdgeInfo) error {
@@ -2677,6 +2686,10 @@ func (s *server) Start(ctx context.Context) error {
 			startErr = err
 			return
 		}
+
+		// Graph edges of channels whose splice locked as the node
+		// stopped, moved now the gossiper runs.
+		go s.reconcileSpliceEdges()
 
 		cleanup = cleanup.add(s.invoices.Stop)
 		if err := s.invoices.Start(); err != nil {
@@ -5665,6 +5678,14 @@ func (s *server) fetchLastChanUpdate() func(lnwire.ShortChannelID) (
 	ourPubKey := s.identityECDH.PubKey().SerializeCompressed()
 	return func(cid lnwire.ShortChannelID) (*lnwire.ChannelUpdate1, error) {
 		info, edge1, edge2, err := s.graphBuilder.GetChannelByID(cid)
+
+		// A splice moved the channel's edge to its own scid.
+		if errors.Is(err, graphdb.ErrEdgeNotFound) {
+			if latest, ok := s.spliceGraph.latestScid(cid); ok {
+				info, edge1, edge2, err = s.graphBuilder.
+					GetChannelByID(latest)
+			}
+		}
 		if err != nil {
 			return nil, err
 		}

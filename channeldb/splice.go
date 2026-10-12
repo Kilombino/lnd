@@ -12,6 +12,7 @@ import (
 	graphdb "github.com/lightningnetwork/lnd/graph/db"
 	"github.com/lightningnetwork/lnd/keychain"
 	"github.com/lightningnetwork/lnd/kvdb"
+	"github.com/lightningnetwork/lnd/lnwire"
 )
 
 var (
@@ -125,6 +126,7 @@ func (c *OpenChannel) LockSplice(l SpliceLock) error {
 			LocalKey:  channel.LocalChanCfg.MultiSigKey,
 			RemoteKey: channel.RemoteChanCfg.MultiSigKey.PubKey,
 			LockedTo:  l.Funding.OutPoint,
+			Scid:      channel.CurrentShortChanID(),
 		}
 		if l.LocalCommit != nil {
 			err := swapSpliceCommitments(chanBucket, channel, l)
@@ -286,6 +288,11 @@ type PreviousFunding struct {
 	// LockedTo is the funding output the splice that spent it moved the
 	// channel to.
 	LockedTo wire.OutPoint
+
+	// Scid is its short channel id. Payments may still name it: an
+	// invoice's route hints carry the one current when it was issued.
+	// Written last; zero in a record written without it.
+	Scid lnwire.ShortChannelID
 }
 
 // putPreviousFunding records a funding output the channel moved away from.
@@ -306,7 +313,7 @@ func putPreviousFunding(chanBucket kvdb.RwBucket, f *PreviousFunding) error {
 	}
 	err = WriteElements(&value, uint64(f.Capacity),
 		uint32(f.LocalKey.Family), f.LocalKey.Index, f.LocalKey.PubKey,
-		f.RemoteKey,
+		f.RemoteKey, f.Scid.ToUint64(),
 	)
 	if err != nil {
 		return err
@@ -366,6 +373,13 @@ func (c *OpenChannel) PreviousFundings() ([]PreviousFunding, error) {
 			)
 			if err != nil {
 				return err
+			}
+			if r.Len() > 0 {
+				var scid uint64
+				if err := ReadElements(r, &scid); err != nil {
+					return err
+				}
+				f.Scid = lnwire.NewShortChanIDFromInt(scid)
 			}
 			f.Capacity = btcutil.Amount(capacity)
 			f.LocalKey.Family = keychain.KeyFamily(family)
@@ -470,6 +484,7 @@ func restoreShellSplice(tx kvdb.RwTx, c *OpenChannel, s *ShellSplice) error {
 		}
 		original := *s.Original
 		original.LockedTo = f.OutPoint
+		original.Scid = c.ShortChannelID
 		if err := putPreviousFunding(chanBucket, &original); err != nil {
 			return err
 		}
@@ -502,4 +517,29 @@ func restoreShellSplice(tx kvdb.RwTx, c *OpenChannel, s *ShellSplice) error {
 	}
 
 	return nil
+}
+
+// SpliceScids returns the short channel ids the channel has had besides
+// ShortChannelID, the current one included: a payment may name any of them.
+func (c *OpenChannel) SpliceScids() ([]lnwire.ShortChannelID, error) {
+	previous, err := c.PreviousFundings()
+	if err != nil {
+		return nil, err
+	}
+
+	name := c.ShortChanID()
+	seen := map[lnwire.ShortChannelID]bool{name: true, {}: true}
+	var scids []lnwire.ShortChannelID
+	add := func(scid lnwire.ShortChannelID) {
+		if !seen[scid] {
+			seen[scid] = true
+			scids = append(scids, scid)
+		}
+	}
+	for _, pf := range previous {
+		add(pf.Scid)
+	}
+	add(c.CurrentShortChanID())
+
+	return scids, nil
 }

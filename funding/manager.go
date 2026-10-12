@@ -3886,7 +3886,9 @@ func (f *Manager) addToGraph(completeChan *channeldb.OpenChannel,
 		f.cfg.SendAnnouncement(
 			ann.chanAnn,
 			discovery.ChannelCapacity(completeChan.Capacity),
-			discovery.ChannelPoint(completeChan.FundingOutpoint),
+			discovery.ChannelPoint(
+				completeChan.CurrentFundingOutpoint(),
+			),
 			discovery.TapscriptRoot(completeChan.TapscriptRoot),
 		),
 	), "ChannelAnnouncement")
@@ -5820,7 +5822,7 @@ func (f *Manager) ResignChannelProof(scid lnwire.ShortChannelID) error {
 
 	var ch *channeldb.OpenChannel
 	for _, c := range channels {
-		if c.ShortChanID() == scid ||
+		if c.CurrentShortChanID() == scid ||
 			(c.IsZeroConf() && c.ZeroConfRealScid() == scid) {
 
 			ch = c

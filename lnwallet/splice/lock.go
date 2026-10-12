@@ -190,6 +190,24 @@ func (m *Machine) ReestablishTLVs() (fn.Option[lnwire.FundingTxidFlags],
 		locked = fn.Some(lnwire.FundingTxidFlags{Txid: a.txid})
 	}
 
+	// The announcement on the funding a splice moved the channel to, if
+	// the peer's half hasn't come.
+	state := m.cfg.Channel.State()
+	current := state.CurrentFundingOutpoint().Hash
+	moved := current != state.FundingOutpoint.Hash
+	locked = fn.MapOption(func(
+		f lnwire.FundingTxidFlags) lnwire.FundingTxidFlags {
+
+		if moved && f.Txid == current &&
+			m.cfg.AnnouncementPending != nil &&
+			m.cfg.AnnouncementPending() {
+
+			f.RetransmitFlags |= lnwire.RetransmitAnnounceSigs
+		}
+
+		return f
+	})(locked)
+
 	return next, locked
 }
 
@@ -229,6 +247,18 @@ func (m *Machine) handleReestablish(msg *lnwire.ChannelReestablish) {
 	msg.MyCurrentFundingLocked.WhenSome(func(f lnwire.FundingTxidFlags) {
 		if a != nil && a.phase == phasePending && a.txid == f.Txid {
 			m.handleSpliceLocked(f.Txid)
+		}
+
+		// The peer asks for our half of the announcement on the
+		// funding a splice moved the channel to.
+		state := m.cfg.Channel.State()
+		current := state.CurrentFundingOutpoint().Hash
+		if f.RetransmitFlags&lnwire.RetransmitAnnounceSigs != 0 &&
+			f.Txid == current &&
+			current != state.FundingOutpoint.Hash &&
+			m.cfg.ResendAnnouncement != nil {
+
+			m.cfg.ResendAnnouncement()
 		}
 	})
 }

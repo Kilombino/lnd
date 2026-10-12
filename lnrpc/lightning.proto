@@ -1629,6 +1629,13 @@ message Channel {
     channel point accept either.
     */
     string original_channel_point = 1005;
+
+    /*
+    The short channel id the channel was opened with. chan_id is the one the
+    channel goes by now, which a splice changes; forwarding records keep this
+    one. Payments naming either reach the channel.
+    */
+    uint64 original_chan_id = 1006 [jstype = JS_STRING];
 }
 
 /*

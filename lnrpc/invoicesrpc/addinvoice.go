@@ -740,7 +740,7 @@ func newHopHintInfo(c *channeldb.OpenChannel, isActive bool) *HopHintInfo {
 		FundingOutpoint:  c.FundingOutpoint,
 		RemotePubkey:     c.IdentityPub,
 		RemoteBalance:    c.LocalCommitment.RemoteBalance,
-		ShortChannelID:   c.ShortChannelID.ToUint64(),
+		ShortChannelID:   c.CurrentShortChanID().ToUint64(),
 		ConfirmedScidZC:  c.ZeroConfRealScid().ToUint64(),
 		ScidAliasFeature: c.ChanType.HasScidAliasFeature(),
 	}

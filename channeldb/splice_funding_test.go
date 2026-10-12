@@ -261,10 +261,22 @@ func TestLockSplicePreviousFundings(t *testing.T) {
 	require.True(t, originalKey.PubKey.IsEqual(f.LocalKey.PubKey))
 	require.Equal(t, originalKey.KeyLocator, f.LocalKey.KeyLocator)
 
+	require.Equal(t, channel.ShortChannelID, f.Scid)
+
 	f = byOutpoint[first.Funding.OutPoint]
 	require.Equal(t, first.Capacity, f.Capacity)
 	require.Equal(t, second.Funding.OutPoint, f.LockedTo)
 	require.True(t, first.RemoteMultiSigKey.PubKey.IsEqual(f.RemoteKey))
+	require.Equal(t, first.Funding.Scid, f.Scid)
+
+	// Every scid the channel has had besides its name, the current one
+	// included.
+	require.Equal(t, second.Funding.Scid, channel.CurrentShortChanID())
+	scids, err := channel.SpliceScids()
+	require.NoError(t, err)
+	require.ElementsMatch(t, []lnwire.ShortChannelID{
+		first.Funding.Scid, second.Funding.Scid,
+	}, scids)
 }
 
 // TestLockSpliceSwapsCommitments checks a lock with commitments: the

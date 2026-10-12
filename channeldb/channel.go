@@ -1306,6 +1306,18 @@ func (c *OpenChannel) SpliceFundingInfo() fn.Option[SpliceFunding] {
 	return c.spliceFunding
 }
 
+// CurrentShortChanID returns the short channel id of the funding output the
+// channel is on: a splice's, once one has locked, else ShortChannelID, which
+// keeps naming the channel.
+func (c *OpenChannel) CurrentShortChanID() lnwire.ShortChannelID {
+	c.RLock()
+	defer c.RUnlock()
+
+	return c.spliceFunding.UnwrapOr(SpliceFunding{
+		Scid: c.ShortChannelID,
+	}).Scid
+}
+
 // ZeroConfRealScid returns the zero-conf channel's confirmed scid. This should
 // only be called if IsZeroConf returns true.
 func (c *OpenChannel) ZeroConfRealScid() lnwire.ShortChannelID {

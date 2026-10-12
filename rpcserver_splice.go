@@ -392,6 +392,13 @@ func (r *rpcServer) addSpliceFields(ch *channeldb.OpenChannel,
 
 	channel.ChannelPoint = ch.CurrentFundingOutpoint().String()
 	channel.OriginalChannelPoint = ch.FundingOutpoint.String()
+
+	// The scid the graph and new route hints know the channel by.
+	// Forwarding records keep the one it was opened with.
+	channel.OriginalChanId = ch.ShortChanID().ToUint64()
+	if current := ch.CurrentShortChanID(); current != ch.ShortChanID() {
+		channel.ChanId = current.ToUint64()
+	}
 	channel.SpliceStatus, _ = r.spliceStatus(ch)
 
 	records, err := ch.SpliceRecords()
@@ -591,4 +598,16 @@ func rpcSpliceEvent(e channelnotifier.SpliceEvent) *lnrpc.ChannelEventUpdate {
 			},
 		},
 	}
+}
+
+// currentFunding returns the funding output a channel named by either of its
+// outpoints is on now, which its graph edge names; op itself for anything
+// else.
+func (r *rpcServer) currentFunding(op wire.OutPoint) wire.OutPoint {
+	ch, err := r.server.chanStateDB.FetchChannel(op)
+	if err != nil {
+		return op
+	}
+
+	return ch.CurrentFundingOutpoint()
 }

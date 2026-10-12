@@ -368,6 +368,10 @@ type Switch struct {
 	// key includes the value itself and also any other aliases. This MUST
 	// be accessed with the indexMtx.
 	baseIndex map[lnwire.ShortChannelID]lnwire.ShortChannelID
+
+	// spliceIndex maps the short channel ids a channel's splices gave it
+	// onto the one its link goes by.
+	spliceIndex map[lnwire.ShortChannelID]lnwire.ShortChannelID
 }
 
 // New creates the new instance of htlc switch.
@@ -418,6 +422,7 @@ func New(cfg Config, currentHeight uint32) (*Switch, error) {
 
 	s.aliasToReal = make(map[lnwire.ShortChannelID]lnwire.ShortChannelID)
 	s.baseIndex = make(map[lnwire.ShortChannelID]lnwire.ShortChannelID)
+	s.spliceIndex = make(map[lnwire.ShortChannelID]lnwire.ShortChannelID)
 
 	s.mailOrchestrator = newMailOrchestrator(&mailOrchConfig{
 		forwardPackets:    s.ForwardPackets,
@@ -1184,6 +1189,9 @@ func (s *Switch) checkCircularForward(incoming, outgoing lnwire.ShortChannelID,
 
 	log.Tracef("Checking for circular route: incoming=%v, outgoing=%v "+
 		"(payment hash: %x)", incoming, outgoing, paymentHash[:])
+
+	// A scid a splice gave a channel is that channel.
+	incoming, outgoing = s.spliceBase(incoming), s.spliceBase(outgoing)
 
 	// If they are equal, we can skip the alias mapping checks.
 	if incoming == outgoing {
@@ -2117,7 +2125,11 @@ func (s *Switch) CreateAndAddLink(linkCfg ChannelLinkConfig,
 	lnChan *lnwallet.LightningChannel) error {
 
 	link := NewChannelLink(linkCfg, lnChan)
-	return s.AddLink(link)
+	if err := s.AddLink(link); err != nil {
+		return err
+	}
+
+	return s.addChannelSpliceScids(link.ChanID(), lnChan)
 }
 
 // AddLink is used to initiate the handling of the add link command. The
@@ -2319,6 +2331,9 @@ func (s *Switch) GetLinkByShortID(chanID lnwire.ShortChannelID) (ChannelLink,
 func (s *Switch) getLinkByShortID(chanID lnwire.ShortChannelID) (ChannelLink, error) {
 	link, ok := s.forwardingIndex[chanID]
 	if !ok {
+		link, ok = s.spliceLink(chanID)
+	}
+	if !ok {
 		log.Debugf("Link not found in forwarding index using "+
 			"chanID=%v", chanID)
 
@@ -2392,6 +2407,14 @@ func (s *Switch) getLinkByMapping(pkt *htlcPacket) (ChannelLink, error) {
 		// channel did not have the option-scid-alias feature bit
 		// negotiated. We'll fetch the link and return it.
 		link, ok := s.forwardingIndex[chanID]
+		if !ok {
+			// A scid a splice gave the channel: the forward is
+			// recorded under the link's.
+			link, ok = s.spliceLink(chanID)
+			if ok {
+				pkt.outgoingChanID = link.ShortChanID()
+			}
+		}
 		if !ok {
 			log.Debugf("Forwarding index not found using "+
 				"chanID=%v", chanID)
@@ -2509,6 +2532,7 @@ func (s *Switch) removeLink(chanID lnwire.ChannelID) ChannelLink {
 	delete(s.pendingLinkIndex, link.ChanID())
 	delete(s.linkIndex, link.ChanID())
 	delete(s.forwardingIndex, link.ShortChanID())
+	s.removeSpliceScids(link.ShortChanID())
 
 	// If the link has been added to the peer index, then we'll move to
 	// delete the entry within the index.

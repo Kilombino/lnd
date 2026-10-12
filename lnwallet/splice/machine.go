@@ -191,6 +191,15 @@ type Config struct {
 	// "started", "signed", "locked", "aborted".
 	NotifyEvent func(kind string, txid chainhash.Hash, reason string,
 		fromPeer bool)
+
+	// AnnouncementPending, if set, reports whether a public channel's
+	// announcement on the funding output a splice moved it to still
+	// lacks the peer's half: channel_reestablish then asks for it again.
+	AnnouncementPending func() bool
+
+	// ResendAnnouncement, if set, sends our half of that announcement
+	// again, as the peer's channel_reestablish asks.
+	ResendAnnouncement func()
 }
 
 // notify tells NotifyEvent of a step.

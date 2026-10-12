@@ -6554,14 +6554,25 @@ func (r *rpcServer) GetChanInfo(ctx context.Context,
 			ctx, in.ChanId,
 		)
 
+		// A channel of ours a splice moved, by an id it had before.
+		latest, ok := r.server.spliceGraph.latestScid(
+			lnwire.NewShortChanIDFromInt(in.ChanId),
+		)
+		if errors.Is(err, graphdb.ErrEdgeNotFound) && ok {
+			edgeInfo, edge1, edge2, err = graph.FetchChannelEdgesByID(
+				ctx, latest.ToUint64(),
+			)
+		}
+
 	case in.ChanPoint != "":
 		var chanPoint *wire.OutPoint
 		chanPoint, err = wire.NewOutPointFromString(in.ChanPoint)
 		if err != nil {
 			return nil, err
 		}
+		current := r.currentFunding(*chanPoint)
 		edgeInfo, edge1, edge2, err = graph.FetchChannelEdgesByOutpoint(
-			ctx, chanPoint,
+			ctx, &current,
 		)
 
 	default:
@@ -7531,10 +7542,10 @@ func (r *rpcServer) UpdateChannelPolicy(ctx context.Context,
 		if err != nil {
 			return nil, err
 		}
-		targetChans = append(targetChans, wire.OutPoint{
+		targetChans = append(targetChans, r.currentFunding(wire.OutPoint{
 			Hash:  *txid,
 			Index: scope.ChanPoint.OutputIndex,
-		})
+		}))
 	default:
 		return nil, fmt.Errorf("unknown scope: %v", scope)
 	}

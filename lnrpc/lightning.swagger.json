@@ -4138,6 +4138,11 @@
         "original_channel_point": {
           "type": "string",
           "description": "The outpoint the channel was opened with. channel_point is the funding\noutput on chain now, which a splice moves; this one stays, and lookups by\nchannel point accept either."
+        },
+        "original_chan_id": {
+          "type": "string",
+          "format": "uint64",
+          "description": "The short channel id the channel was opened with. chan_id is the one the\nchannel goes by now, which a splice changes; forwarding records keep this\none. Payments naming either reach the channel."
         }
       }
     },

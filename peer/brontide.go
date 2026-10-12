@@ -1371,9 +1371,11 @@ func (p *Brontide) loadActiveChannels(chans []*channeldb.OpenChannel) (
 		// Before we register this new link with the HTLC Switch, we'll
 		// need to fetch its current link-layer forwarding policy from
 		// the database.
+		// A splice moves the channel's edge to its current funding.
 		graph := p.cfg.ChannelGraph
+		edgePoint := dbChan.CurrentFundingOutpoint()
 		info, p1, p2, err := graph.FetchChannelEdgesByOutpoint(
-			context.TODO(), &chanPoint,
+			context.TODO(), &edgePoint,
 		)
 		if err != nil && !errors.Is(err, graphdb.ErrEdgeNotFound) {
 			return nil, err

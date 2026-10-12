@@ -4831,8 +4831,13 @@ type Channel struct {
 	//output on chain now, which a splice moves; this one stays, and lookups by
 	//channel point accept either.
 	OriginalChannelPoint string `protobuf:"bytes,1005,opt,name=original_channel_point,json=originalChannelPoint,proto3" json:"original_channel_point,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	//
+	//The short channel id the channel was opened with. chan_id is the one the
+	//channel goes by now, which a splice changes; forwarding records keep this
+	//one. Payments naming either reach the channel.
+	OriginalChanId uint64 `protobuf:"varint,1006,opt,name=original_chan_id,json=originalChanId,proto3" json:"original_chan_id,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *Channel) Reset() {
@@ -5161,6 +5166,13 @@ func (x *Channel) GetOriginalChannelPoint() string {
 		return x.OriginalChannelPoint
 	}
 	return ""
+}
+
+func (x *Channel) GetOriginalChanId() uint64 {
+	if x != nil {
+		return x.OriginalChanId
+	}
+	return 0
 }
 
 // A splice that has started and not yet locked or ended.
@@ -20170,7 +20182,7 @@ const file_lightning_proto_rawDesc = "" +
 	"\x0edust_limit_sat\x18\x03 \x01(\x04R\fdustLimitSat\x12/\n" +
 	"\x14max_pending_amt_msat\x18\x04 \x01(\x04R\x11maxPendingAmtMsat\x12\"\n" +
 	"\rmin_htlc_msat\x18\x05 \x01(\x04R\vminHtlcMsat\x12,\n" +
-	"\x12max_accepted_htlcs\x18\x06 \x01(\rR\x10maxAcceptedHtlcs\"\xd1\r\n" +
+	"\x12max_accepted_htlcs\x18\x06 \x01(\rR\x10maxAcceptedHtlcs\"\x80\x0e\n" +
 	"\aChannel\x12\x16\n" +
 	"\x06active\x18\x01 \x01(\bR\x06active\x12#\n" +
 	"\rremote_pubkey\x18\x02 \x01(\tR\fremotePubkey\x12#\n" +
@@ -20221,7 +20233,8 @@ const file_lightning_proto_rawDesc = "" +
 	"\x0epending_splice\x18\xeb\a \x01(\v2\x14.lnrpc.PendingSpliceR\rpendingSplice\x123\n" +
 	"\vlast_splice\x18\xec\a \x01(\v2\x11.lnrpc.LastSpliceR\n" +
 	"lastSplice\x125\n" +
-	"\x16original_channel_point\x18\xed\a \x01(\tR\x14originalChannelPoint\"\xf6\x04\n" +
+	"\x16original_channel_point\x18\xed\a \x01(\tR\x14originalChannelPoint\x12-\n" +
+	"\x10original_chan_id\x18\xee\a \x01(\x04B\x020\x01R\x0eoriginalChanId\"\xf6\x04\n" +
 	"\rPendingSplice\x12.\n" +
 	"\tinitiator\x18\x01 \x01(\x0e2\x10.lnrpc.InitiatorR\tinitiator\x12\x14\n" +
 	"\x05state\x18\x02 \x01(\tR\x05state\x12&\n" +
