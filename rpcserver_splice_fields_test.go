@@ -58,6 +58,12 @@ func TestRPCPendingSplice(t *testing.T) {
 	require.Equal(t, "broadcast", ps.State)
 	require.Equal(t, uint32(900_001), ps.BroadcastHeight)
 
+	// The peer's replacement of our splice is still ours.
+	rec.Negotiation.WeInitiated = false
+	rec.Negotiation.OursReplaced = true
+	require.Equal(t, lnrpc.Initiator_INITIATOR_LOCAL,
+		rpcPendingSplice(rec).Initiator)
+
 	rec.Negotiation.LockedSent = true
 	ps = rpcPendingSplice(rec)
 	require.Equal(t, "confirmed", ps.State)

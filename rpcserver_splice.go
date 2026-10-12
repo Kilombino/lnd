@@ -702,7 +702,8 @@ func rpcPendingSplice(rec *channeldb.SpliceRecord) *lnrpc.PendingSplice {
 	if n == nil {
 		return ps
 	}
-	if n.WeInitiated {
+	// Ours too when the peer replaced a splice we started.
+	if n.WeInitiated || n.OursReplaced {
 		ps.Initiator = lnrpc.Initiator_INITIATOR_LOCAL
 	}
 	ps.SatPerVbyte = uint64(chainfee.SatPerKWeight(n.FeeRate).FeePerVByte())
