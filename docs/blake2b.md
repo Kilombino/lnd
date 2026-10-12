@@ -503,12 +503,14 @@ that would draw on those coins are failed back with
 `temporary_channel_failure`. Payments to the peer, and the peer's other
 funds, are unaffected.
 
-**Replacements.** A peer may replace a splice it started with a
-transaction paying at least as much in fees (`tx_init_rbf`); this node
-takes part, adding nothing, and keeps both transactions as candidates
-until one confirms, which is then the splice. Replacing a splice this node
-started isn't supported yet: such a request is answered with `tx_abort`,
-which the Core Lightning port currently answers by failing the channel.
+**Replacements.** The peer may replace a pending splice, its own or one
+this node started, with a transaction paying at least as much in fees
+(`tx_init_rbf`); the Core Lightning port does so when its user splices
+while one is pending. This node takes part: adding nothing to the peer's
+splice, and to its own the same coins, or the same amount to the same
+destination, paying for them at the new rate. Every transaction stays a
+candidate until one confirms, which is then the splice. This node doesn't
+start replacements itself yet.
 
 **Not supported.** Funding a splice from a PSBT.
 More than one splice of a channel at a time. Splices of the peer's that
