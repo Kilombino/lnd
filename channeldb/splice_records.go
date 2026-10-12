@@ -368,6 +368,11 @@ func (c *OpenChannel) SpliceRecords() ([]*SpliceRecord, error) {
 	c.RLock()
 	defer c.RUnlock()
 
+	// A channel held only in memory has none.
+	if c.Db == nil {
+		return nil, nil
+	}
+
 	var records []*SpliceRecord
 	err := kvdb.View(c.Db.backend, func(tx kvdb.RTx) error {
 		chanBucket, err := fetchChanBucket(
