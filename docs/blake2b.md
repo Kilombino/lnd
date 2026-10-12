@@ -225,14 +225,42 @@ Neither applies to a node with no channels, which can be upgraded whenever.
 which has upgraded, and `bitcoin.node=neutrino` are supported. `btcd` cannot
 follow the BLAKE2b proof of work and is refused at configuration time.
 
+### neutrino
+
 `neutrino` validates BLAKE2b proof of work itself (btcd's `blockchain`
-package, from the network's `Blake2bHeight`), so it needs no chain-identity
-check: a peer serving the SHA256d chain is refused at the activation height,
-where its headers are still v1. It needs peers serving compact block filters,
-that is Knots nodes with `blockfilterindex=1` and `peerblockfilters=1`; set
-them with `neutrino.connect` or `neutrino.addpeer`, since DNS seeds do not
-know which nodes follow this chain. On regtest and simnet
-`bitcoin.blake2b-activation-height` is required as with `bitcoind`.
+package, from the network's `Blake2bHeight`). A peer serving the SHA256d chain
+is refused at the activation height, where its headers are still v1, and is
+banned so it is not dialled again. On mainnet the light client also gets a
+checkpoint at block 961640 with the activation block's hash, and once its
+headers reach that height the same chain-identity check as with `bitcoind`
+runs against them and writes `chain-identity.json`.
+
+Peers: neutrino needs peers serving compact block filters, that is Knots nodes
+on the BLAKE2b chain with `blockfilterindex=1` and `peerblockfilters=1`.
+Mainnet and testnet4 use Bitcoin's DNS seeds, which return almost only nodes on
+the SHA256d chain, so `neutrino.connect` is required there; `neutrino.addpeer`
+alone is accepted with a warning, since it still mixes in seed peers. Point it
+at your own Knots node if you have one.
+
+What a light client does not check: it validates headers and proof of work,
+not transactions or scripts. Neither the unified signature hash rule nor the
+long coinbase maturity is enforced by it. With this chain's small hashrate a
+miner can feed a neutrino node an invalid block more cheaply than on Bitcoin,
+which is another reason to `neutrino.connect` to a Knots node you trust.
+
+Channel announcements are checked against the chain by default on this fork
+(`neutrino.validatechannels` defaults to true); `routing.assumechanvalid=true`
+turns that off.
+
+Fees: neutrino has no node to estimate fees from, so mainnet needs `fee.url`.
+The public fee estimators follow the SHA256d chain; use one that serves this
+chain.
+
+On regtest and simnet `bitcoin.blake2b-activation-height` is required as with
+`bitcoind`. On testnet4 neutrino uses btcd's built-in 150308, which
+`bitcoin.blake2b-activation-height` overrides. Importing headers from a file
+(`neutrino.blockheaderssource`, `neutrino.filterheaderssource`) is not
+supported: the import reads 80-byte headers only.
 
 ## Configuration
 
