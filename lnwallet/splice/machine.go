@@ -200,6 +200,10 @@ type Config struct {
 	// ResendAnnouncement, if set, sends our half of that announcement
 	// again, as the peer's channel_reestablish asks.
 	ResendAnnouncement func()
+
+	// Limits, shared by the node's machines, bounds the splices peers
+	// start. Nil for none.
+	Limits *Limits
 }
 
 // notify tells NotifyEvent of a step.
@@ -269,6 +273,9 @@ type active struct {
 
 	// role is our role in the interactive construction.
 	role interactivetx.Role
+
+	// lockDone is set once the splice has locked.
+	lockDone bool
 
 	// session is the interactive construction, nil once done.
 	session *interactivetx.Session
@@ -398,6 +405,15 @@ func (m *Machine) Stop() {
 	m.stopOnce.Do(func() {
 		close(m.quit)
 		m.wg.Wait()
+
+		// The next machine takes the place again for a splice it
+		// restores; one that doesn't survive isn't counted.
+		m.mu.Lock()
+		a := m.active
+		m.mu.Unlock()
+		if a != nil && a.role == interactivetx.Acceptor {
+			m.cfg.Limits.release(m, m.cfg.ChanID, false)
+		}
 	})
 }
 
@@ -446,10 +462,17 @@ func (m *Machine) setActive(a *active) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.active != nil && m.active.timeout != nil {
-		m.active.timeout.Stop()
+	old := m.active
+	if old != nil && old.timeout != nil {
+		old.timeout.Stop()
 	}
 	m.active = a
+
+	// A splice the peer started gives back its place in the limits;
+	// ending without locking counts against the channel.
+	if old != nil && old != a && old.role == interactivetx.Acceptor {
+		m.cfg.Limits.release(m, m.cfg.ChanID, !old.lockDone)
+	}
 }
 
 // update runs f on the splice in progress under mu, so the link's reads see

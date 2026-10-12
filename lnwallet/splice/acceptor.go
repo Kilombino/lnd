@@ -72,6 +72,15 @@ func (m *Machine) handleSpliceInit(msg *lnwire.SpliceInit) {
 
 		return
 	}
+
+	// Last, so that nothing refused before takes a place.
+	code := m.cfg.Limits.admit(m, m.cfg.ChanID, m.cfg.TheirNodeID, false)
+	if code != "" {
+		m.abort(code, "")
+		m.resume()
+
+		return
+	}
 	a.session = session
 	m.setActive(a)
 	m.startTimeout()

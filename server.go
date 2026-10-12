@@ -68,6 +68,7 @@ import (
 	chcl "github.com/lightningnetwork/lnd/lnwallet/chancloser"
 	"github.com/lightningnetwork/lnd/lnwallet/chanfunding"
 	"github.com/lightningnetwork/lnd/lnwallet/rpcwallet"
+	"github.com/lightningnetwork/lnd/lnwallet/splice"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/nat"
 	"github.com/lightningnetwork/lnd/netann"
@@ -439,6 +440,9 @@ type server struct {
 	// spliceGraph keeps what the graph and the switch need of the
 	// channels' splices.
 	spliceGraph *spliceGraph
+
+	// spliceLimits bounds the splices peers start, across the node.
+	spliceLimits *splice.Limits
 
 	// chanEventStore tracks the behaviour of channels and their remote peers to
 	// provide insights into their health and performance.
@@ -816,6 +820,7 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 		v1Graph:        v1Graph,
 		chanStateDB:    dbs.ChanStateDB.ChannelStateDB(),
 		spliceGraph:    newSpliceGraph(dbs.ChanStateDB.ChannelStateDB()),
+		spliceLimits:   splice.NewLimits(),
 		addrSource:     addrSource,
 		miscDB:         dbs.ChanStateDB,
 		invoicesDB:     dbs.InvoiceDB,

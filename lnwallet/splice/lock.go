@@ -155,6 +155,7 @@ func (m *Machine) maybeComplete() {
 	m.recordLast("locked", "", false)
 	m.notify("locked", a.txid, "", false)
 	m.report(Update{State: StateLocked, Txid: a.txid})
+	m.update(func(a *active) { a.lockDone = true })
 	m.setActive(nil)
 }
 
@@ -335,6 +336,11 @@ func (m *Machine) restore() error {
 			a.ourInputs = append(a.ourInputs, Coin{OutPoint: op})
 		}
 		m.active = a
+		if role == interactivetx.Acceptor {
+			m.cfg.Limits.admit(
+				m, m.cfg.ChanID, m.cfg.TheirNodeID, true,
+			)
+		}
 
 		if a.ourTxSigs != nil && a.theirTxSigs != nil {
 			a.phase = phasePending
