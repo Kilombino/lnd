@@ -4125,7 +4125,7 @@
         },
         "splice_status": {
           "type": "string",
-          "description": "Whether this node can start a splice of the channel now: \"ok\", or why\nnot: \"disabled\" (splicing is off on this node), \"peer_offline\",\n\"peer_unsupported\", \"no_unified_sigs\", \"taproot\", \"zero_conf\", \"pending\"\n(a splice is already in progress), \"closing\", \"funding_spent_unknown\",\n\"peer_not_locked\", \"peer_not_announcing\", \"peer_misbehaved\". New values\nmay be added; treat an unknown one as \"not now\"."
+          "description": "Whether this node can start a splice of the channel now: \"ok\", or why\nnot: \"disabled\" (splicing is off on this node), \"peer_offline\",\n\"peer_unsupported\", \"no_unified_sigs\", \"taproot\", \"zero_conf\", \"pending\"\n(a splice is already in progress), \"closing\", \"funding_spent_unknown\",\n\"peer_not_locked\", \"peer_misbehaved\"; or \"peer_not_announcing\", which\ndoesn't stop a splice (the peer never sent its half of the last one's\nannouncement). New values may be added; treat an unknown one as \"not\nnow\"."
         },
         "pending_splice": {
           "$ref": "#/definitions/lnrpcPendingSplice",

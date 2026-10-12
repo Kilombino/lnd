@@ -4819,8 +4819,10 @@ type Channel struct {
 	//not: "disabled" (splicing is off on this node), "peer_offline",
 	//"peer_unsupported", "no_unified_sigs", "taproot", "zero_conf", "pending"
 	//(a splice is already in progress), "closing", "funding_spent_unknown",
-	//"peer_not_locked", "peer_not_announcing", "peer_misbehaved". New values
-	//may be added; treat an unknown one as "not now".
+	//"peer_not_locked", "peer_misbehaved"; or "peer_not_announcing", which
+	//doesn't stop a splice (the peer never sent its half of the last one's
+	//announcement). New values may be added; treat an unknown one as "not
+	//now".
 	SpliceStatus string `protobuf:"bytes,1002,opt,name=splice_status,json=spliceStatus,proto3" json:"splice_status,omitempty"`
 	// The splice in progress, if any.
 	PendingSplice *PendingSplice `protobuf:"bytes,1003,opt,name=pending_splice,json=pendingSplice,proto3" json:"pending_splice,omitempty"`

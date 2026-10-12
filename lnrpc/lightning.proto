@@ -1612,8 +1612,10 @@ message Channel {
     not: "disabled" (splicing is off on this node), "peer_offline",
     "peer_unsupported", "no_unified_sigs", "taproot", "zero_conf", "pending"
     (a splice is already in progress), "closing", "funding_spent_unknown",
-    "peer_not_locked", "peer_not_announcing", "peer_misbehaved". New values
-    may be added; treat an unknown one as "not now".
+    "peer_not_locked", "peer_misbehaved"; or "peer_not_announcing", which
+    doesn't stop a splice (the peer never sent its half of the last one's
+    announcement). New values may be added; treat an unknown one as "not
+    now".
     */
     string splice_status = 1002;
 

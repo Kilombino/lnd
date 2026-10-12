@@ -101,9 +101,6 @@ func (r *rpcServer) spliceStatus(
 
 		return spliceStatusPending, nil
 
-	case r.peerNotAnnouncing(ch):
-		return spliceStatusPeerNotAnnouncing, nil
-
 	case !r.cfg.ProtocolOptions.Splice():
 		return spliceStatusDisabled, nil
 	}
@@ -116,6 +113,12 @@ func (r *rpcServer) spliceStatus(
 	m, ok := p.SpliceMachine(chanID)
 	if !ok {
 		return spliceStatusPeerUnsupported, nil
+	}
+
+	// Said, but no reason not to splice: the peer's missing half of the
+	// last announcement doesn't stop another splice.
+	if r.peerNotAnnouncing(ch) {
+		return spliceStatusPeerNotAnnouncing, m
 	}
 
 	return spliceStatusOK, m
@@ -268,9 +271,9 @@ func (r *rpcServer) EstimateSplice(_ context.Context,
 	if err != nil {
 		return nil, err
 	}
-	code, _ := r.spliceStatus(ch)
+	code, machine := r.spliceStatus(ch)
 	refusal := ""
-	if code != spliceStatusOK {
+	if machine == nil {
 		refusal = code
 	}
 
