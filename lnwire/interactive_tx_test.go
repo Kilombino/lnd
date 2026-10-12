@@ -3,6 +3,7 @@ package lnwire
 import (
 	"bytes"
 	"encoding/hex"
+	"math"
 	"strings"
 	"testing"
 
@@ -33,7 +34,7 @@ func h(t *testing.T, parts ...string) []byte {
 
 const (
 	chanIDHex = "1111111111111111111111111111111111111111111111111111111111111111"
-	hashHex   = "2222222222222222222222222222222222222222222222222222222222222222"
+	hashHex   = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
 	pubKeyHex = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
 )
 
@@ -44,9 +45,13 @@ func testChanID() ChannelID {
 	return id
 }
 
+// testHash is not a palindrome, so a byte reversal shows: on the wire a
+// txid is in internal order, the same bytes as chainhash.Hash.
 func testHash() chainhash.Hash {
 	var hash chainhash.Hash
-	copy(hash[:], bytes.Repeat([]byte{0x22}, 32))
+	for i := range hash {
+		hash[i] = byte(i + 1)
+	}
 
 	return hash
 }
@@ -320,4 +325,96 @@ func TestInteractiveTxDecodeRefusals(t *testing.T) {
 		_, err := ReadMessage(bytes.NewReader(tc.raw), 0)
 		require.Error(t, err, tc.name)
 	}
+}
+
+// TestUnknownTLVsSurviveReencoding checks that a decoded message re-encodes
+// with the unknown records it arrived with, alongside its known ones.
+func TestUnknownTLVsSurviveReencoding(t *testing.T) {
+	t.Parallel()
+
+	raw := h(t,
+		"0042", chanIDHex, "0000000000000002", "0000",
+		"00000001", "fffffffd",
+		"00 20", hashHex, // shared_input_txid
+		"03 01 aa",   // unknown odd
+		"07 02 bbcc", // unknown odd
+	)
+
+	msg, err := ReadMessage(bytes.NewReader(raw), 0)
+	require.NoError(t, err)
+	in := msg.(*TxAddInput)
+	require.True(t, in.SharedInputTxid.IsSome())
+
+	var b bytes.Buffer
+	_, err = WriteMessage(&b, in, 0)
+	require.NoError(t, err)
+	require.Equal(t, hex.EncodeToString(raw), hex.EncodeToString(b.Bytes()))
+
+	// Encoding didn't fold the known record into ExtraData.
+	require.Equal(t, h(t, "03 01 aa", "07 02 bbcc"), []byte(in.ExtraData))
+}
+
+// TestUnknownEvenTLVRefused checks BOLT 1: an unknown even type is one the
+// receiver was told it must understand.
+func TestUnknownEvenTLVRefused(t *testing.T) {
+	t.Parallel()
+
+	for _, raw := range [][]byte{
+		h(t, "004d", chanIDHex, hashHex, "02 00"),
+		h(t, "0046", chanIDHex, "04 01 00"),
+		h(t, "0050", chanIDHex, "0000000000000000", "00000000",
+			"00000000", pubKeyHex, "04 00"),
+	} {
+		_, err := ReadMessage(bytes.NewReader(raw), 0)
+		require.ErrorContains(t, err, "unknown even TLV type")
+	}
+}
+
+// TestS64Extremes checks the edges of the signed contribution.
+func TestS64Extremes(t *testing.T) {
+	t.Parallel()
+
+	key := testPubKey(t)
+	for _, tc := range []struct {
+		amt btcutil.Amount
+		hex string
+	}{
+		{btcutil.Amount(math.MinInt64), "8000000000000000"},
+		{btcutil.Amount(math.MaxInt64), "7fffffffffffffff"},
+		{0, "0000000000000000"},
+		{-1, "ffffffffffffffff"},
+	} {
+		checkGolden(t, &SpliceAck{
+			ChannelID:           testChanID(),
+			FundingContribution: tc.amt,
+			FundingPubKey:       key,
+		}, h(t, "0051", chanIDHex, tc.hex, pubKeyHex))
+	}
+}
+
+// TestDraftLengthReestablishRefused checks that a 32-byte record in type 1
+// of channel_reestablish, the layout of an older splicing draft, is refused
+// rather than misread.
+func TestDraftLengthReestablishRefused(t *testing.T) {
+	t.Parallel()
+
+	raw := h(t,
+		"0088", chanIDHex, "0000000000000007", "0000000000000006",
+		strings.Repeat("44", 32), pubKeyHex,
+		"01 20", hashHex,
+	)
+	_, err := ReadMessage(bytes.NewReader(raw), 0)
+	require.Error(t, err)
+}
+
+// TestStartBatchWithoutMessageType checks the record is optional on the
+// wire.
+func TestStartBatchWithoutMessageType(t *testing.T) {
+	t.Parallel()
+
+	checkGolden(t, &StartBatch{
+		ChannelID:        testChanID(),
+		BatchSize:        3,
+		BatchMessageType: fn.None[MessageType](),
+	}, h(t, "007f", chanIDHex, "0003"))
 }

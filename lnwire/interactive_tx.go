@@ -38,7 +38,8 @@ type TxAddInput struct {
 	// current funding output (TLV type 0).
 	SharedInputTxid fn.Option[chainhash.Hash]
 
-	// ExtraData holds the TLV stream, unknown records included.
+	// ExtraData holds the TLV records of unknown (odd) types, kept so the
+	// message re-encodes with everything it arrived with.
 	ExtraData ExtraOpaqueData
 }
 
@@ -65,11 +66,8 @@ func (m *TxAddInput) Encode(w *bytes.Buffer, _ uint32) error {
 		hash := [32]byte(h)
 		records = append(records, hashRecord{0, &hash})
 	})
-	if err := EncodeMessageExtraData(&m.ExtraData, records...); err != nil {
-		return err
-	}
 
-	return WriteBytes(w, m.ExtraData)
+	return encodeTLVs(w, m.ExtraData, records...)
 }
 
 // Decode deserializes the message.
@@ -88,25 +86,16 @@ func (m *TxAddInput) Decode(r io.Reader, _ uint32) error {
 		return err
 	}
 
-	var extra ExtraOpaqueData
-	if err := ReadElements(r, &extra); err != nil {
-		return err
-	}
-
 	var hash [32]byte
-	types, err := extra.ExtractRecords(hashRecord{0, &hash})
+	parsed, extra, err := decodeTLVs(r, hashRecord{0, &hash})
 	if err != nil {
 		return err
 	}
 	m.SharedInputTxid = fn.None[chainhash.Hash]()
-	if present(types, 0) {
+	if parsed.Contains(0) {
 		m.SharedInputTxid = fn.Some(chainhash.Hash(hash))
 	}
-
-	m.ExtraData = nil
-	if len(extra) != 0 {
-		m.ExtraData = extra
-	}
+	m.ExtraData = extra
 
 	return nil
 }
@@ -156,7 +145,7 @@ func (m *TxAddOutput) Encode(w *bytes.Buffer, _ uint32) error {
 		return err
 	}
 
-	return WriteBytes(w, m.ExtraData)
+	return encodeTLVs(w, m.ExtraData)
 }
 
 // Decode deserializes the message.
@@ -267,7 +256,7 @@ func (m *TxComplete) Encode(w *bytes.Buffer, _ uint32) error {
 		return err
 	}
 
-	return WriteBytes(w, m.ExtraData)
+	return encodeTLVs(w, m.ExtraData)
 }
 
 // Decode deserializes the message.
@@ -392,11 +381,8 @@ func (m *TxSignatures) Encode(w *bytes.Buffer, _ uint32) error {
 		rec := tlv.NewRecordT[tlv.TlvType0](sig)
 		records = append(records, &rec)
 	})
-	if err := EncodeMessageExtraData(&m.ExtraData, records...); err != nil {
-		return err
-	}
 
-	return WriteBytes(w, m.ExtraData)
+	return encodeTLVs(w, m.ExtraData, records...)
 }
 
 // Decode deserializes the message.
@@ -426,25 +412,16 @@ func (m *TxSignatures) Decode(r io.Reader, _ uint32) error {
 		m.Witnesses = append(m.Witnesses, witness)
 	}
 
-	var extra ExtraOpaqueData
-	if err := ReadElements(r, &extra); err != nil {
-		return err
-	}
-
 	sig := tlv.ZeroRecordT[tlv.TlvType0, Sig]()
-	types, err := extra.ExtractRecords(&sig)
+	parsed, extra, err := decodeTLVs(r, &sig)
 	if err != nil {
 		return err
 	}
 	m.SharedInputSignature = fn.None[Sig]()
-	if present(types, 0) {
+	if parsed.Contains(0) {
 		m.SharedInputSignature = fn.Some(sig.Val)
 	}
-
-	m.ExtraData = nil
-	if len(extra) != 0 {
-		m.ExtraData = extra
-	}
+	m.ExtraData = extra
 
 	return nil
 }
@@ -499,11 +476,8 @@ func (m *TxInitRbf) Encode(w *bytes.Buffer, _ uint32) error {
 	records := rbfRecords(
 		m.FundingOutputContribution, m.RequireConfirmedInputs,
 	)
-	if err := EncodeMessageExtraData(&m.ExtraData, records...); err != nil {
-		return err
-	}
 
-	return WriteBytes(w, m.ExtraData)
+	return encodeTLVs(w, m.ExtraData, records...)
 }
 
 // Decode deserializes the message.
@@ -556,11 +530,8 @@ func (m *TxAckRbf) Encode(w *bytes.Buffer, _ uint32) error {
 	records := rbfRecords(
 		m.FundingOutputContribution, m.RequireConfirmedInputs,
 	)
-	if err := EncodeMessageExtraData(&m.ExtraData, records...); err != nil {
-		return err
-	}
 
-	return WriteBytes(w, m.ExtraData)
+	return encodeTLVs(w, m.ExtraData, records...)
 }
 
 // Decode deserializes the message.
@@ -608,7 +579,7 @@ func (m *TxAbort) Encode(w *bytes.Buffer, _ uint32) error {
 		return err
 	}
 
-	return WriteBytes(w, m.ExtraData)
+	return encodeTLVs(w, m.ExtraData)
 }
 
 // Decode deserializes the message.
@@ -649,7 +620,7 @@ func encodeChanSerial(w *bytes.Buffer, chanID ChannelID, serialID uint64,
 		return err
 	}
 
-	return WriteBytes(w, extra)
+	return encodeTLVs(w, extra)
 }
 
 // decodeChanSerial reads a message written by encodeChanSerial.
@@ -666,21 +637,11 @@ func decodeChanSerial(r io.Reader, chanID *ChannelID, serialID *uint64,
 // readExtraData reads a message's trailing TLV stream; an empty one reads as
 // nil, so that a decoded message compares equal to the one encoded.
 func readExtraData(r io.Reader, extra *ExtraOpaqueData) error {
-	var data ExtraOpaqueData
-	if err := ReadElements(r, &data); err != nil {
+	_, data, err := decodeTLVs(r)
+	if err != nil {
 		return err
 	}
-
-	// Parsing checks the stream is well formed, as for messages with known
-	// records.
-	if _, err := data.ExtractRecords(); err != nil {
-		return err
-	}
-
-	*extra = nil
-	if len(data) != 0 {
-		*extra = data
-	}
+	*extra = data
 
 	return nil
 }
@@ -704,29 +665,22 @@ func rbfRecords(contribution fn.Option[btcutil.Amount],
 func decodeRbfExtra(r io.Reader, contribution *fn.Option[btcutil.Amount],
 	requireConfirmed *bool, extra *ExtraOpaqueData) error {
 
-	var data ExtraOpaqueData
-	if err := ReadElements(r, &data); err != nil {
-		return err
-	}
-
 	var amt btcutil.Amount
-	types, err := data.ExtractRecords(
-		s64Record{0, &amt}, requireConfirmedInputsType,
+	parsed, data, err := decodeTLVs(
+		r, s64Record{0, &amt}, requireConfirmedInputsType,
 	)
 	if err != nil {
 		return err
 	}
 
 	*contribution = fn.None[btcutil.Amount]()
-	if present(types, 0) {
+	if parsed.Contains(0) {
 		*contribution = fn.Some(amt)
 	}
-	*requireConfirmed = present(types, tlv.Type(requireConfirmedInputsType))
-
-	*extra = nil
-	if len(data) != 0 {
-		*extra = data
-	}
+	*requireConfirmed = parsed.Contains(
+		tlv.Type(requireConfirmedInputsType),
+	)
+	*extra = data
 
 	return nil
 }

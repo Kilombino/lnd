@@ -8,6 +8,7 @@ import (
 	"math"
 
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/lightningnetwork/lnd/fn/v2"
 	"github.com/lightningnetwork/lnd/tlv"
 )
 
@@ -157,4 +158,53 @@ func present(m tlv.TypeMap, typ tlv.Type) bool {
 	val, ok := m[typ]
 
 	return ok && val == nil
+}
+
+// decodeTLVs reads a message's trailing TLV stream: records of a known type
+// are parsed into the given producers, everything else is returned as the
+// message's ExtraData (nil when empty). An unknown even type is refused, as
+// BOLT 1 requires: the peer said the receiver must understand it.
+func decodeTLVs(r io.Reader, known ...tlv.RecordProducer) (fn.Set[tlv.Type],
+	ExtraOpaqueData, error) {
+
+	var data ExtraOpaqueData
+	if err := ReadElements(r, &data); err != nil {
+		return nil, nil, err
+	}
+
+	parsed, extra, err := ParseAndExtractExtraData(data, known...)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if len(extra) == 0 {
+		return parsed, nil, nil
+	}
+
+	unknown, err := extra.ExtractRecords()
+	if err != nil {
+		return nil, nil, err
+	}
+	for typ := range unknown {
+		if typ%2 == 0 {
+			return nil, nil, fmt.Errorf("unknown even TLV type %d",
+				typ)
+		}
+	}
+
+	return parsed, extra, nil
+}
+
+// encodeTLVs writes the known records merged with the unknown ones kept in
+// extra, without changing extra, so a decoded message re-encodes with every
+// record it arrived with.
+func encodeTLVs(w *bytes.Buffer, extra ExtraOpaqueData,
+	known ...tlv.RecordProducer) error {
+
+	encoded, err := MergeAndEncode(known, extra, nil)
+	if err != nil {
+		return err
+	}
+
+	return WriteBytes(w, encoded)
 }

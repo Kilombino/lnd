@@ -5029,6 +5029,15 @@ func (p *Brontide) handleInitMsg(msg *lnwire.Init) error {
 		return fmt.Errorf("data loss protection required")
 	}
 
+	// A peer that requires splicing can't be served by a node that has
+	// splicing off: the bit is known to lnd, so the check above lets it
+	// through.
+	if p.remoteFeatures.RequiresFeature(lnwire.SpliceRequired) &&
+		!p.cfg.Features.HasFeature(lnwire.SpliceOptional) {
+
+		return fmt.Errorf("peer requires splicing, which is turned off")
+	}
+
 	// Refuse a peer that serves another chain, or that will not say which
 	// chain it serves when we insist on knowing.
 	err = checkPeerNetworks(

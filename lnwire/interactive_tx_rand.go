@@ -7,20 +7,30 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightningnetwork/lnd/fn/v2"
+	"github.com/stretchr/testify/require"
 	"pgregory.net/rapid"
 )
 
 // Random instances of the interactive transaction and splicing messages, for
 // the wire round trip property test.
 
-// randExtra returns random TLV records avoiding the message's known types.
+// randExtra returns random TLV records of unknown odd types: even ones are
+// refused on decode, and the message's known types are avoided.
 func randExtra(t *rapid.T, known ...uint64) ExtraOpaqueData {
-	extra := RandExtraOpaqueData(t, fn.NewSet(known...))
-	if len(extra) == 0 {
+	records, _ := RandTLVRecords(t, fn.NewSet(known...), 0)
+	for typ := range records {
+		if typ%2 == 0 {
+			delete(records, typ)
+		}
+	}
+	if len(records) == 0 {
 		return nil
 	}
 
-	return extra
+	encoded, err := records.Serialize()
+	require.NoError(t, err)
+
+	return ExtraOpaqueData(encoded)
 }
 
 // randBytes returns a random byte slice of length within [lo, hi], nil when

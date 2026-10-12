@@ -63,11 +63,8 @@ func (m *SpliceInit) Encode(w *bytes.Buffer, _ uint32) error {
 	if m.RequireConfirmedInputs {
 		records = append(records, requireConfirmedInputsType)
 	}
-	if err := EncodeMessageExtraData(&m.ExtraData, records...); err != nil {
-		return err
-	}
 
-	return WriteBytes(w, m.ExtraData)
+	return encodeTLVs(w, m.ExtraData, records...)
 }
 
 // Decode deserializes the message.
@@ -139,11 +136,8 @@ func (m *SpliceAck) Encode(w *bytes.Buffer, _ uint32) error {
 	if m.RequireConfirmedInputs {
 		records = append(records, requireConfirmedInputsType)
 	}
-	if err := EncodeMessageExtraData(&m.ExtraData, records...); err != nil {
-		return err
-	}
 
-	return WriteBytes(w, m.ExtraData)
+	return encodeTLVs(w, m.ExtraData, records...)
 }
 
 // Decode deserializes the message.
@@ -198,7 +192,7 @@ func (m *SpliceLocked) Encode(w *bytes.Buffer, _ uint32) error {
 		return err
 	}
 
-	return WriteBytes(w, m.ExtraData)
+	return encodeTLVs(w, m.ExtraData)
 }
 
 // Decode deserializes the message.
@@ -258,11 +252,8 @@ func (m *StartBatch) Encode(w *bytes.Buffer, _ uint32) error {
 		v := uint16(t)
 		records = append(records, u16Record{1, &v})
 	})
-	if err := EncodeMessageExtraData(&m.ExtraData, records...); err != nil {
-		return err
-	}
 
-	return WriteBytes(w, m.ExtraData)
+	return encodeTLVs(w, m.ExtraData, records...)
 }
 
 // Decode deserializes the message.
@@ -271,25 +262,16 @@ func (m *StartBatch) Decode(r io.Reader, _ uint32) error {
 		return err
 	}
 
-	var extra ExtraOpaqueData
-	if err := ReadElements(r, &extra); err != nil {
-		return err
-	}
-
 	var v uint16
-	types, err := extra.ExtractRecords(u16Record{1, &v})
+	parsed, extra, err := decodeTLVs(r, u16Record{1, &v})
 	if err != nil {
 		return err
 	}
 	m.BatchMessageType = fn.None[MessageType]()
-	if present(types, 1) {
+	if parsed.Contains(1) {
 		m.BatchMessageType = fn.Some(MessageType(v))
 	}
-
-	m.ExtraData = nil
-	if len(extra) != 0 {
-		m.ExtraData = extra
-	}
+	m.ExtraData = extra
 
 	return nil
 }
@@ -310,21 +292,14 @@ func (m *StartBatch) TargetChanID() ChannelID { return m.ChannelID }
 func decodeFlagExtra(r io.Reader, requireConfirmed *bool,
 	extra *ExtraOpaqueData) error {
 
-	var data ExtraOpaqueData
-	if err := ReadElements(r, &data); err != nil {
-		return err
-	}
-
-	types, err := data.ExtractRecords(requireConfirmedInputsType)
+	parsed, data, err := decodeTLVs(r, requireConfirmedInputsType)
 	if err != nil {
 		return err
 	}
-	*requireConfirmed = present(types, tlv.Type(requireConfirmedInputsType))
-
-	*extra = nil
-	if len(data) != 0 {
-		*extra = data
-	}
+	*requireConfirmed = parsed.Contains(
+		tlv.Type(requireConfirmedInputsType),
+	)
+	*extra = data
 
 	return nil
 }
