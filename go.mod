@@ -228,4 +228,4 @@ replace github.com/btcsuite/btcwallet/wallet/txauthor => github.com/paulscode/bt
 
 replace github.com/lightningnetwork/lnd/fn/v2 => ./fn
 
-replace github.com/lightninglabs/neutrino => github.com/Kilombino/neutrino-blake2b v0.0.0-20261012051506-4b7072266471
+replace github.com/lightninglabs/neutrino => github.com/Kilombino/neutrino-blake2b v0.0.0-20261012222229-e3dedd4d1590
