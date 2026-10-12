@@ -8,8 +8,10 @@ import (
 
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btclog/v2"
+	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/input"
 	"github.com/lightningnetwork/lnd/keychain"
+	"github.com/lightningnetwork/lnd/lnwallet"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/watchtower/wtdb"
 	"github.com/lightningnetwork/lnd/watchtower/wtserver"
@@ -65,6 +67,10 @@ type sessionQueueConfig struct {
 	// to fetch the breach retribution info for a certain channel at a
 	// certain revoked commitment height.
 	BuildBreachRetribution BreachRetributionBuilder
+
+	// BuildSpliceBreachRetribution builds it for a commitment on a
+	// splice's funding output.
+	BuildSpliceBreachRetribution SpliceBreachRetributionBuilder
 
 	// TaskPipeline is a pipeline which the sessionQueue should use to send
 	// any unhandled tasks on shutdown of the queue.
@@ -308,7 +314,7 @@ func (q *sessionQueue) AcceptTask(task *backupTask) (sessionQueueStatus, bool) {
 	case sessionQueueAvailable:
 		err := task.bindSession(
 			&q.cfg.ClientSession.ClientSessionBody,
-			q.cfg.BuildBreachRetribution,
+			q.breachRetributionFor(task),
 		)
 		if err != nil {
 			q.queueCond.L.Unlock()
@@ -806,4 +812,28 @@ func (s *sessionQueueSet) ApplyAndWait(getApply func(*sessionQueue) func()) {
 		}(sessionq)
 	}
 	wg.Wait()
+}
+
+// breachRetributionFor returns the builder of a task's breach retribution:
+// on a splice's funding output, the splice's.
+func (q *sessionQueue) breachRetributionFor(
+	task *backupTask) BreachRetributionBuilder {
+
+	if !task.id.IsSplice() {
+		return q.cfg.BuildBreachRetribution
+	}
+
+	txid := task.id.SpliceTxid
+	build := q.cfg.BuildSpliceBreachRetribution
+
+	return func(id lnwire.ChannelID, commitHeight uint64) (
+		*lnwallet.BreachRetribution, channeldb.ChannelType, error) {
+
+		if build == nil {
+			return nil, 0, fmt.Errorf("no builder for splice %v",
+				txid)
+		}
+
+		return build(id, commitHeight, txid)
+	}
 }

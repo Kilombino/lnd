@@ -1138,3 +1138,81 @@ func TestSpliceBreachAfterLock(t *testing.T) {
 	requireBreachFor(t, alice, atLock.height, atLock.tx, atLock.bob,
 		atLock.alice)
 }
+
+// TestSpliceTowerRetributions checks a watchtower gets every commitment of
+// Bob's a breach could publish: at each revoked height, the one in the
+// channel's own log and one per splice log holding the height, each built
+// from its own entry. Taken after the lock and further updates, when the
+// channel's current funding is the splice's: the channel's own log must not
+// be read through it.
+func TestSpliceTowerRetributions(t *testing.T) {
+	t.Parallel()
+
+	alice, bob, txid := splicedPair(t, 100_000_000, 0)
+	oldTxid := alice.channelState.FundingOutpoint.Hash
+
+	// While pending: Bob's commitment at his current height on both.
+	p, err := bob.pendingFunding(txid)
+	require.NoError(t, err)
+	h := bob.commitChains.Local.tail().height
+	pendingOld := bob.commitChains.Local.tail().txn
+	pendingNew := p.local[h].txn
+
+	htlc, _ := createHTLC(3, lnwire.NewMSatFromSatoshis(400_000))
+	addAndReceiveHTLC(t, alice, bob, htlc, nil)
+	forceBatchTransition(t, alice, bob)
+
+	// At the lock, revoked after it: the same height on the old funding
+	// and, swapped in by the lock, on the new.
+	atLockHeight := bob.commitChains.Local.tail().height
+	atLock := bob.commitChains.Local.tail().txn
+	scid := lnwire.ShortChannelID{BlockHeight: 900_300}
+	require.NoError(t, alice.LockPendingFunding(txid, scid))
+	require.NoError(t, bob.LockPendingFunding(txid, scid))
+	atLockNew := bob.commitChains.Local.tail().txn
+	require.NotEqual(t, atLock.TxHash(), atLockNew.TxHash())
+
+	// After the lock, on the new funding only.
+	require.NoError(t, ForceStateTransition(alice, bob))
+	laterHeight := bob.commitChains.Local.tail().height
+	later := bob.commitChains.Local.tail().txn
+	require.NoError(t, ForceStateTransition(alice, bob))
+
+	// What the tower gets at a height: the txids of the commitments.
+	towerTxids := func(height uint64) []chainhash.Hash {
+		t.Helper()
+
+		var txids []chainhash.Hash
+		build := func(splice chainhash.Hash) {
+			br, err := NewTowerBreachRetribution(
+				alice.channelState, height, splice,
+				fn.None[AuxLeafStore](),
+				fn.None[AuxContractResolver](),
+			)
+			require.NoError(t, err)
+			txids = append(txids, br.BreachTxHash)
+		}
+		build(chainhash.Hash{})
+		splices, err := alice.channelState.SpliceRevocationsAt(height)
+		require.NoError(t, err)
+		for _, s := range splices {
+			build(s)
+		}
+
+		return txids
+	}
+
+	require.ElementsMatch(t, []chainhash.Hash{
+		pendingOld.TxHash(), pendingNew.TxHash(),
+	}, towerTxids(h))
+	require.ElementsMatch(t, []chainhash.Hash{
+		atLock.TxHash(), atLockNew.TxHash(),
+	}, towerTxids(atLockHeight))
+	require.Equal(t, []chainhash.Hash{later.TxHash()},
+		towerTxids(laterHeight))
+
+	// The old funding's entry at the lock is in its own log.
+	splices, err := alice.channelState.SpliceRevocationsAt(atLockHeight)
+	require.NoError(t, err)
+	require.Equal(t, []chainhash.Hash{oldTxid}, splices)
+}

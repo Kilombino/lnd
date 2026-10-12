@@ -1120,6 +1120,66 @@ type clientTest struct {
 
 var clientTests = []clientTest{
 	{
+		// Asserts that a height revoked while a splice is pending is
+		// backed up once per commitment the peer had at it: the one
+		// on the channel's funding output and the one on the
+		// splice's, each found by the tower by its own txid.
+		name: "backup splice commitments",
+		cfg: harnessCfg{
+			localBalance:  localBalance,
+			remoteBalance: remoteBalance,
+			policy: wtpolicy.Policy{
+				TxPolicy:   defaultTxPolicy,
+				MaxUpdates: 20,
+			},
+		},
+		fn: func(h *testHarness) {
+			const numUpdates = 3
+			spliceTxid := chainhash.Hash{0x51}
+
+			// Channel 1 stands for channel 0's commitments on the
+			// splice's funding output.
+			h.makeChannel(1, localBalance, remoteBalance)
+
+			require.NoError(h.t, h.clientMgr.Stop())
+			h.clientCfg.FetchSpliceRevocations = func(
+				id lnwire.ChannelID,
+				_ uint64) ([]chainhash.Hash, error) {
+
+				if id != chanIDFromInt(0) {
+					return nil, nil
+				}
+
+				return []chainhash.Hash{spliceTxid}, nil
+			}
+			h.clientCfg.BuildSpliceBreachRetribution = func(
+				id lnwire.ChannelID, height uint64,
+				txid chainhash.Hash) (
+				*lnwallet.BreachRetribution,
+				channeldb.ChannelType, error) {
+
+				if id != chanIDFromInt(0) || txid != spliceTxid {
+					return nil, 0, fmt.Errorf("unexpected "+
+						"splice backup %v %v", id, txid)
+				}
+				_, retribution := h.channel(1).getState(height)
+
+				return retribution,
+					channeldb.SimpleTaprootFeatureBit, nil
+			}
+			h.startClient()
+			h.registerChannel(0)
+
+			hints := h.advanceChannelN(0, numUpdates)
+			spliceHints := h.advanceChannelN(1, numUpdates)
+			h.backupStates(0, 0, numUpdates, nil)
+
+			h.server.waitForUpdates(
+				append(hints, spliceHints...), waitTime,
+			)
+		},
+	},
+	{
 		// Asserts that client will return the ErrUnregisteredChannel
 		// error when trying to backup states for a channel that has not
 		// been registered (and received it's pkscript).

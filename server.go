@@ -1986,9 +1986,12 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 		// buildBreachRetribution is a call-back that can be used to
 		// query the BreachRetribution info and channel type given a
 		// channel ID and commitment height.
-		buildBreachRetribution := func(chanID lnwire.ChannelID,
-			commitHeight uint64) (*lnwallet.BreachRetribution,
-			channeldb.ChannelType, error) {
+		// With a splice txid, the commitment on that splice's funding
+		// output; without, the one in the channel's own log.
+		buildSpliceBreachRetribution := func(chanID lnwire.ChannelID,
+			commitHeight uint64, spliceTxid chainhash.Hash) (
+			*lnwallet.BreachRetribution, channeldb.ChannelType,
+			error) {
 
 			channel, err := s.chanStateDB.FetchChannelByID(
 				nil, chanID,
@@ -1997,8 +2000,8 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 				return nil, 0, err
 			}
 
-			br, err := lnwallet.NewBreachRetribution(
-				channel, commitHeight, 0, nil,
+			br, err := lnwallet.NewTowerBreachRetribution(
+				channel, commitHeight, spliceTxid,
 				implCfg.AuxLeafStore,
 				implCfg.AuxContractResolver,
 			)
@@ -2007,6 +2010,26 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 			}
 
 			return br, channel.ChanType, nil
+		}
+		buildBreachRetribution := func(chanID lnwire.ChannelID,
+			commitHeight uint64) (*lnwallet.BreachRetribution,
+			channeldb.ChannelType, error) {
+
+			return buildSpliceBreachRetribution(
+				chanID, commitHeight, chainhash.Hash{},
+			)
+		}
+		fetchSpliceRevocations := func(chanID lnwire.ChannelID,
+			commitHeight uint64) ([]chainhash.Hash, error) {
+
+			channel, err := s.chanStateDB.FetchChannelByID(
+				nil, chanID,
+			)
+			if err != nil {
+				return nil, err
+			}
+
+			return channel.SpliceRevocationsAt(commitHeight)
 		}
 
 		fetchClosedChannel := s.chanStateDB.FetchClosedChannelForID
@@ -2031,10 +2054,12 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 		)
 
 		s.towerClientMgr, err = wtclient.NewManager(&wtclient.Config{
-			FetchClosedChannel:     fetchClosedChannel,
-			BuildBreachRetribution: buildBreachRetribution,
-			SessionCloseRange:      cfg.WtClient.SessionCloseRange,
-			ChainNotifier:          s.cc.ChainNotifier,
+			FetchClosedChannel:           fetchClosedChannel,
+			BuildBreachRetribution:       buildBreachRetribution,
+			BuildSpliceBreachRetribution: buildSpliceBreachRetribution,
+			FetchSpliceRevocations:       fetchSpliceRevocations,
+			SessionCloseRange:            cfg.WtClient.SessionCloseRange,
+			ChainNotifier:                s.cc.ChainNotifier,
 			SubscribeChannelEvents: func() (subscribe.Subscription,
 				error) {
 

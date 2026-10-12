@@ -771,6 +771,48 @@ func (c *OpenChannel) FetchSpliceRevocationLog(txid chainhash.Hash,
 	return &rl, nil
 }
 
+// SpliceRevocationsAt returns the splices whose logs hold the peer's revoked
+// commitment at height: the commitments on fundings other than the one in the
+// channel's own log.
+func (c *OpenChannel) SpliceRevocationsAt(height uint64) ([]chainhash.Hash,
+	error) {
+
+	c.RLock()
+	defer c.RUnlock()
+
+	var txids []chainhash.Hash
+	err := kvdb.View(c.Db.backend, func(tx kvdb.RTx) error {
+		chanBucket, err := fetchChanBucket(
+			tx, c.IdentityPub, &c.FundingOutpoint, c.ChainHash,
+		)
+		if err != nil {
+			return err
+		}
+		logs := chanBucket.NestedReadBucket(spliceRevocationLogBucket)
+		if logs == nil {
+			return nil
+		}
+
+		key := makeLogKey(height)
+
+		return logs.ForEach(func(k, _ []byte) error {
+			log := logs.NestedReadBucket(k)
+			if log == nil || log.Get(key[:]) == nil {
+				return nil
+			}
+			var txid chainhash.Hash
+			copy(txid[:], k)
+			txids = append(txids, txid)
+
+			return nil
+		})
+	}, func() {
+		txids = nil
+	})
+
+	return txids, err
+}
+
 // applySpliceWrites applies a commitment chain step's writes for the
 // pending splices: our new commitments, the peer's new ones with our
 // signatures, or, with revoke, the peer's revoked ones moved into their

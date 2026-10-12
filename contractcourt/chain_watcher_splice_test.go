@@ -135,6 +135,13 @@ func TestChainWatcherFollowsSplice(t *testing.T) {
 	require.Equal(t, bobCommit.TxHash(),
 		closeInfo.CommitResolution.SelfOutPoint.Hash)
 
+	// The close is the channel's, named as it was opened: the tower
+	// client ends its sessions' interest in it by that name.
+	require.Equal(t, h.aliceChannel.State().FundingOutpoint,
+		closeInfo.ChannelCloseSummary.ChanPoint)
+	require.NotEqual(t, splice.TxHash(),
+		closeInfo.ChannelCloseSummary.ChanPoint.Hash)
+
 	// The HTLC is claimed at its output on the new commitment.
 	resolutions := closeInfo.HtlcResolutions
 	require.NotNil(t, resolutions)

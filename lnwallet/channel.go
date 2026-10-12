@@ -2154,6 +2154,56 @@ func NewBreachRetribution(chanState *channeldb.OpenChannel, stateNum uint64,
 		return nil, err
 	}
 
+	return newBreachRetribution(
+		chanState, stateNum, breachHeight, spendTx, revokedLog,
+		revokedLogLegacy, leafStore, auxResolver,
+	)
+}
+
+// NewTowerBreachRetribution is NewBreachRetribution for a watchtower backup,
+// before any breach: the peer's revoked commitment at stateNum from the
+// channel's own revocation log, or with spliceTxid set, the one on that
+// splice's funding output from the splice's log.
+func NewTowerBreachRetribution(chanState *channeldb.OpenChannel,
+	stateNum uint64, spliceTxid chainhash.Hash,
+	leafStore fn.Option[AuxLeafStore],
+	auxResolver fn.Option[AuxContractResolver]) (*BreachRetribution,
+	error) {
+
+	var (
+		revokedLog       *channeldb.RevocationLog
+		revokedLogLegacy *channeldb.ChannelCommitment
+		err              error
+	)
+	if spliceTxid == (chainhash.Hash{}) {
+		revokedLog, revokedLogLegacy, err = chanState.FindPreviousState(
+			stateNum,
+		)
+	} else {
+		revokedLog, err = chanState.FetchSpliceRevocationLog(
+			spliceTxid, stateNum,
+		)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return newBreachRetribution(
+		chanState, stateNum, 0, nil, revokedLog, revokedLogLegacy,
+		leafStore, auxResolver,
+	)
+}
+
+// newBreachRetribution builds a BreachRetribution from the revocation log
+// entry of the peer's revoked commitment.
+func newBreachRetribution(chanState *channeldb.OpenChannel, stateNum uint64,
+	breachHeight uint32, spendTx *wire.MsgTx,
+	revokedLog *channeldb.RevocationLog,
+	revokedLogLegacy *channeldb.ChannelCommitment,
+	leafStore fn.Option[AuxLeafStore],
+	auxResolver fn.Option[AuxContractResolver]) (*BreachRetribution,
+	error) {
+
 	// Sanity check that at least one of the logs is returned.
 	if revokedLog == nil && revokedLogLegacy == nil {
 		return nil, ErrNoRevocationLogFound
