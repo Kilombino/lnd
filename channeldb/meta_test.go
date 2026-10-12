@@ -88,7 +88,7 @@ func TestVersionFetchPut(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if meta.DbVersionNumber != getLatestDBVersion(dbVersions) {
+	if meta.DbVersionNumber != getLatestDBVersion(targetVersions(false)) {
 		t.Fatal("initialization of meta information wasn't performed")
 	}
 
@@ -604,7 +604,10 @@ func TestFetchMeta(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	require.Equal(t, LatestDBVersion(), meta.DbVersionNumber)
+	require.Equal(
+		t, getLatestDBVersion(targetVersions(false)),
+		meta.DbVersionNumber,
+	)
 
 	err = db.View(func(tx walletdb.ReadTx) error {
 		metaBucket := tx.ReadBucket(metaBucket)
@@ -613,7 +616,7 @@ func TestFetchMeta(t *testing.T) {
 		versionBytes := metaBucket.Get(dbVersionKey)
 		require.Len(t, versionBytes, 4)
 		require.Equal(
-			t, LatestDBVersion(), byteOrder.Uint32(versionBytes),
+			t, getLatestDBVersion(targetVersions(false)), byteOrder.Uint32(versionBytes),
 		)
 
 		return nil
@@ -679,7 +682,7 @@ func TestInitChannelDBCreatesMissingTopLevelBuckets(t *testing.T) {
 	}, func() {})
 	require.NoError(t, err)
 
-	require.NoError(t, initChannelDB(backend))
+	require.NoError(t, initChannelDB(backend, LatestDBVersion()))
 
 	err = kvdb.View(backend, func(tx kvdb.RTx) error {
 		require.NotNil(t, tx.ReadBucket(historicalChannelBucket))
@@ -738,7 +741,8 @@ func TestMissingDBVersionRunsWaitingProofMigration(t *testing.T) {
 		versionBytes := metaBucket.Get(dbVersionKey)
 		require.Len(t, versionBytes, 4)
 		require.Equal(
-			t, LatestDBVersion(), byteOrder.Uint32(versionBytes),
+			t, getLatestDBVersion(targetVersions(false)),
+			byteOrder.Uint32(versionBytes),
 		)
 
 		bucket := tx.ReadBucket(waitingProofsBucketKey)

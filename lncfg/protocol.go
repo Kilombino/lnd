@@ -42,7 +42,7 @@ type ProtocolOptions struct {
 	// SpliceOption should be set to allow splicing: adding funds to or
 	// taking them out of a channel without closing it, started by this
 	// node or by its peers.
-	SpliceOption bool `long:"splice" description:"if set, then lnd will allow channels to be spliced (funds added or taken out without closing), by this node or its peers; needs quiescence"`
+	SpliceOption bool `long:"splice" description:"if set, then lnd will allow channels to be spliced (funds added or taken out without closing), by this node or its peers; needs quiescence; once set, releases without splicing can no longer open the channel database"`
 
 	// NoAnchors should be set if we don't want to support opening or accepting
 	// channels having the anchor commitment type.

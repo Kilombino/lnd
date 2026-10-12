@@ -1101,6 +1101,7 @@ func (d *DefaultDatabaseBuilder) BuildDatabase(
 		channeldb.OptionGcDecayedLog(cfg.DB.NoGcDecayedLog),
 		channeldb.OptionWithDecayedLogDB(dbs.DecayedLogDB),
 		channeldb.OptionTombstoneClosedChannels(tombstoneClosedChans),
+		channeldb.OptionSplicing(cfg.ProtocolOptions.Splice()),
 	}
 
 	// Otherwise, we'll open two instances, one for the state we only need
