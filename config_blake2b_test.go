@@ -294,3 +294,77 @@ func TestNeutrinoBlake2bParams(t *testing.T) {
 		require.Zero(t, chaincfg.RegressionNetParams.Blake2bHeight)
 	})
 }
+
+// TestNeutrinoNeedsHeightOnLocalNetworks pins that neutrino on regtest or
+// simnet without bitcoin.blake2b-activation-height is refused at
+// configuration time, since the light client could not validate past it.
+func TestNeutrinoNeedsHeightOnLocalNetworks(t *testing.T) {
+	for _, net := range []string{"regtest", "simnet"} {
+		t.Run(net, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.LndDir = t.TempDir()
+			cfg.Bitcoin.Node = neutrinoBackendName
+			cfg.Bitcoin.RegTest = net == "regtest"
+			cfg.Bitcoin.SimNet = net == "simnet"
+			fileParser := flags.NewParser(&cfg, flags.Default)
+			flagParser := flags.NewParser(&cfg, flags.Default)
+			_, err := ValidateConfig(
+				cfg, signal.Interceptor{}, fileParser, flagParser,
+			)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "blake2b-activation-height")
+		})
+	}
+}
+
+// TestNeutrinoTestnet4Height pins that on testnet4 the chain-identity check
+// gets the light client's built-in activation height, and that an
+// out-of-range configured height is refused before it reaches btcd's int32.
+func TestNeutrinoTestnet4Height(t *testing.T) {
+	cfg := blake2bTestConfig(t, chainreg.BitcoinTestNet4Params,
+		func(c *Config) { c.Bitcoin.Node = neutrinoBackendName })
+	require.NoError(t, applyBlake2bChainConfig(cfg))
+	require.EqualValues(t, 150308, cfg.ActiveNetParams.Blake2bActivationHeight)
+
+	cfg = blake2bTestConfig(t, chainreg.BitcoinRegTestNetParams,
+		func(c *Config) {
+			c.Bitcoin.Node = neutrinoBackendName
+			c.Bitcoin.Blake2bActivationHeight = 1 << 31
+		})
+	require.ErrorContains(t, applyBlake2bChainConfig(cfg), "out of range")
+}
+
+// TestCheckNeutrinoBlake2b covers the peer and header-import rules for
+// neutrino on the BLAKE2b chain.
+func TestCheckNeutrinoBlake2b(t *testing.T) {
+	mainnet := func(set func(*Config)) *Config {
+		return blake2bTestConfig(t, chainreg.BitcoinMainNetParams,
+			func(c *Config) {
+				c.Bitcoin.Node = neutrinoBackendName
+				set(c)
+			})
+	}
+
+	err := checkNeutrinoBlake2b(mainnet(func(*Config) {}))
+	require.ErrorContains(t, err, "neutrino.connect")
+
+	require.NoError(t, checkNeutrinoBlake2b(mainnet(func(c *Config) {
+		c.NeutrinoMode.ConnectPeers = []string{"knots.example:8333"}
+	})))
+
+	// addpeer alone is allowed, with a warning.
+	require.NoError(t, checkNeutrinoBlake2b(mainnet(func(c *Config) {
+		c.NeutrinoMode.AddPeers = []string{"knots.example:8333"}
+	})))
+
+	err = checkNeutrinoBlake2b(mainnet(func(c *Config) {
+		c.NeutrinoMode.ConnectPeers = []string{"knots.example:8333"}
+		c.NeutrinoMode.BlockHeadersSource = "headers.bin"
+	}))
+	require.ErrorContains(t, err, "80-byte")
+
+	// Local networks need no peer list.
+	regtest := blake2bTestConfig(t, chainreg.BitcoinRegTestNetParams,
+		func(c *Config) { c.Bitcoin.Node = neutrinoBackendName })
+	require.NoError(t, checkNeutrinoBlake2b(regtest))
+}

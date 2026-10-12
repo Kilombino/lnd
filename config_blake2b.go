@@ -2,6 +2,7 @@ package lnd
 
 import (
 	"fmt"
+	"math"
 	"path/filepath"
 
 	"github.com/btcsuite/btcd/txscript"
@@ -40,6 +41,12 @@ func applyBlake2bChainConfig(cfg *Config) error {
 				"be set on mainnet: the activation height is fixed " +
 				"at 961640")
 		}
+		// It ends up in btcd's int32 heights: a value past that would
+		// turn negative there and fail with a misleading message.
+		if cfg.Bitcoin.Blake2bActivationHeight > math.MaxInt32 {
+			return fmt.Errorf("bitcoin.blake2b-activation-height %d is "+
+				"out of range", cfg.Bitcoin.Blake2bActivationHeight)
+		}
 		params.Blake2bActivationHeight = cfg.Bitcoin.Blake2bActivationHeight
 
 		// The light client validates BLAKE2b proof of work itself from the
@@ -51,6 +58,17 @@ func applyBlake2bChainConfig(cfg *Config) error {
 			p.Blake2bTargetShift = blake2bDefaultTargetShift
 		}
 		params.Params = &p
+	}
+
+	// The light client takes the activation height from btcd's parameters
+	// (testnet4's built-in 150308, unless overridden above); the
+	// chain-identity check, which a bitcoind backend can ask the node
+	// about, gets the same one.
+	if cfg.Bitcoin.Node == neutrinoBackendName &&
+		params.Blake2bActivationHeight == 0 &&
+		params.Params.Blake2bPowDeployed() {
+
+		params.Blake2bActivationHeight = uint32(params.Params.Blake2bHeight)
 	}
 
 	if cfg.Bitcoin.ChainHashOverride != "" {
@@ -144,4 +162,40 @@ func applyUnifiedSigHash(enabled bool) {
 	// out no such addresses, so this only concerns coins imported from
 	// elsewhere, which stay spendable, and replayable.
 	txauthor.LegacySigHashType = txscript.SigHashAll
+}
+
+// checkNeutrinoBlake2b holds the neutrino options that matter on the BLAKE2b
+// chain. The DNS seeds of mainnet and testnet4 are Bitcoin's and return almost
+// only nodes on the SHA256d chain, which the light client bans at the
+// activation height, so it needs peers that serve BLAKE2b headers and compact
+// filters, named with neutrino.connect. neutrino.addpeer alone still mixes in
+// seed peers: allowed, with a warning. The header import reads 80-byte
+// headers only and cannot carry a chain past the activation height.
+func checkNeutrinoBlake2b(cfg *Config) error {
+	if cfg.NeutrinoMode.BlockHeadersSource != "" ||
+		cfg.NeutrinoMode.FilterHeadersSource != "" {
+
+		return fmt.Errorf("neutrino.blockheaderssource and " +
+			"neutrino.filterheaderssource are not supported on the " +
+			"Bitcoin BLAKE2b chain: the import reads 80-byte headers " +
+			"only")
+	}
+
+	if cfg.Bitcoin.IsLocalNetwork() || len(cfg.NeutrinoMode.ConnectPeers) > 0 {
+		return nil
+	}
+	if len(cfg.NeutrinoMode.AddPeers) == 0 {
+		return fmt.Errorf("bitcoin.node=neutrino on %s needs " +
+			"neutrino.connect: the DNS seeds return nodes on the " +
+			"SHA256d chain; name Bitcoin Knots nodes on the BLAKE2b " +
+			"chain with blockfilterindex=1 and peerblockfilters=1, " +
+			"ideally your own", cfg.ActiveNetParams.Name)
+	}
+	ltndLog.Warnf("neutrino.addpeer without neutrino.connect: peers from "+
+		"the DNS seeds, almost all on the SHA256d chain, are dialled "+
+		"too (and banned at the BLAKE2b activation height); prefer "+
+		"neutrino.connect to Knots nodes on the BLAKE2b chain on %s",
+		cfg.ActiveNetParams.Name)
+
+	return nil
 }
