@@ -778,7 +778,7 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 		NoExperimentalAccountability: cfg.ProtocolOptions.NoExpAccountability(),
 		NoQuiescence:                 cfg.ProtocolOptions.NoQuiescence(),
 		NoRbfCoopClose:               !cfg.ProtocolOptions.RbfCoopClose,
-		NoSplice:                     !cfg.ProtocolOptions.Splice(),
+		Splice:                       cfg.ProtocolOptions.Splice(),
 		NoUnifiedSigs:                !input.UnifiedSigHash(),
 	})
 	if err != nil {

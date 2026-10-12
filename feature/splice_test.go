@@ -12,7 +12,8 @@ import (
 func TestSpliceBitOffByDefault(t *testing.T) {
 	t.Parallel()
 
-	off, err := NewManager(Config{NoSplice: true})
+	// The zero value of Config leaves splicing off.
+	off, err := NewManager(Config{})
 	require.NoError(t, err)
 	for _, set := range []Set{SetInit, SetNodeAnn} {
 		fv := off.Get(set)
@@ -20,7 +21,7 @@ func TestSpliceBitOffByDefault(t *testing.T) {
 		require.False(t, fv.IsSet(lnwire.SpliceRequired), set)
 	}
 
-	on, err := NewManager(Config{})
+	on, err := NewManager(Config{Splice: true})
 	require.NoError(t, err)
 	for _, set := range []Set{SetInit, SetNodeAnn} {
 		fv := on.Get(set)

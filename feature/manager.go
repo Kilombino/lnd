@@ -66,8 +66,9 @@ type Config struct {
 	// NoQuiescence unsets quiescence feature bits.
 	NoQuiescence bool
 
-	// NoSplice unsets the splicing feature bits.
-	NoSplice bool
+	// Splice keeps the splicing feature bits, which are unset unless it is
+	// true: the zero value of Config leaves splicing off.
+	Splice bool
 
 	// NoTaprootOverlay unsets the taproot overlay channel feature bits.
 	NoTaprootOverlay bool
@@ -229,7 +230,7 @@ func newManager(cfg Config, desc setDesc) (*Manager, error) {
 		if cfg.NoQuiescence {
 			raw.Unset(lnwire.QuiescenceOptional)
 		}
-		if cfg.NoSplice {
+		if !cfg.Splice {
 			raw.Unset(lnwire.SpliceOptional)
 			raw.Unset(lnwire.SpliceRequired)
 		}
