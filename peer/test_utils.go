@@ -501,6 +501,14 @@ func (m *mockUpdateHandler) OnCommitOnce(
 
 	hook()
 }
+// ResumeQuiescence is a no-op for the mock.
+func (m *mockUpdateHandler) ResumeQuiescence() <-chan error {
+	c := make(chan error, 1)
+	c <- nil
+
+	return c
+}
+
 func (m *mockUpdateHandler) InitStfu() <-chan fn.Result[lntypes.ChannelParty] {
 	// TODO(proofofkeags): Implement
 	c := make(chan fn.Result[lntypes.ChannelParty], 1)

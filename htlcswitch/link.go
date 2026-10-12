@@ -436,6 +436,11 @@ type channelLink struct {
 	// the result.
 	quiescenceReqs chan StfuReq
 
+	// resumeReqs is a queue of requests to end quiescence on this link,
+	// handled on the link's goroutine like everything that touches the
+	// channel's state.
+	resumeReqs chan fn.Req[fn.Unit, error]
+
 	// cg is a helper that encapsulates a wait group and quit channel and
 	// allows contexts that either block or cancel on those depending on
 	// the use case.
@@ -545,6 +550,7 @@ func NewChannelLink(cfg ChannelLinkConfig,
 		incomingCommitHooks: newHookMap(),
 		quiescer:            qsm,
 		quiescenceReqs:      quiescenceReqs,
+		resumeReqs:          make(chan fn.Req[fn.Unit, error], 1),
 		cg:                  fn.NewContextGuard(),
 	}
 }
@@ -819,6 +825,45 @@ func (l *channelLink) InitStfu() <-chan fn.Result[lntypes.ChannelParty] {
 	}
 
 	return out
+}
+
+// ResumeQuiescence asks the link to end quiescence. See the
+// ChannelUpdateHandler interface.
+func (l *channelLink) ResumeQuiescence() <-chan error {
+	req, out := fn.NewReq[fn.Unit, error](fn.Unit{})
+
+	select {
+	case l.resumeReqs <- req:
+	case <-l.cg.Done():
+		req.Resolve(ErrLinkShuttingDown)
+	}
+
+	return out
+}
+
+// resumeQuiescence ends quiescence, on the link's goroutine. Three things
+// were held back while the channel was quiescent, and each is taken up again
+// here: remote adds whose processing was deferred (the quiescer's resume
+// hooks), settles and fails from the switch that were dropped without being
+// acknowledged (they stay in the mailbox until its packets are reset), and a
+// commitment owed to the peer.
+func (l *channelLink) resumeQuiescence(ctx context.Context) error {
+	if !l.quiescer.IsQuiescent() {
+		return nil
+	}
+
+	l.quiescer.Resume()
+
+	if err := l.mailBox.ResetPackets(); err != nil {
+		l.log.Errorf("failed to reset packets after quiescence: %v",
+			err)
+	}
+
+	if l.channel.OweCommitment() {
+		l.updateCommitTxOrFail(ctx)
+	}
+
+	return nil
 }
 
 // isReestablished returns true if the link has successfully completed the
@@ -1462,6 +1507,10 @@ func (l *channelLink) htlcManager(ctx context.Context) {
 				l.log.Errorf("failed handle quiescence "+
 					"req: %v", err)
 			}
+
+		// The protocol that paused the channel is done with it.
+		case rReq := <-l.resumeReqs:
+			rReq.Resolve(l.resumeQuiescence(ctx))
 
 		case <-l.cg.Done():
 			return
