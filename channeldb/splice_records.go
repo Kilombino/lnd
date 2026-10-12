@@ -83,6 +83,208 @@ type SpliceRecord struct {
 	// that funding back, and a revoked commitment on it must still be
 	// punished. It has no commitments of ours and is never signed for.
 	Retired bool
+
+	// Negotiation is what the splice machine keeps of the splice's
+	// negotiation, nil for a record written without one.
+	Negotiation *SpliceNegotiation
+}
+
+// SpliceNegotiation is what the splice machine keeps of a splice it
+// negotiated, to carry on after a restart or reconnection.
+type SpliceNegotiation struct {
+	// WeInitiated is true for a splice this node started.
+	WeInitiated bool
+
+	// Tx is the agreed transaction, without witnesses.
+	Tx *wire.MsgTx
+
+	// FeeRate is its fee rate in sat/kw.
+	FeeRate uint64
+
+	// OurInputs are the wallet coins this node put in, leased until the
+	// splice locks or dies.
+	OurInputs []wire.OutPoint
+
+	// OurTxSignatures and TheirTxSignatures are the tx_signatures each
+	// side sent, once sent.
+	OurTxSignatures   *lnwire.TxSignatures
+	TheirTxSignatures *lnwire.TxSignatures
+
+	// BroadcastHeight is the height at which this node first published
+	// the signed transaction.
+	BroadcastHeight uint32
+
+	// LockedSent and LockedReceived record splice_locked each way.
+	LockedSent, LockedReceived bool
+}
+
+// SpliceNegotiation TLV types.
+const (
+	negWeInitiatedType     tlv.Type = 0
+	negTxType              tlv.Type = 1
+	negFeeRateType         tlv.Type = 2
+	negOurInputsType       tlv.Type = 3
+	negOurTxSigsType       tlv.Type = 4
+	negTheirTxSigsType     tlv.Type = 5
+	negBroadcastHeightType tlv.Type = 6
+	negLockedType          tlv.Type = 7
+)
+
+// encode serializes a negotiation as a TLV stream.
+func (n *SpliceNegotiation) encode(w io.Writer) error {
+	var (
+		records []tlv.Record
+		flags   uint8
+	)
+	if n.WeInitiated {
+		flags |= 1
+	}
+	records = append(records, tlv.MakePrimitiveRecord(
+		negWeInitiatedType, &flags,
+	))
+
+	if n.Tx != nil {
+		var b bytes.Buffer
+		if err := n.Tx.SerializeNoWitness(&b); err != nil {
+			return err
+		}
+		tx := b.Bytes()
+		records = append(records, tlv.MakePrimitiveRecord(
+			negTxType, &tx,
+		))
+	}
+	feeRate := n.FeeRate
+	records = append(records, tlv.MakePrimitiveRecord(
+		negFeeRateType, &feeRate,
+	))
+
+	if len(n.OurInputs) > 0 {
+		var b bytes.Buffer
+		for i := range n.OurInputs {
+			if err := graphdb.WriteOutpoint(
+				&b, &n.OurInputs[i],
+			); err != nil {
+				return err
+			}
+		}
+		inputs := b.Bytes()
+		records = append(records, tlv.MakePrimitiveRecord(
+			negOurInputsType, &inputs,
+		))
+	}
+
+	sigs := func(t tlv.Type, m *lnwire.TxSignatures) error {
+		if m == nil {
+			return nil
+		}
+		var b bytes.Buffer
+		if err := m.Encode(&b, 0); err != nil {
+			return err
+		}
+		blob := b.Bytes()
+		records = append(records, tlv.MakePrimitiveRecord(t, &blob))
+
+		return nil
+	}
+	if err := sigs(negOurTxSigsType, n.OurTxSignatures); err != nil {
+		return err
+	}
+	if err := sigs(negTheirTxSigsType, n.TheirTxSignatures); err != nil {
+		return err
+	}
+
+	height := n.BroadcastHeight
+	records = append(records, tlv.MakePrimitiveRecord(
+		negBroadcastHeightType, &height,
+	))
+	var locked uint8
+	if n.LockedSent {
+		locked |= 1
+	}
+	if n.LockedReceived {
+		locked |= 2
+	}
+	records = append(records, tlv.MakePrimitiveRecord(
+		negLockedType, &locked,
+	))
+
+	stream, err := tlv.NewStream(records...)
+	if err != nil {
+		return err
+	}
+
+	return stream.Encode(w)
+}
+
+// decodeSpliceNegotiation reads a negotiation.
+func decodeSpliceNegotiation(r io.Reader) (*SpliceNegotiation, error) {
+	var (
+		n                  SpliceNegotiation
+		flags, locked      uint8
+		tx, inputs         []byte
+		ourSigs, theirSigs []byte
+	)
+	stream, err := tlv.NewStream(
+		tlv.MakePrimitiveRecord(negWeInitiatedType, &flags),
+		tlv.MakePrimitiveRecord(negTxType, &tx),
+		tlv.MakePrimitiveRecord(negFeeRateType, &n.FeeRate),
+		tlv.MakePrimitiveRecord(negOurInputsType, &inputs),
+		tlv.MakePrimitiveRecord(negOurTxSigsType, &ourSigs),
+		tlv.MakePrimitiveRecord(negTheirTxSigsType, &theirSigs),
+		tlv.MakePrimitiveRecord(
+			negBroadcastHeightType, &n.BroadcastHeight,
+		),
+		tlv.MakePrimitiveRecord(negLockedType, &locked),
+	)
+	if err != nil {
+		return nil, err
+	}
+	if err := stream.Decode(r); err != nil {
+		return nil, err
+	}
+
+	n.WeInitiated = flags&1 != 0
+	n.LockedSent = locked&1 != 0
+	n.LockedReceived = locked&2 != 0
+
+	if tx != nil {
+		n.Tx = &wire.MsgTx{}
+		err := n.Tx.DeserializeNoWitness(bytes.NewReader(tx))
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(inputs)%36 != 0 {
+		return nil, fmt.Errorf("splice inputs of %d bytes",
+			len(inputs))
+	}
+	for rd := bytes.NewReader(inputs); rd.Len() > 0; {
+		var op wire.OutPoint
+		if err := graphdb.ReadOutpoint(rd, &op); err != nil {
+			return nil, err
+		}
+		n.OurInputs = append(n.OurInputs, op)
+	}
+
+	sigs := func(b []byte) (*lnwire.TxSignatures, error) {
+		if b == nil {
+			return nil, nil
+		}
+		var m lnwire.TxSignatures
+		if err := m.Decode(bytes.NewReader(b), 0); err != nil {
+			return nil, err
+		}
+
+		return &m, nil
+	}
+	if n.OurTxSignatures, err = sigs(ourSigs); err != nil {
+		return nil, err
+	}
+	if n.TheirTxSignatures, err = sigs(theirSigs); err != nil {
+		return nil, err
+	}
+
+	return &n, nil
 }
 
 // Txid returns the splice transaction's id.
@@ -125,6 +327,7 @@ const (
 	spliceRemoteTipSigType tlv.Type = 9
 	spliceSpliceSigType    tlv.Type = 10
 	spliceRetiredType      tlv.Type = 11
+	spliceNegotiationType  tlv.Type = 12
 )
 
 // encodeSpliceRecord serializes a record as a TLV stream.
@@ -212,6 +415,16 @@ func encodeSpliceRecord(w io.Writer, r *SpliceRecord) error {
 			spliceRetiredType, &retired,
 		))
 	}
+	if r.Negotiation != nil {
+		var b bytes.Buffer
+		if err := r.Negotiation.encode(&b); err != nil {
+			return err
+		}
+		blob := b.Bytes()
+		records = append(records, tlv.MakePrimitiveRecord(
+			spliceNegotiationType, &blob,
+		))
+	}
 
 	stream, err := tlv.NewStream(records...)
 	if err != nil {
@@ -229,6 +442,7 @@ func decodeSpliceRecord(rd io.Reader) (*SpliceRecord, error) {
 		localCommit, remoteTail, remoteTip []byte
 		remoteTipSig, spliceSig            []byte
 		retired                            uint8
+		negotiation                        []byte
 		r                                  SpliceRecord
 	)
 	stream, err := tlv.NewStream(
@@ -244,6 +458,7 @@ func decodeSpliceRecord(rd io.Reader) (*SpliceRecord, error) {
 		tlv.MakePrimitiveRecord(spliceRemoteTipSigType, &remoteTipSig),
 		tlv.MakePrimitiveRecord(spliceSpliceSigType, &spliceSig),
 		tlv.MakePrimitiveRecord(spliceRetiredType, &retired),
+		tlv.MakePrimitiveRecord(spliceNegotiationType, &negotiation),
 	)
 	if err != nil {
 		return nil, err
@@ -283,6 +498,14 @@ func decodeSpliceRecord(rd io.Reader) (*SpliceRecord, error) {
 	r.LocalDelta = btcutil.Amount(int64(localDelta))
 	r.RemoteDelta = btcutil.Amount(int64(remoteDelta))
 	r.Retired = retired == 1
+	if negotiation != nil {
+		r.Negotiation, err = decodeSpliceNegotiation(
+			bytes.NewReader(negotiation),
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	commit := func(b []byte) (*ChannelCommitment, error) {
 		if b == nil {

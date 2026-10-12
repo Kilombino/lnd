@@ -280,3 +280,71 @@ func TestEnsureAndUpdateSpliceRecord(t *testing.T) {
 		func(*SpliceRecord) error { return nil }),
 		ErrSpliceRecordNotFound)
 }
+
+// TestSpliceNegotiationRoundTrip checks the splice machine's part of a
+// record through the database, and that updating the rest keeps it.
+func TestSpliceNegotiationRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	fullDB, err := MakeTestDB(t)
+	require.NoError(t, err)
+	channel := createTestChannel(t, fullDB.ChannelStateDB())
+
+	r := testSpliceRecord(t, channel)
+	tx := wire.NewMsgTx(2)
+	tx.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{Index: 3}})
+	tx.AddTxOut(&wire.TxOut{Value: 12345, PkScript: []byte{0, 1, 2}})
+	tx.LockTime = 900_000
+	ourSigs := &lnwire.TxSignatures{
+		ChannelID: lnwire.ChannelID{1}, TxID: tx.TxHash(),
+		Witnesses: []wire.TxWitness{{{1, 2}, {3}}},
+	}
+	r.Negotiation = &SpliceNegotiation{
+		WeInitiated: true,
+		Tx:          tx,
+		FeeRate:     2_500,
+		OurInputs: []wire.OutPoint{
+			{Hash: chainhash.Hash{9}, Index: 1},
+			{Hash: chainhash.Hash{8}, Index: 7},
+		},
+		OurTxSignatures: ourSigs,
+		BroadcastHeight: 901_000,
+		LockedSent:      true,
+	}
+	require.NoError(t, channel.PutSpliceRecord(r))
+
+	// A commitment step updates the record; the negotiation stays.
+	require.NoError(t, channel.UpdateSpliceRecord(r.Txid(),
+		func(rec *SpliceRecord) error {
+			rec.SpliceSig = &lnwire.CommitSig{CommitSig: wireSig}
+			return nil
+		}))
+
+	records, err := channel.SpliceRecords()
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	got := records[0].Negotiation
+	require.NotNil(t, got)
+	require.True(t, got.WeInitiated)
+	require.Equal(t, tx.TxHash(), got.Tx.TxHash())
+	require.Equal(t, uint64(2_500), got.FeeRate)
+	require.Equal(t, r.Negotiation.OurInputs, got.OurInputs)
+	require.Equal(t, ourSigs.TxID, got.OurTxSignatures.TxID)
+	require.Equal(t, ourSigs.Witnesses, got.OurTxSignatures.Witnesses)
+	require.Nil(t, got.TheirTxSignatures)
+	require.Equal(t, uint32(901_000), got.BroadcastHeight)
+	require.True(t, got.LockedSent)
+	require.False(t, got.LockedReceived)
+
+	// A record without one has none.
+	r2 := testSpliceRecord(t, channel)
+	r2.OutPoint.Hash[0] ^= 0xff
+	require.NoError(t, channel.PutSpliceRecord(r2))
+	records, err = channel.SpliceRecords()
+	require.NoError(t, err)
+	for _, rec := range records {
+		if rec.Txid() == r2.Txid() {
+			require.Nil(t, rec.Negotiation)
+		}
+	}
+}
