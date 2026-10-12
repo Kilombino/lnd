@@ -1600,7 +1600,8 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 			s.htlcSwitch.RemoveLink(chanID)
 			return nil
 		},
-		IsOurAddress: cc.Wallet.IsOurAddress,
+		NotifyFundingSpentUnknown: s.notifyFundingSpentUnknown,
+		IsOurAddress:              cc.Wallet.IsOurAddress,
 		ContractBreach: func(chanPoint wire.OutPoint,
 			breachRet *lnwallet.BreachRetribution) error {
 

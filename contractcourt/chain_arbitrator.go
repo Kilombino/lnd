@@ -112,6 +112,12 @@ type ChainArbitratorConfig struct {
 	// TODO(roasbeef): rename, routing based
 	MarkLinkInactive func(wire.OutPoint) error
 
+	// NotifyFundingSpentUnknown, if set, is told when a channel is flagged
+	// for a spend of its funding output this version doesn't recognise,
+	// with the spending transaction.
+	NotifyFundingSpentUnknown func(chanPoint wire.OutPoint,
+		txid chainhash.Hash)
+
 	// ContractBreach is a function closure that the ChainArbitrator will
 	// use to notify the BreachArbitrator about a contract breach. It should
 	// only return a non-nil error when the BreachArbitrator has preserved
@@ -1221,7 +1227,8 @@ func (c *ChainArbitrator) WatchNewChannel(newChan *channeldb.OpenChannel) error 
 			markLinkInactive: func() error {
 				return c.cfg.MarkLinkInactive(chanPoint)
 			},
-			publishTx: c.cfg.PublishTx,
+			publishTx:          c.cfg.PublishTx,
+			notifySpentUnknown: c.cfg.NotifyFundingSpentUnknown,
 		},
 	)
 	if err != nil {
@@ -1408,7 +1415,8 @@ func (c *ChainArbitrator) loadOpenChannels() error {
 						chanPoint,
 					)
 				},
-				publishTx: c.cfg.PublishTx,
+				publishTx:          c.cfg.PublishTx,
+				notifySpentUnknown: c.cfg.NotifyFundingSpentUnknown,
 			},
 		)
 		if err != nil {

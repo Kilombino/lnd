@@ -709,3 +709,21 @@ func (s *server) channelName(op wire.OutPoint) wire.OutPoint {
 
 	return ch.FundingOutpoint
 }
+
+// notifyFundingSpentUnknown tells the channel event subscribers a channel's
+// funding output was spent by a transaction this version doesn't recognise.
+func (s *server) notifyFundingSpentUnknown(chanPoint wire.OutPoint,
+	txid chainhash.Hash) {
+
+	current := chanPoint
+	if ch, err := s.chanStateDB.FetchChannel(chanPoint); err == nil {
+		current = ch.CurrentFundingOutpoint()
+	}
+
+	s.channelNotifier.NotifySpliceEvent(channelnotifier.SpliceEvent{
+		ChannelPoint:         current,
+		OriginalChannelPoint: chanPoint,
+		Kind:                 "funding_spent_unknown",
+		Txid:                 txid,
+	})
+}

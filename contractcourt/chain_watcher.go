@@ -302,6 +302,10 @@ type chainWatcherConfig struct {
 	// forwarded over the channel, since its funds may sit on an output
 	// this node doesn't watch. It may be nil (tests).
 	markLinkInactive func() error
+
+	// notifySpentUnknown, if set, is told when the channel is first
+	// flagged for a spend of its funding output it doesn't recognise.
+	notifySpentUnknown func(chanPoint wire.OutPoint, txid chainhash.Hash)
 }
 
 // chainWatcher is a system that's assigned to every active channel. The duty
@@ -1657,9 +1661,19 @@ func (c *chainWatcher) handleUnknownSpend(
 		return nil
 	}
 
-	return chanState.ApplyChanStatus(
+	err := chanState.ApplyChanStatus(
 		channeldb.ChanStatusFundingSpentUnknown,
 	)
+	if err != nil {
+		return err
+	}
+	if c.cfg.notifySpentUnknown != nil {
+		c.cfg.notifySpentUnknown(
+			chanState.FundingOutpoint, *commitSpend.SpenderTxHash,
+		)
+	}
+
+	return nil
 }
 
 // maybeDispatchEarlyCoopClose fires a preliminary CLOSED_CHANNEL event over

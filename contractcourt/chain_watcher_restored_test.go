@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightningnetwork/lnd/chainntnfs"
 	"github.com/lightningnetwork/lnd/channeldb"
@@ -266,4 +267,46 @@ func TestChainWatcherRestoredMovedKeepsWatching(t *testing.T) {
 	}
 	closeInfo := h.waitForRemoteUnilateralClose(5 * time.Second)
 	h.assertRemoteUnilateralCloseTx(closeInfo, bobCommit)
+}
+
+// TestChainWatcherNotifiesUnknownSpend checks the channel event stream hears
+// of a channel flagged for a spend it doesn't recognise, once.
+func TestChainWatcherNotifiesUnknownSpend(t *testing.T) {
+	t.Parallel()
+
+	h := newChainWatcherTestHarness(t, withRequiredConfs(1))
+	type event struct {
+		chanPoint wire.OutPoint
+		txid      chainhash.Hash
+	}
+	events := make(chan event, 4)
+	h.chainWatcher.cfg.notifySpentUnknown = func(op wire.OutPoint,
+		txid chainhash.Hash) {
+
+		events <- event{op, txid}
+	}
+
+	tx := h.createUnnegotiatedSpendTx(95_000)
+	h.sendSpend(tx)
+
+	select {
+	case e := <-events:
+		require.Equal(t, h.aliceChannel.State().FundingOutpoint,
+			e.chanPoint)
+		require.Equal(t, tx.TxHash(), e.txid)
+	case <-time.After(5 * time.Second):
+		t.Fatal("no event")
+	}
+
+	// Seen again, as after a restart: flagged already, no new event.
+	require.NoError(t, h.chainWatcher.handleUnknownSpend(
+		&chainntnfs.SpendDetail{
+			SpenderTxHash: &chainhash.Hash{1}, SpendingTx: tx,
+		},
+	))
+	select {
+	case <-events:
+		t.Fatal("notified twice")
+	case <-time.After(100 * time.Millisecond):
+	}
 }
