@@ -357,6 +357,11 @@ type chainWatcher struct {
 	// suppress the duplicate notify at full conf depth, so the field is an
 	// atomic.Bool to make that cross-goroutine read race-free.
 	coopCloseEarlyDispatched atomic.Bool
+
+	// splice is set once a pending splice of the channel has confirmed:
+	// the watch has moved to its funding output. Only the close observer
+	// uses it.
+	splice *spliceWatch
 }
 
 // EarlyCoopCloseDispatched reports whether the chain watcher already fired the
@@ -937,10 +942,14 @@ func (c *chainWatcher) closeObserver() {
 		var (
 			confChan         <-chan *chainntnfs.TxConfirmation
 			negativeConfChan <-chan int32
+			spliceReorgChan  <-chan int32
 		)
 		if confNtfn != nil {
 			confChan = confNtfn.Confirmed
 			negativeConfChan = confNtfn.NegativeConf
+		}
+		if c.splice != nil {
+			spliceReorgChan = c.splice.confNtfn.NegativeConf
 		}
 
 		select {
@@ -953,6 +962,10 @@ func (c *chainWatcher) closeObserver() {
 
 			spend := c.handleBlockbeat(beat)
 			if spend == nil {
+				continue
+			}
+			if moved, ok := c.maybeFollowSplice(spend, spendNtfn); ok {
+				spendNtfn = moved
 				continue
 			}
 
@@ -969,6 +982,10 @@ func (c *chainWatcher) closeObserver() {
 		case spend, ok := <-spendNtfn.Spend:
 			if !ok {
 				return
+			}
+			if moved, ok := c.maybeFollowSplice(spend, spendNtfn); ok {
+				spendNtfn = moved
+				continue
 			}
 
 			result := c.processDetectedSpend(
@@ -1053,11 +1070,44 @@ func (c *chainWatcher) closeObserver() {
 			log.Infof("ChannelPoint(%v): re-registered for spend "+
 				"detection", c.cfg.chanState.FundingOutpoint)
 
+		// A reorg took out the splice the watch had moved for: the old
+		// funding output is unspent again, and watched again.
+		case depth, ok := <-spliceReorgChan:
+			if !ok {
+				spliceReorgChan = nil
+				continue
+			}
+			log.Warnf("ChannelPoint(%v): splice %v reorged out at "+
+				"depth %d, watching the previous funding output",
+				c.cfg.chanState.FundingOutpoint, c.splice.txid,
+				depth)
+
+			if confNtfn != nil {
+				confNtfn.Cancel()
+				confNtfn = nil
+				pendingSpend = nil
+			}
+			c.splice.confNtfn.Cancel()
+			c.splice = nil
+
+			spendNtfn.Cancel()
+			var err error
+			spendNtfn, err = registerForSpend()
+			if err != nil {
+				log.Errorf("Unable to re-register for spend: "+
+					"%v", err)
+				return
+			}
+			c.fundingSpendNtfn = spendNtfn
+
 		// The chainWatcher has been signalled to exit, so we'll do so
 		// now.
 		case <-c.quit:
 			if confNtfn != nil {
 				confNtfn.Cancel()
+			}
+			if c.splice != nil {
+				c.splice.confNtfn.Cancel()
 			}
 
 			return
@@ -2038,10 +2088,26 @@ func (c *chainWatcher) handleCommitSpend(
 
 	// First, we'll construct the chainset which includes all the data we
 	// need to dispatch an event to our subscribers about this possible
-	// channel close event.
-	chainSet, err := newChainSet(c.cfg.chanState)
-	if err != nil {
-		return fmt.Errorf("create commit set: %w", err)
+	// channel close event. A spend of a confirmed splice's funding output
+	// is judged against the channel as it is on that funding.
+	var (
+		chainSet *chainSet
+		err      error
+	)
+	if c.splice != nil {
+		var view *channeldb.OpenChannel
+		chainSet, view, err = c.spliceChainSet(c.splice)
+		if err != nil {
+			return fmt.Errorf("splice commit set: %w", err)
+		}
+		chanState := c.cfg.chanState
+		c.cfg.chanState = view
+		defer func() { c.cfg.chanState = chanState }()
+	} else {
+		chainSet, err = newChainSet(c.cfg.chanState)
+		if err != nil {
+			return fmt.Errorf("create commit set: %w", err)
+		}
 	}
 
 	// Decode the state hint encoded within the commitment transaction to

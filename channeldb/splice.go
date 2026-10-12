@@ -412,3 +412,27 @@ func (c *ChannelStateDB) channelName(chanPoint wire.OutPoint) (wire.OutPoint,
 
 	return name, nil
 }
+
+// SpliceView returns a copy of the channel as it is on a pending splice's
+// funding output: that output, its capacity and keys, and the commitments on
+// it. For judging a spend of that output once the splice has confirmed and
+// before it has locked. Writes through the copy reach the channel's own
+// record, which is named by FundingOutpoint as always.
+func (c *OpenChannel) SpliceView(r *SpliceRecord) *OpenChannel {
+	view := c.Copy()
+	view.Db = c.Db
+	view.spliceFunding = fn.Some(SpliceFunding{OutPoint: r.OutPoint})
+	view.Capacity = r.Capacity
+	view.LocalChanCfg.MultiSigKey = r.LocalKey
+	view.RemoteChanCfg.MultiSigKey = keychain.KeyDescriptor{
+		PubKey: r.RemoteKey,
+	}
+	if r.LocalCommit != nil {
+		view.LocalCommitment = *r.LocalCommit
+	}
+	if r.RemoteTail != nil {
+		view.RemoteCommitment = *r.RemoteTail
+	}
+
+	return view
+}

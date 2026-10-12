@@ -80,6 +80,18 @@ type mockChainNotifier struct {
 	// spendRegistered is a channel that signals when a new spend
 	// event has been registered.
 	spendRegistered chan struct{}
+
+	// spendOutpoints records the outpoint of each spend registration.
+	spendMu        sync.Mutex
+	spendOutpoints []wire.OutPoint
+}
+
+// lastSpendOutpoint returns the outpoint of the latest spend registration.
+func (m *mockChainNotifier) lastSpendOutpoint() wire.OutPoint {
+	m.spendMu.Lock()
+	defer m.spendMu.Unlock()
+
+	return m.spendOutpoints[len(m.spendOutpoints)-1]
 }
 
 // mockConfirmationEvent represents a mock confirmation event subscription.
@@ -104,6 +116,9 @@ func (m *mockChainNotifier) RegisterSpendNtfn(outpoint *wire.OutPoint,
 	}
 
 	m.spendEvents = append(m.spendEvents, spendEvent)
+	m.spendMu.Lock()
+	m.spendOutpoints = append(m.spendOutpoints, *outpoint)
+	m.spendMu.Unlock()
 
 	// Signal that a new spend event has been registered.
 	select {
