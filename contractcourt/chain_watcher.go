@@ -1331,6 +1331,9 @@ func (c *chainWatcher) toSelfAmount(tx *wire.MsgTx) btcutil.Amount {
 	//
 	// isWalletOutput :: *TxOut -> bool
 	isWalletOutput := func(out *wire.TxOut) bool {
+		if c.cfg.isOurAddr == nil {
+			return false
+		}
 		_, addrs, _, err := txscript.ExtractPkScriptAddrs(
 			// Doesn't matter what net we actually pass in.
 			out.PkScript, &chaincfg.TestNet3Params,
@@ -1476,13 +1479,10 @@ func isCommitmentShaped(spendingTx *wire.MsgTx) bool {
 // close sequence can be trusted to be that close. Both closers persist the
 // shutdown before producing any closing signature, in both roles, and never
 // delete it. A channel restored from a static backup has no shutdown on
-// disk, but nothing could have spent its funding output with this node's
-// cooperation other than a close.
+// disk: see restoredCoopClose.
 func (c *chainWatcher) closeNegotiated() bool {
 	chanState := c.cfg.chanState
-	if chanState.HasChanStatus(channeldb.ChanStatusCoopBroadcasted) ||
-		chanState.HasChanStatus(channeldb.ChanStatusRestored) {
-
+	if chanState.HasChanStatus(channeldb.ChanStatusCoopBroadcasted) {
 		return true
 	}
 
@@ -1512,9 +1512,43 @@ func (c *chainWatcher) isCoopCloseSpend(spendingTx *wire.MsgTx) bool {
 	if len(spendingTx.TxIn) != 1 {
 		return false
 	}
+	if !hasCoopCloseSequence(spendingTx) || isCommitmentShaped(spendingTx) {
+		return false
+	}
+	if c.closeNegotiated() {
+		return true
+	}
 
-	return hasCoopCloseSequence(spendingTx) &&
-		!isCommitmentShaped(spendingTx) && c.closeNegotiated()
+	// A restored channel knows of no shutdown, and its backup may be of a
+	// channel spliced since, by a later version: a splice that only moves
+	// funds out spends the funding output alone too.
+	if c.cfg.chanState.HasChanStatus(channeldb.ChanStatusRestored) {
+		return c.restoredCoopClose(spendingTx)
+	}
+
+	return false
+}
+
+// restoredCoopClose reports whether a spend of a restored channel's funding
+// output, alone and with a cooperative close's sequence, is a close rather
+// than a splice made after the backup. A splice creates the channel's new
+// funding output, a P2WSH 2-of-2 on every channel type that can be spliced; a
+// close this node took part in pays it. So: a close when something pays us
+// and no output is P2WSH. A close paying a P2WSH script is left flagged: what
+// it paid us the wallet finds anyway.
+func (c *chainWatcher) restoredCoopClose(tx *wire.MsgTx) bool {
+	// Never spliced.
+	if c.cfg.chanState.ChanType.IsTaproot() {
+		return true
+	}
+
+	for _, out := range tx.TxOut {
+		if txscript.IsPayToWitnessScriptHash(out.PkScript) {
+			return false
+		}
+	}
+
+	return c.toSelfAmount(tx) > 0
 }
 
 // isUnknownSpend reports whether the supplied spending tx is neither shaped

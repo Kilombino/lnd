@@ -1,11 +1,13 @@
 package contractcourt
 
 import (
+	"bytes"
 	"errors"
 	"net"
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/mempool"
 	"github.com/btcsuite/btcd/wire"
@@ -275,9 +277,9 @@ func TestChainWatcherUnknownSpendReorgedOut(t *testing.T) {
 
 // TestChainWatcherCoopCloseWithShutdown checks that a cooperative close is
 // still recognised for every way this node can know it negotiated one: a
-// persisted shutdown (the normal case), the cooperative close broadcast
-// status alone, and a channel restored from a static backup, which has
-// neither.
+// persisted shutdown (the normal case) and the cooperative close broadcast
+// status alone. A channel restored from a static backup has neither: see
+// TestChainWatcherRestoredCoopClose.
 func TestChainWatcherCoopCloseWithShutdown(t *testing.T) {
 	t.Parallel()
 
@@ -302,14 +304,6 @@ func TestChainWatcherCoopCloseWithShutdown(t *testing.T) {
 
 			require.NoError(t, h.aliceChannel.State().
 				MarkCoopBroadcasted(tx, lntypes.Remote))
-		},
-	}, {
-		name: "restored channel",
-		prepare: func(t *testing.T, h *chainWatcherTestHarness,
-			_ *wire.MsgTx) {
-
-			require.NoError(t, h.aliceChannel.State().
-				ApplyChanStatus(channeldb.ChanStatusRestored))
 		},
 	}}
 
@@ -419,4 +413,72 @@ func TestArbChannelRefusesForceCloseAfterUnknownSpend(t *testing.T) {
 	closeTx, err := arb.ForceCloseChan()
 	require.Nil(t, closeTx)
 	require.True(t, errors.Is(err, ErrFundingSpentUnknown), err)
+}
+
+// TestChainWatcherRestoredCoopClose checks a restored channel takes a spend
+// of its funding output alone with a close's sequence for a close when it
+// pays our wallet and no P2WSH script; with a P2WSH output, the shape of a
+// splice's new funding output, or paying us nothing, it is flagged instead.
+func TestChainWatcherRestoredCoopClose(t *testing.T) {
+	t.Parallel()
+
+	ourScript := append([]byte{0x00, 0x14}, make([]byte, 20)...)
+	p2wsh := append([]byte{0x00, 0x20}, make([]byte, 32)...)
+	other := append([]byte{0x00, 0x14}, bytes.Repeat([]byte{1}, 20)...)
+
+	cases := []struct {
+		name    string
+		outputs [][]byte
+		close   bool
+	}{
+		{"pays us", [][]byte{ourScript, other}, true},
+		{"a splice", [][]byte{ourScript, p2wsh}, false},
+		{"pays us nothing", [][]byte{other}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			h := newChainWatcherTestHarness(
+				t, withRequiredConfs(1),
+			)
+			alice := h.aliceChannel.State()
+			require.NoError(t, alice.ApplyChanStatus(
+				channeldb.ChanStatusRestored,
+			))
+			h.chainWatcher.cfg.isOurAddr = func(
+				a btcutil.Address) bool {
+
+				return bytes.Equal(
+					a.ScriptAddress(), ourScript[2:],
+				)
+			}
+
+			tx := wire.NewMsgTx(2)
+			tx.AddTxIn(&wire.TxIn{
+				PreviousOutPoint: alice.FundingOutpoint,
+				Sequence:         wire.MaxTxInSequenceNum,
+			})
+			for _, script := range tc.outputs {
+				tx.AddTxOut(&wire.TxOut{
+					Value: 50_000, PkScript: script,
+				})
+			}
+			h.sendSpend(tx)
+
+			if tc.close {
+				closeInfo := h.waitForCoopClose(5 * time.Second)
+				require.Equal(
+					t, tx.TxHash(), closeInfo.ClosingTXID,
+				)
+				return
+			}
+			h.assertNoCoopClose(200 * time.Millisecond)
+			require.Eventually(t, func() bool {
+				return alice.HasChanStatus(
+					channeldb.ChanStatusFundingSpentUnknown,
+				)
+			}, 5*time.Second, 10*time.Millisecond)
+		})
+	}
 }

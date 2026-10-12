@@ -459,9 +459,11 @@ the wrong outputs.
 
 From the next release, a spend is a cooperative close only if this node sent
 or received a shutdown for the channel (both closers record it before signing
-anything), or the channel was restored from a static backup. A spend that is
-neither shaped like a commitment nor such a close leaves the channel open but
-flagged `ChanStatusFundingSpentUnknown`:
+anything). A channel restored from a static backup has no record of that, so
+for it the spend must also pay this node's wallet and create no P2WSH output
+(a splice always creates one, the channel's new funding output). A spend that
+is neither shaped like a commitment nor such a close leaves the channel open
+but flagged `ChanStatusFundingSpentUnknown`:
 
 - `lncli pendingchannels` lists it under `waiting_close_channels`, with
   `ChanStatusFundingSpentUnknown` in `chan_status_flags` and no closing
@@ -471,10 +473,8 @@ flagged `ChanStatusFundingSpentUnknown`:
 - nothing is broadcast or swept for it, and `lncli closechannel` refuses it.
 
 The likely cause is a splice made with a node that supports it, followed by a
-move of the node's data to an older Lightning Fork. (A channel restored from a
-static channel backup is different: lnd treats any spend of it with a close
-sequence as a cooperative close, since it can do nothing else with the
-channel either way.) Update
+move of the node's data, or a restore of its channel backup, to an older
+Lightning Fork. Update
 Lightning Fork from the StartOS Marketplace, the Umbrel App Store or the
 release page; a version that recognises the spend clears the flag. As a last
 resort, `lncli abandonchannel --i_know_what_i_am_doing` makes the node
