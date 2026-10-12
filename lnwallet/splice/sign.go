@@ -226,6 +226,12 @@ func ourSerial(role interactivetx.Role, serialID uint64) bool {
 func (m *Machine) handleTxSignatures(msg *lnwire.TxSignatures) {
 	a := m.active
 	switch {
+	// For the splice the channel is on now: it locked before they came.
+	case a == nil && msg.TxID ==
+		m.cfg.Channel.State().CurrentFundingOutpoint().Hash:
+
+		return
+
 	case a == nil || a.txid != msg.TxID:
 		m.warnAndDisconnect("tx_signatures for unknown splice %v",
 			msg.TxID)
@@ -234,6 +240,10 @@ func (m *Machine) handleTxSignatures(msg *lnwire.TxSignatures) {
 	case a.theirTxSigs != nil:
 		// Sent again after a reconnection.
 		return
+
+	// Late: the splice confirmed before they came (a reconnection in
+	// between), and went on without them.
+	case a.phase == phasePending && a.ourTxSigs != nil:
 
 	case a.phase != phaseSigning || !a.commitReceived:
 		m.warnAndDisconnect("tx_signatures before commitment_signed")
@@ -271,6 +281,9 @@ func (m *Machine) handleTxSignatures(msg *lnwire.TxSignatures) {
 		return
 	}
 	m.update(func(a *active) { a.theirTxSigs = msg })
+	if a.phase == phasePending {
+		return
+	}
 
 	if a.ourTxSigs == nil {
 		m.maybeSendTxSignatures()

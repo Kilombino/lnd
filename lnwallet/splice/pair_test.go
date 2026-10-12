@@ -813,23 +813,26 @@ func TestSpliceDead(t *testing.T) {
 		p.alice.ch.State().CurrentFundingOutpoint())
 }
 
-// TestSpliceWithheldSignatures checks a peer that withholds its
-// tx_signatures after receiving ours, and publishes the splice anyway: the
-// side that signed first follows it to its lock, and refuses the peer's
-// splices afterwards, also on the next connection.
+// TestSpliceWithheldSignatures checks a peer whose tx_signatures don't
+// reach us after ours went out, and that publishes the splice anyway: the
+// side that signed first follows it to its lock without marking the peer
+// (an honest peer cut off at the wrong moment looks the same), and takes
+// the signatures if they come late.
 func TestSpliceWithheldSignatures(t *testing.T) {
 	t.Parallel()
 
 	p := newSplicePair(t)
-	limits := NewLimits()
-	p.bob.machine.cfg.Limits = limits
 
-	// Alice adds funds: Bob put nothing in, so he signs first; Alice
-	// keeps hers.
+	// Alice adds funds: Bob put nothing in, so he signs first; Alice's
+	// don't reach him.
+	var withheld *lnwire.TxSignatures
 	p.dropMu.Lock()
 	p.drop = func(from *node, msg lnwire.Message) bool {
-		_, sigs := msg.(*lnwire.TxSignatures)
-		return from == p.alice && sigs
+		sigs, ok := msg.(*lnwire.TxSignatures)
+		if ok && from == p.alice {
+			withheld = sigs
+		}
+		return ok && from == p.alice
 	}
 	p.dropMu.Unlock()
 
@@ -842,25 +845,27 @@ func TestSpliceWithheldSignatures(t *testing.T) {
 		StatePreparing, StateNegotiating, StateSigned, StateBroadcast,
 	)
 
-	// Bob never got Alice's signatures, yet the splice confirms (she
-	// published it) and both lock.
 	p.bob.machine.mu.Lock()
 	theirs := p.bob.machine.active.theirTxSigs
 	p.bob.machine.mu.Unlock()
 	require.Nil(t, theirs)
 
+	// The splice confirms (Alice published it) and both lock.
 	p.confirm(t, u.Txid)
 	requireUpdates(t, updates, StateLocked)
 	p.requireMoved(t, u.Txid, p.alice.ch.State().Capacity)
+	require.NotEqual(t, codePeerMisbehaved, statusOf(p.bob.machine))
 
-	// Bob refuses Alice's splices now, and after a reconnection.
-	require.Eventually(t, func() bool {
-		return statusOf(p.bob.machine) == codePeerMisbehaved
-	}, 5*time.Second, 10*time.Millisecond)
-	next := NewMachine(p.bob.machine.cfg)
-	startReestablished(t, next)
-	t.Cleanup(next.Stop)
-	require.Equal(t, codePeerMisbehaved, statusOf(next))
+	// Late signatures are taken without a disconnection.
+	p.dropMu.Lock()
+	late := withheld
+	p.dropMu.Unlock()
+	require.NotNil(t, late)
+	p.bob.machine.HandleSpliceMessage(late)
+	time.Sleep(50 * time.Millisecond)
+	p.bob.peer.mu.Lock()
+	require.Nil(t, p.bob.peer.disconnected)
+	p.bob.peer.mu.Unlock()
 }
 
 // statusOf asks a machine, on its loop, why it can't splice now.
@@ -980,4 +985,53 @@ func TestSpliceOwnSharedSignatureChecked(t *testing.T) {
 	require.Contains(t, u.Reason, codeInternal)
 	require.Empty(t, p.alice.wallet.publishedTxs())
 	require.Zero(t, p.alice.wallet.leaseCount())
+}
+
+// TestSpliceWithheldRestart checks a restart of the side that locked a
+// splice whose peer's tx_signatures never came: it comes back pending,
+// naming the splice as its locked funding on reconnecting (so the peer
+// gets splice_locked again), not asking for the splice's signatures.
+func TestSpliceWithheldRestart(t *testing.T) {
+	t.Parallel()
+
+	p := newSplicePair(t)
+
+	// Alice's signatures and her splice_locked don't reach Bob.
+	p.dropMu.Lock()
+	p.drop = func(from *node, msg lnwire.Message) bool {
+		switch msg.(type) {
+		case *lnwire.TxSignatures, *lnwire.SpliceLocked:
+			return from == p.alice
+		}
+
+		return false
+	}
+	p.dropMu.Unlock()
+
+	p.alice.fund(t, 1, 40_000_000)
+	updates, err := p.alice.machine.Splice(Request{
+		Direction: DirectionIn, Amount: 20_000_000, FeeRate: 2_500,
+	})
+	require.NoError(t, err)
+	u := requireUpdates(t, updates,
+		StatePreparing, StateNegotiating, StateSigned, StateBroadcast,
+	)
+	p.confirm(t, u.Txid)
+
+	// Bob reached his depth and sent splice_locked; Alice's never came.
+	require.Eventually(t, func() bool {
+		recs, err := p.bob.ch.State().SpliceRecords()
+		if err != nil || len(recs) == 0 {
+			return false
+		}
+		n := recs[0].Negotiation
+		return n != nil && n.LockedSent && n.TheirTxSignatures == nil
+	}, 5*time.Second, 10*time.Millisecond)
+
+	restarted := NewMachine(p.bob.machine.cfg)
+	startReestablished(t, restarted)
+	t.Cleanup(restarted.Stop)
+	next, locked := restarted.ReestablishTLVs()
+	require.True(t, next.IsNone(), "asked for the splice's signatures")
+	require.Equal(t, u.Txid, locked.UnsafeFromSome().Txid)
 }
