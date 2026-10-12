@@ -370,7 +370,22 @@ func (a *ChannelReestablish) RandTestMessage(t *rapid.T) Message {
 		),
 		LastRemoteCommitSecret:    RandPaymentPreimage(t),
 		LocalUnrevokedCommitPoint: RandPubKey(t),
-		ExtraData:                 RandExtraOpaqueData(t, nil),
+		ExtraData: RandExtraOpaqueData(
+			t, fn.NewSet[uint64](1, 4, 5, 20, 22),
+		),
+	}
+
+	if rapid.Bool().Draw(t, "includeNextFunding") {
+		msg.NextFunding = fn.Some(FundingTxidFlags{
+			Txid:            RandChainHash(t),
+			RetransmitFlags: rapid.Uint8().Draw(t, "nextFlags"),
+		})
+	}
+	if rapid.Bool().Draw(t, "includeFundingLocked") {
+		msg.MyCurrentFundingLocked = fn.Some(FundingTxidFlags{
+			Txid:            RandChainHash(t),
+			RetransmitFlags: rapid.Uint8().Draw(t, "lockedFlags"),
+		})
 	}
 
 	// Randomly decide whether to include optional fields
@@ -895,6 +910,11 @@ func (c *CommitSig) RandTestMessage(t *rapid.T) Message {
 	if includePartialSig {
 		sigWithNonce := RandPartialSigWithNonce(t)
 		sig.PartialSig = MaybePartialSigWithNonce(sigWithNonce)
+	}
+
+	sig.FundingTxid = fn.None[chainhash.Hash]()
+	if rapid.Bool().Draw(t, "includeFundingTxid") {
+		sig.FundingTxid = fn.Some(randHash(t, "fundingTxid"))
 	}
 
 	return sig

@@ -241,6 +241,15 @@ const (
 	// new RBF-based co-op close protocol is supported.
 	RbfCoopCloseOptional = 61
 
+	// SpliceRequired is a required feature bit that signals that channels
+	// can be spliced (option_splice, BOLT 2): funds added to or taken out
+	// of a channel without closing it.
+	SpliceRequired FeatureBit = 62
+
+	// SpliceOptional is an optional feature bit that signals that channels
+	// can be spliced (option_splice).
+	SpliceOptional FeatureBit = 63
+
 	// RbfCoopCloseRequiredStaging is a required feature bit that signals
 	// that the new RBF-based co-op close protocol is supported.
 	RbfCoopCloseRequiredStaging = 160
@@ -443,6 +452,8 @@ var Features = map[FeatureBit]string{
 	Bolt11BlindedPathsOptional:           "bolt-11-blinded-paths",
 	Bolt11BlindedPathsRequired:           "bolt-11-blinded-paths",
 	RbfCoopCloseOptional:                 "rbf-coop-close",
+	SpliceRequired:                       "splice",
+	SpliceOptional:                       "splice",
 	RbfCoopCloseRequired:                 "rbf-coop-close",
 	RbfCoopCloseOptionalStaging:          "rbf-coop-close-x",
 	RbfCoopCloseRequiredStaging:          "rbf-coop-close-x",

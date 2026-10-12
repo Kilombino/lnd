@@ -45,6 +45,11 @@ type ProtocolOptions struct {
 	// the new experimental RBF coop close feature.
 	RbfCoopClose bool `long:"rbf-coop-close" description:"if set, then lnd will signal that it supports the new RBF based coop close protocol"`
 
+	// SpliceOption should be set to allow splicing: adding funds to or
+	// taking them out of a channel without closing it, started by this
+	// node or by its peers.
+	SpliceOption bool `long:"splice" description:"if set, then lnd will allow channels to be spliced (funds added or taken out without closing), by this node or its peers; needs quiescence"`
+
 	// ScriptEnforcedLease enables script enforced commitments for channel
 	// leases.
 	//
@@ -224,4 +229,9 @@ func (l ProtocolOptions) CustomFeatures() map[feature.Set][]lnwire.FeatureBit {
 	setFeatures(feature.SetInvoice, l.CustomInvoice)
 
 	return customFeatures
+}
+
+// Splice returns true if splicing is allowed.
+func (l *ProtocolOptions) Splice() bool {
+	return l.SpliceOption
 }

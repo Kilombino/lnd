@@ -1223,6 +1223,13 @@ func ValidateConfig(cfg Config, interceptor signal.Interceptor, fileParser,
 		)
 	}
 
+	// Splicing pauses the channel with quiescence first, so it can't be on
+	// while quiescence is off.
+	if cfg.ProtocolOptions.Splice() && cfg.ProtocolOptions.NoQuiescence() {
+		return nil, mkErr("protocol.splice needs quiescence; it " +
+			"can't be set with protocol.no-quiescence")
+	}
+
 	// Don't allow superfluous --maxchansize greater than
 	// BOLT 02 soft-limit for non-wumbo channel
 	if !cfg.ProtocolOptions.Wumbo() &&

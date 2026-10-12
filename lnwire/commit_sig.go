@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"io"
 
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/lightningnetwork/lnd/fn/v2"
 	"github.com/lightningnetwork/lnd/tlv"
 )
 
@@ -44,6 +46,11 @@ type CommitSig struct {
 	// NOTE: This field is only populated if a musig2 taproot channel is
 	// being signed for. In this case, the above Sig type MUST be blank.
 	PartialSig OptPartialSigWithNonceTLV
+
+	// FundingTxid names the funding transaction the signed commitment
+	// spends (TLV type 1). While a splice is pending, one commitment_signed
+	// is sent per funding transaction, each naming its own.
+	FundingTxid fn.Option[chainhash.Hash]
 
 	// CustomRecords maps TLV types to byte slices, storing arbitrary data
 	// intended for inclusion in the ExtraData field.
@@ -89,9 +96,10 @@ func (c *CommitSig) Decode(r io.Reader, pver uint32) error {
 
 	// Extract TLV records from the extra data field.
 	partialSig := c.PartialSig.Zero()
+	var fundingTxid [32]byte
 
 	customRecords, parsed, extraData, err := ParseAndExtractCustomRecords(
-		msgExtraData, &partialSig,
+		msgExtraData, &partialSig, hashRecord{1, &fundingTxid},
 	)
 	if err != nil {
 		return err
@@ -100,6 +108,10 @@ func (c *CommitSig) Decode(r io.Reader, pver uint32) error {
 	// Set the corresponding TLV types if they were included in the stream.
 	if _, ok := parsed[partialSig.TlvType()]; ok {
 		c.PartialSig = tlv.SomeRecordT(partialSig)
+	}
+	c.FundingTxid = fn.None[chainhash.Hash]()
+	if _, ok := parsed[1]; ok {
+		c.FundingTxid = fn.Some(chainhash.Hash(fundingTxid))
 	}
 
 	c.CustomRecords = customRecords
@@ -113,9 +125,13 @@ func (c *CommitSig) Decode(r io.Reader, pver uint32) error {
 //
 // This is part of the lnwire.Message interface.
 func (c *CommitSig) Encode(w *bytes.Buffer, pver uint32) error {
-	recordProducers := make([]tlv.RecordProducer, 0, 1)
+	recordProducers := make([]tlv.RecordProducer, 0, 2)
 	c.PartialSig.WhenSome(func(sig PartialSigWithNonceTLV) {
 		recordProducers = append(recordProducers, &sig)
+	})
+	c.FundingTxid.WhenSome(func(txid chainhash.Hash) {
+		hash := [32]byte(txid)
+		recordProducers = append(recordProducers, hashRecord{1, &hash})
 	})
 
 	extraData, err := MergeAndEncode(

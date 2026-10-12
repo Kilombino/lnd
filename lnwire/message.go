@@ -41,10 +41,23 @@ const (
 	MsgClosingSigned                       = 39
 	MsgClosingComplete                     = 40
 	MsgClosingSig                          = 41
+	MsgTxAddInput                          = 66
+	MsgTxAddOutput                         = 67
+	MsgTxRemoveInput                       = 68
+	MsgTxRemoveOutput                      = 69
+	MsgTxComplete                          = 70
+	MsgTxSignatures                        = 71
+	MsgTxInitRbf                           = 72
+	MsgTxAckRbf                            = 73
+	MsgTxAbort                             = 74
+	MsgSpliceLocked                        = 77
+	MsgSpliceInit                          = 80
+	MsgSpliceAck                           = 81
 	MsgDynPropose                          = 111
 	MsgDynAck                              = 113
 	MsgDynReject                           = 115
 	MsgDynCommit                           = 117
+	MsgStartBatch                          = 127
 	MsgUpdateAddHTLC                       = 128
 	MsgUpdateFulfillHTLC                   = 130
 	MsgUpdateFailHTLC                      = 131
@@ -137,6 +150,32 @@ func (t MessageType) String() string {
 		return "Shutdown"
 	case MsgClosingSigned:
 		return "ClosingSigned"
+	case MsgTxAddInput:
+		return "TxAddInput"
+	case MsgTxAddOutput:
+		return "TxAddOutput"
+	case MsgTxRemoveInput:
+		return "TxRemoveInput"
+	case MsgTxRemoveOutput:
+		return "TxRemoveOutput"
+	case MsgTxComplete:
+		return "TxComplete"
+	case MsgTxSignatures:
+		return "TxSignatures"
+	case MsgTxInitRbf:
+		return "TxInitRbf"
+	case MsgTxAckRbf:
+		return "TxAckRbf"
+	case MsgTxAbort:
+		return "TxAbort"
+	case MsgSpliceLocked:
+		return "SpliceLocked"
+	case MsgSpliceInit:
+		return "SpliceInit"
+	case MsgSpliceAck:
+		return "SpliceAck"
+	case MsgStartBatch:
+		return "StartBatch"
 	case MsgDynPropose:
 		return "DynPropose"
 	case MsgDynAck:
@@ -303,6 +342,32 @@ func makeEmptyMessage(msgType MessageType) (Message, error) {
 		msg = &Shutdown{}
 	case MsgClosingSigned:
 		msg = &ClosingSigned{}
+	case MsgTxAddInput:
+		msg = &TxAddInput{}
+	case MsgTxAddOutput:
+		msg = &TxAddOutput{}
+	case MsgTxRemoveInput:
+		msg = &TxRemoveInput{}
+	case MsgTxRemoveOutput:
+		msg = &TxRemoveOutput{}
+	case MsgTxComplete:
+		msg = &TxComplete{}
+	case MsgTxSignatures:
+		msg = &TxSignatures{}
+	case MsgTxInitRbf:
+		msg = &TxInitRbf{}
+	case MsgTxAckRbf:
+		msg = &TxAckRbf{}
+	case MsgTxAbort:
+		msg = &TxAbort{}
+	case MsgSpliceLocked:
+		msg = &SpliceLocked{}
+	case MsgSpliceInit:
+		msg = &SpliceInit{}
+	case MsgSpliceAck:
+		msg = &SpliceAck{}
+	case MsgStartBatch:
+		msg = &StartBatch{}
 	case MsgDynPropose:
 		msg = &DynPropose{}
 	case MsgDynAck:
