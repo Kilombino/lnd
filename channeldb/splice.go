@@ -282,12 +282,24 @@ func (c *OpenChannel) PreviousFundings() ([]PreviousFunding, error) {
 	c.RLock()
 	defer c.RUnlock()
 
+	if c.Db == nil {
+		return nil, nil
+	}
+
 	var fundings []PreviousFunding
 	err := kvdb.View(c.Db.backend, func(tx kvdb.RTx) error {
 		chanBucket, err := fetchChanBucket(
 			tx, c.IdentityPub, &c.FundingOutpoint, c.ChainHash,
 		)
-		if err != nil {
+		switch {
+		// A channel not yet saved (during funding) has none.
+		case errors.Is(err, ErrNoChanDBExists),
+			errors.Is(err, ErrNoActiveChannels),
+			errors.Is(err, ErrChannelNotFound):
+
+			return nil
+
+		case err != nil:
 			return err
 		}
 		bucket := chanBucket.NestedReadBucket(

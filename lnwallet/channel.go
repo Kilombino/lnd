@@ -828,6 +828,11 @@ type LightningChannel struct {
 	// commitment is also signed on each of their funding outputs.
 	pendingFundings []*pendingFunding
 
+	// obsoleteFundings are the fundings a locked splice replaced: the
+	// peer may still sign for them in a batch it started before it learned
+	// of the lock.
+	obsoleteFundings map[chainhash.Hash]bool
+
 	// spliceRestoreErr is set when the pending splices couldn't be
 	// restored. Updating the channel without them could leave a splice
 	// that confirms without a commitment we can publish, so every update
@@ -1059,7 +1064,11 @@ func NewLightningChannel(signer input.Signer,
 	// Pending splices: their commitments are rebuilt from the chains just
 	// restored. A failure doesn't stop the channel from loading, so it can
 	// still be closed on its current funding, but it stops every update.
-	if err := lc.restorePendingFundings(); err != nil {
+	err = lc.restorePendingFundings()
+	if err == nil {
+		err = lc.loadObsoleteFundings()
+	}
+	if err != nil {
 		lc.log.Errorf("Unable to restore pending splices, the "+
 			"channel can't be updated: %v", err)
 		lc.pendingFundings = nil
@@ -4810,8 +4819,13 @@ func (lc *LightningChannel) ProcessChanSyncMsg(ctx context.Context,
 
 		// With the batch of updates accumulated, we'll now re-send the
 		// original CommitSig message required to re-sync their remote
-		// commitment chain with our local version of their chain.
-		commitUpdates = append(commitUpdates, commitDiff.CommitSig)
+		// commitment chain with our local version of their chain. With
+		// splices pending, the whole batch.
+		commitSigs, err := lc.retransmittedCommitSigs(commitDiff)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		commitUpdates = append(commitUpdates, commitSigs...)
 
 		// NOTE: If a revocation is not owed, then updates is empty.
 		if lc.channelState.LastWasRevoke {

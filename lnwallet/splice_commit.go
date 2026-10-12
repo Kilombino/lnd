@@ -1089,6 +1089,7 @@ func (lc *LightningChannel) LockPendingFunding(txid chainhash.Hash,
 		lock.RemoteTip = p.remote[lc.commitChains.Remote.tip().height].
 			toDiskCommit(lntypes.Remote)
 	}
+	previous := lc.channelState.CurrentFundingOutpoint().Hash
 	if err := lc.channelState.LockSplice(lock); err != nil {
 		return err
 	}
@@ -1098,6 +1099,15 @@ func (lc *LightningChannel) LockPendingFunding(txid chainhash.Hash,
 	}
 	for e, c := range remoteSwap {
 		e.Value = c
+	}
+	if lc.obsoleteFundings == nil {
+		lc.obsoleteFundings = make(map[chainhash.Hash]bool)
+	}
+	lc.obsoleteFundings[previous] = true
+	for _, other := range lc.pendingFundings {
+		if other != p {
+			lc.obsoleteFundings[other.txid()] = true
+		}
 	}
 	lc.pendingFundings = nil
 	lc.Capacity = p.Capacity
@@ -1112,4 +1122,73 @@ func (lc *LightningChannel) SpliceRestoreError() error {
 	defer lc.RUnlock()
 
 	return lc.spliceRestoreErr
+}
+
+// IsObsoleteFunding reports whether txid names a funding a locked splice
+// replaced: the channel's previous funding, or another splice that was
+// pending when one locked. A batch from the peer may still carry a
+// commitment_signed for it, which is ignored.
+func (lc *LightningChannel) IsObsoleteFunding(txid chainhash.Hash) bool {
+	lc.RLock()
+	defer lc.RUnlock()
+
+	return lc.obsoleteFundings[txid]
+}
+
+// loadObsoleteFundings marks the fundings the channel moved away from as
+// obsolete, after a restart.
+func (lc *LightningChannel) loadObsoleteFundings() error {
+	if lc.channelState.Db == nil {
+		return nil
+	}
+	prev, err := lc.channelState.PreviousFundings()
+	if err != nil {
+		return err
+	}
+	for _, f := range prev {
+		if lc.obsoleteFundings == nil {
+			lc.obsoleteFundings = make(map[chainhash.Hash]bool)
+		}
+		lc.obsoleteFundings[f.OutPoint.Hash] = true
+	}
+
+	return nil
+}
+
+// retransmittedCommitSigs returns the messages that carried the pending
+// commitment in diff: its commitment_signed, or the batch it went out in
+// while splices were pending, rebuilt from the splices' records.
+func (lc *LightningChannel) retransmittedCommitSigs(
+	diff *channeldb.CommitDiff) ([]lnwire.Message, error) {
+
+	records, err := lc.channelState.SpliceRecords()
+	if err != nil {
+		return nil, err
+	}
+
+	var members []lnwire.Message
+	for _, r := range records {
+		if r.RemoteTipSig == nil || r.RemoteTip == nil ||
+			r.RemoteTip.CommitHeight != diff.Commitment.CommitHeight {
+
+			continue
+		}
+		members = append(members, r.RemoteTipSig)
+	}
+	if len(members) == 0 {
+		return []lnwire.Message{diff.CommitSig}, nil
+	}
+
+	msgs := []lnwire.Message{
+		&lnwire.StartBatch{
+			ChannelID: diff.CommitSig.ChanID,
+			BatchSize: uint16(1 + len(members)),
+			BatchMessageType: fn.Some(
+				lnwire.MessageType(lnwire.MsgCommitSig),
+			),
+		},
+		diff.CommitSig,
+	}
+
+	return append(msgs, members...), nil
 }
