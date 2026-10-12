@@ -227,3 +227,5 @@ replace github.com/btcsuite/btcd => github.com/paulscode/btcd-blake2b v0.25.1-bl
 replace github.com/btcsuite/btcwallet/wallet/txauthor => github.com/paulscode/btcwallet-blake2b/wallet/txauthor v1.3.5-blake2b.1
 
 replace github.com/lightningnetwork/lnd/fn/v2 => ./fn
+
+replace github.com/lightninglabs/neutrino => github.com/Kilombino/neutrino-blake2b v0.0.0-20261012051506-4b7072266471
