@@ -2592,6 +2592,13 @@ func (s *server) Start(ctx context.Context) error {
 			return
 		}
 
+		// Coins a forgotten splice leased go back to the wallet before
+		// any peer connects.
+		if err := s.releaseForgottenSpliceLeases(); err != nil {
+			srvrLog.Errorf("Unable to release splice leases: %v",
+				err)
+		}
+
 		// htlcSwitch must be started before chainArb since the latter
 		// relies on htlcSwitch to deliver resolution message upon
 		// start.
@@ -4822,6 +4829,8 @@ func (s *server) peerConnected(conn net.Conn, connReq *connmgr.ConnReq,
 		DisallowRouteBlinding:  s.cfg.ProtocolOptions.NoRouteBlinding(),
 		DisallowQuiescence:     s.cfg.ProtocolOptions.NoQuiescence(),
 		QuiescenceTimeout:      s.cfg.Htlcswitch.QuiescenceTimeout,
+		SpliceEnabled:          s.cfg.ProtocolOptions.Splice(),
+		SpliceMachine:          s.newSpliceMachine,
 		MaxFeeExposure:         thresholdMSats,
 		Quit:                   s.quit,
 		AuxLeafStore:           s.implCfg.AuxLeafStore,

@@ -44,6 +44,7 @@ import (
 	"github.com/lightningnetwork/lnd/lnwallet"
 	"github.com/lightningnetwork/lnd/lnwallet/chainfee"
 	"github.com/lightningnetwork/lnd/lnwallet/chancloser"
+	"github.com/lightningnetwork/lnd/lnwallet/splice"
 	"github.com/lightningnetwork/lnd/lnwallet/types"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/msgmux"
@@ -519,6 +520,17 @@ type Config struct {
 	// otherwise the node will disconnect.
 	QuiescenceTimeout time.Duration
 
+	// SpliceEnabled is whether this node splices: it starts splices and
+	// accepts the peer's. A channel with a splice still to finish keeps
+	// its machine when it is off.
+	SpliceEnabled bool
+
+	// SpliceMachine returns a channel's splice machine, filling the
+	// node's part of its configuration into base. Nil when the node
+	// can't splice at all.
+	SpliceMachine func(base splice.Config,
+		peer *btcec.PublicKey) *splice.Machine
+
 	// MaxFeeExposure limits the number of outstanding fees in a channel.
 	// This value will be passed to created links.
 	MaxFeeExposure lnwire.MilliSatoshi
@@ -653,6 +665,10 @@ type Brontide struct {
 	activeChannels *lnutils.SyncMap[
 		lnwire.ChannelID, *lnwallet.LightningChannel]
 
+	// spliceMachines are the splice machines of the peer's channels.
+	spliceMtx      sync.Mutex
+	spliceMachines map[lnwire.ChannelID]*splice.Machine
+
 	// numActiveChans shadows the count of non-pending entries in
 	// activeChannels as an atomic integer. It exists so that hot-path
 	// callers — notably the onion message ingress gate, which runs on
@@ -782,6 +798,7 @@ func NewBrontide(cfg Config) *Brontide {
 		activeChannels: &lnutils.SyncMap[
 			lnwire.ChannelID, *lnwallet.LightningChannel,
 		]{},
+		spliceMachines:       make(map[lnwire.ChannelID]*splice.Machine),
 		newActiveChannel:     make(chan *newChannelMsg, 1),
 		newPendingChannel:    make(chan *newChannelMsg, 1),
 		removePendingChannel: make(chan *newChannelMsg),
@@ -1635,6 +1652,17 @@ func (p *Brontide) addLink(chanPoint *wire.OutPoint,
 	chanID := lnwire.NewChanIDFromOutPoint(*chanPoint)
 	p.cfg.Switch.RemoveLink(chanID)
 
+	// The channel's splice machine, when splicing applies, hands the
+	// link nothing until the link exists.
+	if p.spliceNegotiated(lnChan) {
+		m, err := p.startSpliceMachine(chanID, lnChan)
+		if err != nil {
+			return fmt.Errorf("unable to start splice machine: %w",
+				err)
+		}
+		linkCfg.SpliceHandler = m
+	}
+
 	// With the channel link created, we'll now notify the htlc switch so
 	// this channel can be used to dispatch local payments and also
 	// passively forward payments.
@@ -1817,6 +1845,10 @@ func (p *Brontide) Disconnect(reason error) {
 	// Unregister any RBF close actors registered for channels of this
 	// peer so we don't leave stale entries in the actor system.
 	p.unregisterRbfCloseActors()
+
+	// Stop the splice machines, from their own goroutine: a machine may
+	// be what asked for this disconnection.
+	go p.stopSpliceMachines()
 
 	// Ensure that the TCP connection is properly closed before continuing.
 	p.cfg.Conn.Close()
@@ -2361,6 +2393,21 @@ out:
 			// Keep queue handling active so a Ping send can finish
 			// through outgoingQueue without deadlock.
 			p.Disconnect(errPingFlood)
+
+			break out
+		}
+
+		// No shutdown while a splice of the channel hasn't locked: the
+		// spec forbids it, and closing would abandon the splice.
+		sd, isShutdown := nextMsg.(*lnwire.Shutdown)
+		if isShutdown && p.spliceUnlocked(sd.ChannelID) {
+			p.log.Warnf("shutdown for ChannelID(%v) while a splice "+
+				"is pending", sd.ChannelID)
+			p.queueMsg(&lnwire.Warning{
+				ChanID: sd.ChannelID,
+				Data:   []byte(errSpliceUnlocked.Error()),
+			}, nil)
+			p.Disconnect(errSpliceUnlocked)
 
 			break out
 		}
@@ -4706,6 +4753,12 @@ func (p *Brontide) handleLocalCloseReq(req *htlcswitch.ChanClose) {
 	// out this channel on-chain, so we execute the cooperative channel
 	// closure workflow.
 	case contractcourt.CloseRegular:
+		// Not while a splice hasn't locked.
+		if len(channel.PendingFundings()) > 0 {
+			req.Err <- errSpliceUnlocked
+			return
+		}
+
 		var err error
 		switch {
 		// If this is the RBF coop state machine, then we'll instruct
@@ -4991,6 +5044,14 @@ func (p *Brontide) WipeChannel(chanPoint *wire.OutPoint) {
 	// Instruct the HtlcSwitch to close this link as the channel is no
 	// longer active.
 	p.cfg.Switch.RemoveLink(chanID)
+
+	p.spliceMtx.Lock()
+	m := p.spliceMachines[chanID]
+	delete(p.spliceMachines, chanID)
+	p.spliceMtx.Unlock()
+	if m != nil {
+		go m.Stop()
+	}
 }
 
 // handleInitMsg handles the incoming init message which contains global and

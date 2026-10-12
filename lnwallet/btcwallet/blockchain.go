@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
@@ -169,3 +170,52 @@ func (b *BtcWallet) GetBlockHash(blockHeight int64) (*chainhash.Hash, error) {
 // A compile time check to ensure that BtcWallet implements the BlockChainIO
 // interface.
 var _ lnwallet.WalletController = (*BtcWallet)(nil)
+
+// GetUtxoDetails returns an unspent output with its confirmations and
+// whether a coinbase transaction created it, asking the backend's gettxout.
+// A splice checks a peer's inputs with it: confirmed, unspent, not coinbase,
+// and the value and script the peer claims. Works on a pruned node without
+// txindex. Neutrino can't answer and gets an error, so peer inputs are
+// refused there.
+func (b *BtcWallet) GetUtxoDetails(op *wire.OutPoint) (*wire.TxOut, uint32,
+	bool, error) {
+
+	var getTxOut func(*chainhash.Hash, uint32,
+		bool) (*btcjson.GetTxOutResult, error)
+
+	switch backend := b.chain.(type) {
+	case *chain.RPCClient:
+		getTxOut = backend.GetTxOut
+
+	case *chain.BitcoindClient:
+		getTxOut = backend.GetTxOut
+
+	default:
+		return nil, 0, false, errors.New("backend can't check " +
+			"unspent outputs")
+	}
+
+	txout, err := getTxOut(&op.Hash, op.Index, false)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	if txout == nil {
+		return nil, 0, false, ErrOutputSpent
+	}
+
+	pkScript, err := hex.DecodeString(txout.ScriptPubKey.Hex)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	amt, err := btcutil.NewAmount(txout.Value)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	confs := uint32(0)
+	if txout.Confirmations > 0 {
+		confs = uint32(txout.Confirmations)
+	}
+
+	return &wire.TxOut{Value: int64(amt), PkScript: pkScript}, confs,
+		txout.Coinbase, nil
+}

@@ -412,3 +412,16 @@ func (l *channelLink) resendSpliceCommitSig(remote *lnwire.ChannelReestablish) {
 func (l *channelLink) QuiescenceInitiator() fn.Result[lntypes.ChannelParty] {
 	return l.quiescer.QuiescenceInitiator()
 }
+
+// SpliceLink is a link's part in splicing, as the splice machine uses it.
+type SpliceLink interface {
+	QuiescenceInitiator() fn.Result[lntypes.ChannelParty]
+	InitStfu() <-chan fn.Result[lntypes.ChannelParty]
+	ResumeQuiescence() <-chan error
+	AddSpliceFunding(f lnwallet.PendingFunding) <-chan error
+	SendSpliceCommitment(txid chainhash.Hash) <-chan error
+	LockSplice(txid chainhash.Hash, scid lnwire.ShortChannelID) <-chan error
+}
+
+// A compile time check that the link can splice.
+var _ SpliceLink = (*channelLink)(nil)
