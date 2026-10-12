@@ -922,3 +922,36 @@ func TestSpliceLockRefused(t *testing.T) {
 	require.Error(t, alice.LockPendingFunding(txid, scid))
 	require.Len(t, alice.PendingFundings(), 1)
 }
+
+// TestSpliceRestoreFailure checks a channel whose pending splice can't be
+// restored: it still loads and can be closed on its current funding, but
+// every update is refused.
+func TestSpliceRestoreFailure(t *testing.T) {
+	t.Parallel()
+
+	alice, bob, txid := splicedPair(t, 100_000_000, 0)
+
+	// The stored commitment on the splice's funding no longer matches.
+	err := bob.channelState.UpdateSpliceRecord(txid,
+		func(r *channeldb.SpliceRecord) error {
+			r.LocalCommit.CommitTx.TxOut[0].Value++
+			return nil
+		})
+	require.NoError(t, err)
+
+	bob, err = restartChannel(bob)
+	require.NoError(t, err)
+	require.Error(t, bob.SpliceRestoreError())
+	require.Empty(t, bob.PendingFundings())
+
+	requireCommitSpends(t, bob)
+
+	_, err = bob.SignNextCommitment(ctxb)
+	require.Error(t, err)
+	aCommit, err := alice.SignNextCommitment(ctxb)
+	require.NoError(t, err)
+	require.Error(t, bob.ReceiveNewCommitmentBatch(
+		aCommit.CommitSigs, aCommit.SpliceSigs,
+	))
+	require.Error(t, bob.AddPendingFunding(PendingFunding{}))
+}

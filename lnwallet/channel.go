@@ -828,6 +828,12 @@ type LightningChannel struct {
 	// commitment is also signed on each of their funding outputs.
 	pendingFundings []*pendingFunding
 
+	// spliceRestoreErr is set when the pending splices couldn't be
+	// restored. Updating the channel without them could leave a splice
+	// that confirms without a commitment we can publish, so every update
+	// is refused; closing on the current funding still works.
+	spliceRestoreErr error
+
 	// opts is the set of options that channel was initialized with.
 	opts *channelOpts
 
@@ -1051,10 +1057,13 @@ func NewLightningChannel(signer input.Signer,
 	}
 
 	// Pending splices: their commitments are rebuilt from the chains just
-	// restored.
+	// restored. A failure doesn't stop the channel from loading, so it can
+	// still be closed on its current funding, but it stops every update.
 	if err := lc.restorePendingFundings(); err != nil {
-		return nil, fmt.Errorf("unable to restore pending splices: %w",
-			err)
+		lc.log.Errorf("Unable to restore pending splices, the "+
+			"channel can't be updated: %v", err)
+		lc.pendingFundings = nil
+		lc.spliceRestoreErr = err
 	}
 
 	return lc, nil
@@ -4178,6 +4187,10 @@ func (lc *LightningChannel) SignNextCommitment(
 	lc.Lock()
 	defer lc.Unlock()
 
+	if lc.spliceRestoreErr != nil {
+		return nil, lc.spliceRestoreErr
+	}
+
 	// Check for empty commit sig. This should never happen, but we don't
 	// dare to fail hard here. We assume peers can deal with the empty sig
 	// and continue channel operation. We log an error so that the bug
@@ -5457,6 +5470,9 @@ func (lc *LightningChannel) ReceiveNewCommitmentBatch(commitSigs *CommitSigs,
 	lc.Lock()
 	defer lc.Unlock()
 
+	if lc.spliceRestoreErr != nil {
+		return lc.spliceRestoreErr
+	}
 	if err := lc.checkBatch(spliceSigs); err != nil {
 		return err
 	}

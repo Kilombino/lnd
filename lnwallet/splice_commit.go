@@ -165,6 +165,9 @@ func (lc *LightningChannel) AddPendingFunding(f PendingFunding) error {
 	defer lc.Unlock()
 
 	switch {
+	case lc.spliceRestoreErr != nil:
+		return lc.spliceRestoreErr
+
 	case lc.channelState.ChanType.IsTaproot():
 		return errors.New("taproot channels can't be spliced")
 
@@ -1100,4 +1103,13 @@ func (lc *LightningChannel) LockPendingFunding(txid chainhash.Hash,
 	lc.Capacity = p.Capacity
 
 	return lc.createSignDesc()
+}
+
+// SpliceRestoreError returns why the channel's pending splices couldn't be
+// restored, if they couldn't: the channel must not be updated, only closed.
+func (lc *LightningChannel) SpliceRestoreError() error {
+	lc.RLock()
+	defer lc.RUnlock()
+
+	return lc.spliceRestoreErr
 }
