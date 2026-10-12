@@ -1021,6 +1021,37 @@ func TestAcceptConstructionRefused(t *testing.T) {
 		require.Empty(t, h.bob.PendingFundings())
 	})
 
+	// The peer adding one of our own coins (a wallet coin, or a
+	// channel's funding output) is refused before the backend is asked.
+	t.Run("one of our own coins", func(t *testing.T) {
+		t.Parallel()
+
+		h := newAcceptorHarness(t)
+		s := startAliceSplice(t, h, 10_000_000, 2_500)
+		ours := s.coin.OutPoint
+		h.machine.mu.Lock()
+		h.machine.cfg.IsOurOutpoint = func(op wire.OutPoint) bool {
+			return op == ours
+		}
+		h.machine.mu.Unlock()
+
+		for {
+			msg, err := s.session.Next()
+			require.NoError(t, err)
+			h.machine.HandleSpliceMessage(msg)
+
+			reply := <-h.peer.msgs
+			if abort, ok := reply.(*lnwire.TxAbort); ok {
+				require.Contains(t, string(abort.Data),
+					"is ours")
+				break
+			}
+			require.NoError(t, s.session.Receive(reply))
+		}
+		requireResumed(t, h)
+		require.Empty(t, h.bob.PendingFundings())
+	})
+
 	t.Run("P2WSH input", func(t *testing.T) {
 		t.Parallel()
 
