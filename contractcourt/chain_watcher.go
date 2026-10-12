@@ -381,6 +381,10 @@ type chainWatcher struct {
 	// movedCommits carries it to the close observer.
 	movedWatch   sync.Once
 	movedCommits chan *chainntnfs.SpendDetail
+
+	// watchedPrevious are the replaced funding outputs being watched,
+	// used only from Start and the close observer.
+	watchedPrevious map[wire.OutPoint]bool
 }
 
 // EarlyCoopCloseDispatched reports whether the chain watcher already fired the
@@ -442,6 +446,7 @@ func newChainWatcher(cfg chainWatcherConfig) (*chainWatcher, error) {
 		fundingSpendNtfn:    spendNtfn,
 		previousSpends:      make(chan *chainntnfs.SpendDetail, 1),
 		movedCommits:        make(chan *chainntnfs.SpendDetail, 1),
+		watchedPrevious:     make(map[wire.OutPoint]bool),
 	}
 
 	// If this is a pending taproot channel, we need to register for a
@@ -484,10 +489,11 @@ func (c *chainWatcher) Start() error {
 	log.Debugf("Starting chain watcher for ChannelPoint(%v)",
 		c.cfg.chanState.FundingOutpoint)
 
+	// Before the close observer, which may add to them.
+	c.watchPreviousFundings()
+
 	c.wg.Add(1)
 	go c.closeObserver()
-
-	c.watchPreviousFundings()
 
 	return nil
 }

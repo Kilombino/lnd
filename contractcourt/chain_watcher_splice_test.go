@@ -9,6 +9,7 @@ import (
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightningnetwork/lnd/chainntnfs"
+	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/input"
 	"github.com/lightningnetwork/lnd/keychain"
 	"github.com/lightningnetwork/lnd/lntypes"
@@ -49,7 +50,7 @@ func pendSpliceOf(t *testing.T, h *chainWatcherTestHarness,
 
 	tx := wire.NewMsgTx(2)
 	tx.AddTxIn(&wire.TxIn{
-		PreviousOutPoint: alice.State().FundingOutpoint,
+		PreviousOutPoint: alice.State().CurrentFundingOutpoint(),
 		Sequence:         0xfffffffd,
 	})
 	tx.AddTxIn(&wire.TxIn{
@@ -374,4 +375,39 @@ func TestChainWatcherSpliceAfterForceCloseRestart(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("nothing published")
 	}
+}
+
+// TestChainWatcherSecondSplice checks a splice of a channel a splice moved
+// while the watcher ran, the first one locked since, is followed too: not
+// taken for a spend it doesn't recognise. One taken for it before, by a
+// watcher that didn't know the splice, is recognised and the flag cleared.
+func TestChainWatcherSecondSplice(t *testing.T) {
+	t.Parallel()
+
+	h := newChainWatcherTestHarness(t, withRequiredConfs(1))
+	first := pendSplice(t, h)
+	followSplice(t, h, first)
+
+	scid := lnwire.ShortChannelID{BlockHeight: 900_000}
+	require.NoError(t, h.aliceChannel.LockPendingFunding(
+		first.TxHash(), scid,
+	))
+	require.NoError(t, h.bobChannel.LockPendingFunding(
+		first.TxHash(), scid,
+	))
+
+	second := pendSpliceOf(t, h, 50_000_000)
+	require.Equal(t, wire.OutPoint{Hash: first.TxHash()},
+		second.TxIn[0].PreviousOutPoint)
+
+	// As if a watcher that didn't know it had flagged it.
+	state := h.aliceChannel.State()
+	require.NoError(t, state.ApplyChanStatus(
+		channeldb.ChanStatusFundingSpentUnknown,
+	))
+
+	followSplice(t, h, second)
+	require.False(t, state.HasChanStatus(
+		channeldb.ChanStatusFundingSpentUnknown,
+	))
 }

@@ -227,7 +227,10 @@ func TestSelectAddFundsAgreesWithEngine(t *testing.T) {
 			rt, sel.Contribution, feeRate, sel.Inputs, outputs,
 		)
 		require.NoError(rt, err)
-		require.Equal(rt, sel.Weight, ri.Weight)
+		// The selection's weight adds the margin for a peer that
+		// overcounts each input.
+		require.Equal(rt, sel.Weight,
+			ri.Weight+int64(len(ri.Tx.TxIn))*peerInputMargin)
 		require.Equal(rt, sel.Fee, ri.Fee)
 		require.Equal(rt, ri.Tx.TxHash(), ra.Tx.TxHash())
 		require.Equal(rt, int64(1_000_000+sel.Contribution),
@@ -354,7 +357,8 @@ func TestMoveOut(t *testing.T) {
 				}},
 			)
 			require.NoError(t, err)
-			require.Equal(t, out.Weight, ri.Weight)
+			require.Equal(t, out.Weight,
+				ri.Weight+peerInputMargin)
 			require.Equal(t, out.Fee, ri.Fee)
 		}
 	}

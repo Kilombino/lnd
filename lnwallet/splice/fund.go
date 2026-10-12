@@ -114,8 +114,17 @@ func (s Shape) weight(inputWitnesses []int64, outputs [][]byte) int64 {
 		w += interactivetx.OutputWeight(o)
 	}
 
+	// The Core Lightning port counts each input's witness item count
+	// twice and refuses a fee a weight unit short per input, so ours
+	// covers that: a sat or so, never less than the true weight needs.
+	w += int64(numIn) * peerInputMargin
+
 	return w
 }
+
+// peerInputMargin is the weight added for each input this node pays for in
+// a splice it starts, the most a peer overcounts one by.
+const peerInputMargin = 1
 
 // fee returns the fee of weight at feeRate.
 func fee(feeRate chainfee.SatPerKWeight, weight int64) btcutil.Amount {

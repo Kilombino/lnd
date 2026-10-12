@@ -182,12 +182,29 @@ func (c *chainWatcher) spliceChainSet(
 func (c *chainWatcher) maybeFollowSplice(spend *chainntnfs.SpendDetail,
 	current *chainntnfs.SpendEvent) (*chainntnfs.SpendEvent, bool) {
 
-	if c.splice != nil {
-		return nil, false
-	}
 	r := c.knownSplice(spend)
 	if r == nil {
 		return nil, false
+	}
+
+	// The watch already follows a splice: one that has locked since, the
+	// channel's current funding, which this new splice spends.
+	if c.splice != nil {
+		if err := c.cfg.chanState.Refresh(); err != nil {
+			log.Errorf("ChannelPoint(%v): unable to read channel: "+
+				"%v", c.cfg.chanState.FundingOutpoint, err)
+
+			return nil, false
+		}
+		if c.cfg.chanState.CurrentFundingOutpoint() != c.splice.outpoint {
+			return nil, false
+		}
+
+		// The output it replaced is watched until it is reorg-safe,
+		// as at a start after the lock.
+		c.splice.confNtfn.Cancel()
+		c.splice = nil
+		c.watchPreviousFundings()
 	}
 
 	moved, w, err := c.followSplice(r, spend)
@@ -200,6 +217,25 @@ func (c *chainWatcher) maybeFollowSplice(spend *chainntnfs.SpendDetail,
 	current.Cancel()
 	c.fundingSpendNtfn = moved
 	c.splice = w
+
+	// Taken for a spend it didn't recognise by a version, or a start,
+	// that didn't know the splice: it is known now.
+	chanState := c.cfg.chanState
+	if chanState.HasChanStatus(channeldb.ChanStatusFundingSpentUnknown) {
+		err := chanState.ClearChanStatus(
+			channeldb.ChanStatusFundingSpentUnknown,
+		)
+		if err != nil {
+			log.Errorf("ChannelPoint(%v): unable to clear the "+
+				"unknown spend flag: %v",
+				chanState.FundingOutpoint, err)
+		} else {
+			log.Infof("ChannelPoint(%v): spend %v recognised as "+
+				"splice %v; flag cleared",
+				chanState.FundingOutpoint, spend.SpenderTxHash,
+				r.Txid())
+		}
+	}
 
 	// We had force closed on the previous funding: that commitment can't
 	// confirm now, ours on the splice's funding can.
@@ -302,9 +338,10 @@ func (c *chainWatcher) watchPreviousFundings() {
 
 	for _, pf := range previous {
 		script, ok := scripts[pf.OutPoint]
-		if !ok {
+		if !ok || c.watchedPrevious[pf.OutPoint] {
 			continue
 		}
+		c.watchedPrevious[pf.OutPoint] = true
 		c.wg.Add(1)
 		go c.watchPreviousFunding(pf, script, scripts[pf.LockedTo])
 	}
