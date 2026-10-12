@@ -249,6 +249,12 @@ func TestReplaceOurSplice(t *testing.T) {
 	require.Equal(t, newCapacity, p.alice.ch.State().Capacity)
 	require.Zero(t, p.alice.wallet.leaseCount())
 
+	// The user's stream follows the splice to its replacement: signed,
+	// published, locked.
+	u := requireUpdates(t, updates, StateSigned, StateBroadcast,
+		StateLocked)
+	require.Equal(t, txid, u.Txid)
+
 	// Still Alice's resize, with her amount.
 	require.Eventually(t, func() bool {
 		last, err := p.alice.ch.State().LastSplice()
@@ -269,7 +275,10 @@ func TestReplaceOurSplice(t *testing.T) {
 func TestOurPart(t *testing.T) {
 	t.Parallel()
 
-	m := &Machine{cfg: Config{DustLimit: dustLimit}}
+	m := &Machine{cfg: Config{
+		DustLimit: dustLimit,
+		Channel:   &balanceOnly{available: 1_000_000_000},
+	}}
 	funding := p2wsh(1)
 
 	// Moving out 300,000 to an address.
@@ -293,6 +302,12 @@ func TestOurPart(t *testing.T) {
 		lntypes.WeightUnit(interactivetx.OutputWeight(dest)),
 	)
 	require.Equal(t, -(300_000 + fee), c)
+
+	// More than the channel lets go: refused before the peer hears.
+	m.cfg.Channel = &balanceOnly{available: 100_000_000}
+	_, _, _, err = m.ourPart(out, 2_000)
+	require.ErrorContains(t, err, "available")
+	m.cfg.Channel = &balanceOnly{available: 1_000_000_000}
 
 	// Adding 1,000,000 from a coin of 1,500,000, with change.
 	wallet := newFakeWallet()
@@ -342,6 +357,18 @@ func TestOurPart(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, outs)
 
+	// No change in the splice: a fresh change address of the wallet's.
+	fresh := p2wpkh(0x55)
+	m.cfg.ChangeScript = func() ([]byte, error) { return fresh, nil }
+	a = addTx(0)
+	a.res.Inputs[1].Value = 1_500_000
+	in.Value = 1_500_000
+	_, _, outs, err = m.ourPart(a, 5_000)
+	require.NoError(t, err)
+	require.Len(t, outs, 1)
+	require.Equal(t, fresh, outs[0].PkScript)
+	m.cfg.ChangeScript = nil
+
 	// A coin that can't pay for itself at the new rate.
 	a.res.Inputs[1].Value = 1_000_010
 	_, _, _, err = m.ourPart(a, 50_000)
@@ -358,4 +385,99 @@ func make32(tag byte) []byte {
 	b[0] = tag
 
 	return b
+}
+
+// TestReplaceOurSpliceAgain checks a second replacement of Alice's splice
+// after a restart: the restarted machine still knows the splice is hers,
+// takes no place in the limits for it, and puts her part in again; a rate
+// far above hers is refused.
+func TestReplaceOurSpliceAgain(t *testing.T) {
+	t.Parallel()
+
+	p := newSplicePair(t)
+	coinA := p.alice.fund(t, 1, 5_000_000)
+	const amount = btcutil.Amount(1_000_000)
+	updates, err := p.alice.machine.Splice(Request{
+		Direction: DirectionIn, Amount: amount, FeeRate: 2_500,
+	})
+	require.NoError(t, err)
+	requireUpdates(t, updates, StatePreparing, StateNegotiating,
+		StateSigned, StateBroadcast)
+
+	fromAlice := make(chan lnwire.Message, 64)
+	p.dropMu.Lock()
+	p.drop = func(from *node, msg lnwire.Message) bool {
+		if from == p.alice {
+			fromAlice <- msg
+			return true
+		}
+
+		return false
+	}
+	p.dropMu.Unlock()
+	p.alice.link.mu.Lock()
+	p.alice.link.initiator = lntypes.Remote
+	p.alice.link.mu.Unlock()
+
+	// A restart, with limits that count the peer's splices.
+	limits := NewLimits()
+	cfg := p.alice.machine.cfg
+	cfg.Limits = limits
+	restarted := NewMachine(cfg)
+	startReestablished(t, restarted)
+	t.Cleanup(restarted.Stop)
+	p.alice.machine.Stop()
+	p.alice.machine = restarted
+	limits.mu.Lock()
+	require.Empty(t, limits.pending, "our splice took a peer's place")
+	limits.mu.Unlock()
+
+	rbf := func(rate chainfee.SatPerKWeight) lnwire.Message {
+		restarted.HandleSpliceMessage(&lnwire.TxInitRbf{
+			ChannelID:                 restarted.cfg.ChanID,
+			LockTime:                  p.chain.height,
+			FeeRatePerKw:              uint32(rate),
+			FundingOutputContribution: fn.Some(btcutil.Amount(0)),
+		})
+		select {
+		case m := <-fromAlice:
+			return m
+		case <-time.After(5 * time.Second):
+			t.Fatal("Alice stopped answering")
+			return nil
+		}
+	}
+
+	// Far above her rate and the node's estimate: refused.
+	abort, ok := rbf(1_000_000).(*lnwire.TxAbort)
+	require.True(t, ok)
+	require.Contains(t, string(abort.Data), codeFeeBelowFloor)
+	select {
+	case <-p.alice.link.resumed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("quiescence not ended")
+	}
+
+	// At a rate she'd pay: her amount, and her coin re-added.
+	ack, ok := rbf(5_000).(*lnwire.TxAckRbf)
+	require.True(t, ok)
+	require.Equal(t, fn.Some(amount), ack.FundingOutputContribution)
+	restarted.mu.Lock()
+	b := restarted.active
+	restarted.mu.Unlock()
+	require.True(t, b.oursReplaced)
+	require.Len(t, b.ourInputs, 1)
+	require.Equal(t, coinA.OutPoint, b.ourInputs[0].OutPoint)
+	require.Len(t, b.ourOutputs, 1)
+}
+
+// balanceOnly is a channel that only says what we can send.
+type balanceOnly struct {
+	Channel
+
+	available lnwire.MilliSatoshi
+}
+
+func (b *balanceOnly) AvailableBalance() lnwire.MilliSatoshi {
+	return b.available
 }

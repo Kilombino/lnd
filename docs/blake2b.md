@@ -490,8 +490,9 @@ of the channel. `lncli listchannels` shows a splice in progress as
 status), and the last one that ended as `last_splice`.
 
 **When it counts.** Both nodes send `splice_locked` at their lock depth:
-six confirmations here, or the channel's own if larger, and one more
-per 1/30 of 0.16777215 BTC the peer put in, up to 36. From then on the
+six confirmations here, or the channel's own if larger; for coins the
+peer put in, deeper, up to the depth of the hold on them below (36 by
+default), the more the peer put in. From then on the
 channel is on the new funding output. The old one stays watched for 144
 blocks in case of a reorganisation.
 

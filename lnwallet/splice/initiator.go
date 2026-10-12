@@ -451,7 +451,9 @@ func (m *Machine) Cancel() bool {
 	m.enqueue(func() {
 		a := m.active
 		switch {
-		case a == nil || a.request == nil:
+		// A replacement the peer is building isn't the user's to
+		// cancel; the splice it replaces goes on either way.
+		case a == nil || a.request == nil || len(a.replaced) > 0:
 			result <- false
 
 		case a.phase == phasePreparing:

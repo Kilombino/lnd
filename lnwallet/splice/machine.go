@@ -523,7 +523,8 @@ func (m *Machine) setActive(a *active) {
 
 	// A splice the peer started gives back its place in the limits;
 	// ending without locking counts against the channel.
-	if old != nil && old != a && old.role == interactivetx.Acceptor {
+	if old != nil && old != a && old.role == interactivetx.Acceptor &&
+		!old.oursReplaced {
 		m.cfg.Limits.release(m, m.cfg.ChanID, !old.lockDone)
 	}
 }

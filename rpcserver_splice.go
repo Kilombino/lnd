@@ -378,9 +378,12 @@ func (r *rpcServer) EstimateSplice(_ context.Context,
 		AnchorReserveSat: int64(wallet.RequiredReserve(
 			uint32(numAnchors),
 		)),
-		NewCapacitySat:    int64(est.NewCapacity),
-		NewLocalSat:       int64(est.NewLocal),
-		LockDepth:         spliceLockDepth(ch.NumConfsRequired, 0),
+		NewCapacitySat: int64(est.NewCapacity),
+		NewLocalSat:    int64(est.NewLocal),
+		LockDepth: spliceLockDepth(
+			ch.NumConfsRequired, 0,
+			r.cfg.ProtocolOptions.SplicePeerInputConfs,
+		),
 		DestinationIsOurs: ours,
 		RefusalCode:       est.RefusalCode,
 	}, nil
@@ -503,6 +506,7 @@ func (r *rpcServer) addSpliceFields(ch *channeldb.OpenChannel,
 			spliceLockDepth(
 				ch.NumConfsRequired,
 				btcutil.Amount(max(0, int64(latest.RemoteDelta))),
+				r.cfg.ProtocolOptions.SplicePeerInputConfs,
 			),
 		)
 	}
@@ -570,6 +574,7 @@ func (r *rpcServer) peerNotLocked(ch *channeldb.OpenChannel) bool {
 		depth := spliceLockDepth(
 			ch.NumConfsRequired,
 			btcutil.Amount(max(0, int64(rec.RemoteDelta))),
+			r.cfg.ProtocolOptions.SplicePeerInputConfs,
 		)
 		if spliceOverdue(r.spliceConfirmations(rec), depth,
 			spliceLockedGrace) {

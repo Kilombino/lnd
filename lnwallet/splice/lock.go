@@ -405,7 +405,7 @@ func (m *Machine) restore() error {
 	}
 
 	m.active = a
-	if a.role == interactivetx.Acceptor {
+	if a.role == interactivetx.Acceptor && !a.oursReplaced {
 		m.cfg.Limits.admit(m, m.cfg.ChanID, m.cfg.TheirNodeID, true)
 	}
 	for _, c := range a.replaced {
@@ -495,6 +495,12 @@ func restoredActive(r *channeldb.SpliceRecord) (*active, error) {
 	}
 	for _, op := range n.OurInputs {
 		a.ourInputs = append(a.ourInputs, Coin{OutPoint: op})
+	}
+	a.oursReplaced = n.OursReplaced
+	for _, o := range n.OurOutputs {
+		a.ourOutputs = append(a.ourOutputs, interactivetx.Output{
+			Value: btcutil.Amount(o.Value), PkScript: o.PkScript,
+		})
 	}
 
 	// The fee, which a replacement must at least pay.

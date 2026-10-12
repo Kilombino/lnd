@@ -157,27 +157,27 @@ type syncedWallet interface {
 }
 
 // spliceLockDepth is the confirmations at which a splice of a channel locks:
-// at least 6, at least the channel's own, and more for coins the peer put
-// in, which it could take back by reorganising the chain: one more block
-// per 1/30 of a non-wumbo channel's worth, up to 36, where the hold on the
-// peer's coins ends (protocol.splice-peer-input-confs' default).
-func spliceLockDepth(numConfsRequired uint16, peer btcutil.Amount) uint32 {
+// at least 6, at least the channel's own, and for coins the peer put in,
+// which it could take back by reorganising the chain, up to holdConfs (the
+// depth at which the hold on its coins ends): six plus a share of the rest
+// for each 1/30 of a non-wumbo channel's worth the peer put in.
+func spliceLockDepth(numConfsRequired uint16, peer btcutil.Amount,
+	holdConfs uint32) uint32 {
+
 	depth := max(uint32(6), uint32(numConfsRequired))
-	if peer <= 0 {
+	if peer <= 0 || holdConfs <= 6 {
 		return depth
 	}
 
-	const (
-		maxExtra = 30
-		scale    = btcutil.Amount(16_777_215)
-	)
-	extra := uint32(maxExtra)
+	const scale = btcutil.Amount(16_777_215)
+	maxExtra := int64(holdConfs - 6)
+	extra := maxExtra
 	if peer < scale {
-		extra = uint32((int64(peer)*maxExtra + int64(scale) - 1) /
-			int64(scale))
+		extra = (int64(peer)*maxExtra + int64(scale) - 1) /
+			int64(scale)
 	}
 
-	return max(depth, 6+extra)
+	return max(depth, 6+uint32(extra))
 }
 
 // newSpliceMachine fills the node's part of a channel's splice machine's
@@ -235,7 +235,10 @@ func (s *server) newSpliceMachine(base splice.Config,
 	cfg.Policy = splice.Policy{
 		MaxChannelSize: btcutil.Amount(s.cfg.MaxChanSize),
 		LockDepth: func(peer btcutil.Amount) uint32 {
-			return spliceLockDepth(numConfs, peer)
+			return spliceLockDepth(
+				numConfs, peer,
+				s.cfg.ProtocolOptions.SplicePeerInputConfs,
+			)
 		},
 		PeerInputConfs: s.cfg.ProtocolOptions.SplicePeerInputConfs,
 	}

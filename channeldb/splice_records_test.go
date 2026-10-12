@@ -310,6 +310,10 @@ func TestSpliceNegotiationRoundTrip(t *testing.T) {
 		OurTxSignatures: ourSigs,
 		BroadcastHeight: 901_000,
 		LockedSent:      true,
+		OursReplaced:    true,
+		OurOutputs: []*wire.TxOut{
+			{Value: 40_000, PkScript: []byte{0, 0x14, 7}},
+		},
 		Inputs: []SpliceInput{
 			{SerialID: 0, Value: 1_000_000, PkScript: []byte{
 				0, 0x20, 1,
@@ -343,6 +347,8 @@ func TestSpliceNegotiationRoundTrip(t *testing.T) {
 	require.Equal(t, uint32(901_000), got.BroadcastHeight)
 	require.True(t, got.LockedSent)
 	require.False(t, got.LockedReceived)
+	require.True(t, got.OursReplaced)
+	require.Equal(t, r.Negotiation.OurOutputs, got.OurOutputs)
 	require.Equal(t, r.Negotiation.Inputs, got.Inputs)
 
 	// A record without one has none.

@@ -49,13 +49,10 @@ func (m *Machine) handleTxInitRbf(msg *lnwire.TxInitRbf) {
 		return
 	}
 
-	// The peer's contribution to its own splice it may change; to ours it
-	// is what it adds on top.
-	theirs := a.theirContribution
-	if a.role == interactivetx.Initiator {
-		theirs = 0
-	}
-	contribution := msg.FundingOutputContribution.UnwrapOr(theirs)
+	// The peer's contribution it may change; absent, it stays.
+	contribution := msg.FundingOutputContribution.UnwrapOr(
+		a.theirContribution,
+	)
 	feeRate := chainfee.SatPerKWeight(msg.FeeRatePerKw)
 
 	// Replacing a splice we started, we put in what we did: the same
@@ -66,7 +63,14 @@ func (m *Machine) handleTxInitRbf(msg *lnwire.TxInitRbf) {
 		coins   []Coin
 		outputs []interactivetx.Output
 	)
-	if a.role == interactivetx.Initiator {
+	if weStarted(a) {
+		if limit := m.ourRateLimit(a); feeRate > limit {
+			m.abort(codeFeeBelowFloor, "%v is above the %v we pay "+
+				"for our part of a replacement", feeRate, limit)
+			m.resume()
+
+			return
+		}
 		ours, coins, outputs, err = m.ourPart(a, feeRate)
 		if err != nil {
 			m.abort(codeInsufficientFunds, "%v", err)
@@ -74,6 +78,15 @@ func (m *Machine) handleTxInitRbf(msg *lnwire.TxInitRbf) {
 
 			return
 		}
+	}
+
+	// The size limit counts what both put in.
+	capacity := m.cfg.Channel.State().Capacity + contribution + ours
+	if size := m.cfg.Policy.MaxChannelSize; size > 0 && capacity > size {
+		m.abort(codeAboveMaxSize, "capacity %v above %v", capacity, size)
+		m.resume()
+
+		return
 	}
 
 	session, b, err := m.newConstruction(
@@ -99,7 +112,10 @@ func (m *Machine) handleTxInitRbf(msg *lnwire.TxInitRbf) {
 	}
 	b.ourInputs = coins
 	b.ourOutputs = outputs
-	b.oursReplaced = a.role == interactivetx.Initiator || a.oursReplaced
+	b.oursReplaced = weStarted(a)
+
+	// The user's request follows the splice to its latest transaction.
+	handOver(a, b)
 
 	// The splice keeps its place in the limits: the replacement is the
 	// same splice.
@@ -119,38 +135,83 @@ func (m *Machine) handleTxInitRbf(msg *lnwire.TxInitRbf) {
 	})
 }
 
-// ourPart returns what this node puts into a replacement of a splice it
-// started: the same coins with the change left after their fee at the new
-// rate (dropped if dust), or the same amount to the same destination with
-// the fee for that output out of our side. In M1 the peer adds nothing to
-// our splices, so every input but the shared one, and every output but the
-// funding one, is ours.
-func (m *Machine) ourPart(a *active, feeRate chainfee.SatPerKWeight) (
-	btcutil.Amount, []Coin, []interactivetx.Output, error) {
+// weStarted reports whether this node started the splice a transaction
+// belongs to: it built it, or it is the peer's replacement of one it did.
+func weStarted(a *active) bool {
+	return a.role == interactivetx.Initiator || a.oursReplaced
+}
 
-	var outs []*wire.TxOut
-	for i, o := range a.res.Tx.TxOut {
-		if uint32(i) != a.fundingIndex {
-			outs = append(outs, o)
+// handOver passes the user's request, and the stream of its updates, from
+// one transaction of the splice to the one that becomes the splice.
+func handOver(from, to *active) {
+	if from == to || from.request == nil {
+		return
+	}
+	to.request, to.updates = from.request, from.updates
+	from.request, from.updates = nil, nil
+}
+
+// ourRateLimit is the highest fee rate this node pays its part of a
+// replacement of its own splice at: four times the rate it chose, or three
+// times the node's own estimate for the next blocks, whichever is higher.
+// Above that a replacement would mostly spend our money on fees.
+func (m *Machine) ourRateLimit(a *active) chainfee.SatPerKWeight {
+	chosen := a.feeRate
+	for _, c := range a.replaced {
+		chosen = min(chosen, c.feeRate)
+	}
+	limit := 4 * chosen
+	if m.cfg.Estimator != nil {
+		if fast, err := m.cfg.Estimator.EstimateFeePerKW(2); err == nil {
+			limit = max(limit, 3*fast)
 		}
 	}
 
-	// Moving out: one output, the destination.
+	return limit
+}
+
+// ourPart returns what this node puts into a replacement of a splice it
+// started: the same coins with the change left after their fee at the new
+// rate (dropped if dust), or the same amount to the same destination with
+// that output's fee from our side of the channel.
+func (m *Machine) ourPart(a *active, feeRate chainfee.SatPerKWeight) (
+	btcutil.Amount, []Coin, []interactivetx.Output, error) {
+
+	outs := a.ourOutputs
+	if len(outs) == 0 && a.role == interactivetx.Initiator {
+		// A record from before our outputs were kept: in M1 the peer
+		// adds nothing to our splices, so every output but the
+		// funding one is ours.
+		for i, o := range a.res.Tx.TxOut {
+			if uint32(i) != a.fundingIndex {
+				outs = append(outs, interactivetx.Output{
+					Value:    btcutil.Amount(o.Value),
+					PkScript: o.PkScript,
+				})
+			}
+		}
+	}
+
+	// Moving out: one output, the destination, paid from our side.
 	if a.ourContribution < 0 {
 		if len(outs) != 1 {
 			return 0, nil, nil, fmt.Errorf("%d outputs moving out",
 				len(outs))
 		}
 		out := interactivetx.Output{
-			Value:    btcutil.Amount(outs[0].Value),
-			PkScript: outs[0].PkScript,
+			Value: outs[0].Value, PkScript: outs[0].PkScript,
 		}
 		fee := feeRate.FeeForWeight(lntypes.WeightUnit(
 			interactivetx.OutputWeight(out.PkScript),
 		))
+		ours := -(out.Value + fee)
+		available := m.cfg.Channel.AvailableBalance().ToSatoshis()
+		if -ours > available {
+			return 0, nil, nil, fmt.Errorf("moving %v out of %v "+
+				"available", -ours, available)
+		}
 
-		return -(out.Value + fee), nil, []interactivetx.Output{out},
-			nil
+		return ours, nil, []interactivetx.Output{out}, nil
 	}
 
 	// Adding funds: our coins, from the wallet's copy of each one's
@@ -182,11 +243,23 @@ func (m *Machine) ourPart(a *active, feeRate chainfee.SatPerKWeight) (
 		weight += interactivetx.InputWeight(witness) + peerInputMargin
 	}
 
+	// Change to the address it went to, or a new one if there was none:
+	// what isn't change must be no more than the session lets a side
+	// overpay.
 	amount := a.ourContribution
-	if len(outs) == 1 {
-		change := outs[0].PkScript
+	var change []byte
+	switch {
+	case len(outs) == 1:
+		change = outs[0].PkScript
+	case m.cfg.ChangeScript != nil:
+		if script, err := m.cfg.ChangeScript(); err == nil {
+			change = script
+		}
+	}
+	if change != nil {
 		withChange := weight + interactivetx.OutputWeight(change)
-		left := total - amount - feeRate.FeeForWeight(lntypes.WeightUnit(withChange))
+		left := total - amount -
+			feeRate.FeeForWeight(lntypes.WeightUnit(withChange))
 		if left >= m.cfg.DustLimit(change) {
 			return amount, coins, []interactivetx.Output{{
 				Value: left, PkScript: change,
@@ -255,6 +328,7 @@ func (m *Machine) forgetReplacement() {
 
 	prev := a.replaced[len(a.replaced)-1]
 	prev.replaced = a.replaced[:len(a.replaced)-1]
+	handOver(a, prev)
 	m.mu.Lock()
 	m.active = prev
 	m.mu.Unlock()
@@ -358,6 +432,7 @@ func (m *Machine) fallBackTo(prev *active, op wire.OutPoint) {
 		}
 	}
 	prev.replaced = kept
+	handOver(a, prev)
 	m.mu.Lock()
 	m.active = prev
 	m.mu.Unlock()
@@ -397,6 +472,7 @@ func (m *Machine) adopt(txid chainhash.Hash) *active {
 		a.timeout.Stop()
 	}
 	c.replaced = nil
+	handOver(a, c)
 	m.mu.Lock()
 	m.active = c
 	m.mu.Unlock()

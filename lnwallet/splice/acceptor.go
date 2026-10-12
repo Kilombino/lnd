@@ -404,8 +404,10 @@ func (m *Machine) constructionDone(res *interactivetx.Result) {
 			WeInitiated: a.role == interactivetx.Initiator,
 			Tx:          res.Tx,
 			FeeRate:     uint64(a.feeRate),
-			OurInputs:   coinOutpoints(a.ourInputs),
-			Inputs:      spliceInputs(res),
+			OurInputs:    coinOutpoints(a.ourInputs),
+			Inputs:       spliceInputs(res),
+			OursReplaced: a.oursReplaced,
+			OurOutputs:   txOutputs(a.ourOutputs),
 		},
 	}
 	if err := m.cfg.Channel.State().PutSpliceRecord(record); err != nil {
@@ -459,6 +461,18 @@ func (m *Machine) wait(result <-chan error) error {
 	case <-m.quit:
 		return errors.New("splice machine stopping")
 	}
+}
+
+// txOutputs returns the outputs as transaction outputs.
+func txOutputs(outputs []interactivetx.Output) []*wire.TxOut {
+	var outs []*wire.TxOut
+	for _, o := range outputs {
+		outs = append(outs, &wire.TxOut{
+			Value: int64(o.Value), PkScript: o.PkScript,
+		})
+	}
+
+	return outs
 }
 
 // coinOutpoints returns the coins' outpoints.

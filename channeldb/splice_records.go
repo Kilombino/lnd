@@ -120,6 +120,14 @@ type SpliceNegotiation struct {
 	// Inputs describe the transaction's inputs in its order, which
 	// signing and checking the peer's signatures need after a restart.
 	Inputs []SpliceInput
+
+	// OursReplaced is set on the peer's replacement of a splice this node
+	// started (WeInitiated is then false: the peer built it).
+	OursReplaced bool
+
+	// OurOutputs are the outputs this node added: change, or the
+	// destination of funds moved out.
+	OurOutputs []*wire.TxOut
 }
 
 // SpliceInput is an input of a splice transaction as negotiated.
@@ -146,6 +154,7 @@ const (
 	negBroadcastHeightType tlv.Type = 6
 	negLockedType          tlv.Type = 7
 	negInputsType          tlv.Type = 8
+	negOurOutputsType      tlv.Type = 9
 )
 
 // encode serializes a negotiation as a TLV stream.
@@ -156,6 +165,9 @@ func (n *SpliceNegotiation) encode(w io.Writer) error {
 	)
 	if n.WeInitiated {
 		flags |= 1
+	}
+	if n.OursReplaced {
+		flags |= 2
 	}
 	records = append(records, tlv.MakePrimitiveRecord(
 		negWeInitiatedType, &flags,
@@ -250,6 +262,24 @@ func (n *SpliceNegotiation) encode(w io.Writer) error {
 		))
 	}
 
+	if len(n.OurOutputs) > 0 {
+		var b bytes.Buffer
+		for _, o := range n.OurOutputs {
+			err := WriteElements(&b, uint64(o.Value),
+				uint16(len(o.PkScript)))
+			if err != nil {
+				return err
+			}
+			if _, err := b.Write(o.PkScript); err != nil {
+				return err
+			}
+		}
+		outputs := b.Bytes()
+		records = append(records, tlv.MakePrimitiveRecord(
+			negOurOutputsType, &outputs,
+		))
+	}
+
 	stream, err := tlv.NewStream(records...)
 	if err != nil {
 		return err
@@ -266,6 +296,7 @@ func decodeSpliceNegotiation(r io.Reader) (*SpliceNegotiation, error) {
 		tx, inputs         []byte
 		ourSigs, theirSigs []byte
 		spliceInputs       []byte
+		ourOutputs         []byte
 	)
 	stream, err := tlv.NewStream(
 		tlv.MakePrimitiveRecord(negWeInitiatedType, &flags),
@@ -279,6 +310,7 @@ func decodeSpliceNegotiation(r io.Reader) (*SpliceNegotiation, error) {
 		),
 		tlv.MakePrimitiveRecord(negLockedType, &locked),
 		tlv.MakePrimitiveRecord(negInputsType, &spliceInputs),
+		tlv.MakePrimitiveRecord(negOurOutputsType, &ourOutputs),
 	)
 	if err != nil {
 		return nil, err
@@ -288,6 +320,7 @@ func decodeSpliceNegotiation(r io.Reader) (*SpliceNegotiation, error) {
 	}
 
 	n.WeInitiated = flags&1 != 0
+	n.OursReplaced = flags&2 != 0
 	n.LockedSent = locked&1 != 0
 	n.LockedReceived = locked&2 != 0
 
@@ -347,6 +380,23 @@ func decodeSpliceNegotiation(r io.Reader) (*SpliceNegotiation, error) {
 	}
 	if n.TheirTxSignatures, err = sigs(theirSigs); err != nil {
 		return nil, err
+	}
+
+	for rd := bytes.NewReader(ourOutputs); rd.Len() > 0; {
+		var (
+			value     uint64
+			scriptLen uint16
+		)
+		if err := ReadElements(rd, &value, &scriptLen); err != nil {
+			return nil, err
+		}
+		script := make([]byte, scriptLen)
+		if _, err := io.ReadFull(rd, script); err != nil {
+			return nil, err
+		}
+		n.OurOutputs = append(n.OurOutputs, &wire.TxOut{
+			Value: int64(value), PkScript: script,
+		})
 	}
 
 	return &n, nil

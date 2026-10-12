@@ -47,7 +47,7 @@ type ProtocolOptions struct {
 	// SplicePeerInputConfs is how many confirmations a splice the peer put
 	// coins into must have before the peer may spend them through us: a
 	// reorganisation could take them back after we paid out.
-	SplicePeerInputConfs uint32 `long:"splice-peer-input-confs" description:"the confirmations a splice the peer put coins into needs before HTLCs from the peer may spend them; until then they are failed back (0 lets them through once the splice locks)"`
+	SplicePeerInputConfs uint32 `long:"splice-peer-input-confs" description:"the confirmations a splice the peer put coins into needs before HTLCs from the peer may spend them, failed back until then; the splice also locks deeper, up to this, the more the peer put in (0: neither)"`
 
 	// NoAnchors should be set if we don't want to support opening or accepting
 	// channels having the anchor commitment type.

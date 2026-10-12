@@ -86,22 +86,26 @@ func TestSetSpliceDepth(t *testing.T) {
 }
 
 // TestSpliceLockDepth checks the lock depth: 6 at least, the channel's own
-// when larger, and up to 36 by the coins the peer put in.
+// when larger, and up to the hold's depth by the coins the peer put in.
 func TestSpliceLockDepth(t *testing.T) {
 	t.Parallel()
 
-	require.Equal(t, uint32(6), spliceLockDepth(3, 0))
-	require.Equal(t, uint32(8), spliceLockDepth(8, 0))
-	require.Equal(t, uint32(6), spliceLockDepth(3, -5))
+	require.Equal(t, uint32(6), spliceLockDepth(3, 0, 36))
+	require.Equal(t, uint32(8), spliceLockDepth(8, 0, 36))
+	require.Equal(t, uint32(6), spliceLockDepth(3, -5, 36))
 
 	// A sat of the peer's is a block more; half a channel's worth 15.
-	require.Equal(t, uint32(7), spliceLockDepth(3, 1))
-	require.Equal(t, uint32(21), spliceLockDepth(3, 16_777_215/2))
-	require.Equal(t, uint32(36), spliceLockDepth(3, 16_777_215))
-	require.Equal(t, uint32(36), spliceLockDepth(3, 1_000_000_000))
+	require.Equal(t, uint32(7), spliceLockDepth(3, 1, 36))
+	require.Equal(t, uint32(21), spliceLockDepth(3, 16_777_215/2, 36))
+	require.Equal(t, uint32(36), spliceLockDepth(3, 16_777_215, 36))
+	require.Equal(t, uint32(36), spliceLockDepth(3, 1_000_000_000, 36))
 
 	// The channel's own depth wins when larger.
-	require.Equal(t, uint32(40), spliceLockDepth(40, 1_000_000))
+	require.Equal(t, uint32(40), spliceLockDepth(40, 1_000_000, 36))
+
+	// The ceiling is the hold's depth: none held, none deeper.
+	require.Equal(t, uint32(16), spliceLockDepth(3, 1_000_000_000, 16))
+	require.Equal(t, uint32(6), spliceLockDepth(3, 1_000_000_000, 0))
 }
 
 // TestSpliceBalances checks what a splice adds to the channel balance's
