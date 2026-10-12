@@ -360,6 +360,12 @@ func (m *Machine) constructionFailed(err error) {
 
 	case errors.Is(err, interactivetx.ErrNotOurTurn):
 		m.warnAndDisconnect("%v", err)
+
+		// A replacement: the splice it was to replace stays.
+		if len(m.active.replaced) > 0 {
+			m.forgetReplacement()
+			return
+		}
 		m.setActive(nil)
 
 		return

@@ -333,6 +333,12 @@ func (m *Machine) handleReestablish(msg *lnwire.ChannelReestablish) {
 			m.handleSpliceLocked(f.Txid)
 		}
 
+		// The peer locked an earlier transaction of the splice: noted
+		// as its splice_locked would be.
+		if c := m.candidate(f.Txid); c != nil {
+			m.candidateLocked(c)
+		}
+
 		// The peer asks for our half of the announcement on the
 		// funding a splice moved the channel to.
 		state := m.cfg.Channel.State()
@@ -372,8 +378,19 @@ func (m *Machine) restore() error {
 	if len(attempts) == 0 {
 		return nil
 	}
-	sort.Slice(attempts, func(i, j int) bool {
-		return attempts[i].feeRate < attempts[j].feeRate
+	// The latest is the one not yet signed both ways, if any (only the
+	// latest can be); else the highest fee rate, then the highest fee.
+	// Equal ones were both signed and published: either does.
+	sort.SliceStable(attempts, func(i, j int) bool {
+		si, sj := signedBoth(attempts[i]), signedBoth(attempts[j])
+		switch {
+		case si != sj:
+			return si
+		case attempts[i].feeRate != attempts[j].feeRate:
+			return attempts[i].feeRate < attempts[j].feeRate
+		default:
+			return attempts[i].res.Fee < attempts[j].res.Fee
+		}
 	})
 	a := attempts[len(attempts)-1]
 	for _, c := range attempts[:len(attempts)-1] {
@@ -411,6 +428,11 @@ func (m *Machine) restore() error {
 	}
 
 	return nil
+}
+
+// signedBoth reports whether both sides' tx_signatures are in.
+func signedBoth(a *active) bool {
+	return a.ourTxSigs != nil && a.theirTxSigs != nil
 }
 
 // restoredActive rebuilds a splice transaction from its record.
@@ -531,7 +553,16 @@ const (
 // otherwise only go out again at restart), and its inputs are watched for a
 // spend by another transaction, which kills it.
 func (m *Machine) watchPending(heightHint uint32) {
-	a := m.active
+	m.watchPendingOf(m.active, heightHint)
+}
+
+// watchPendingOf starts watchPending's work for a transaction of the
+// splice, once.
+func (m *Machine) watchPendingOf(a *active, heightHint uint32) {
+	if a.pendingWatched {
+		return
+	}
+	a.pendingWatched = true
 	txid := a.txid
 
 	m.wg.Add(1)
@@ -649,7 +680,7 @@ func (m *Machine) watchInput(txid chainhash.Hash, op wire.OutPoint,
 		if !dead {
 			return
 		}
-		m.enqueue(func() { m.spliceDead(txid, conflict) })
+		m.enqueue(func() { m.spliceDead(txid, conflict, op) })
 
 		forget, reorged := m.waitDepth(conflict, outScript, forgetDepth,
 			height)
@@ -692,15 +723,33 @@ func (m *Machine) waitDepth(txid chainhash.Hash, script []byte,
 // spliceDead gives up on a splice one of whose inputs another transaction
 // spent: it leaves the channel's funding set, and its coins and wallet trace
 // wait for forgetDead.
-func (m *Machine) spliceDead(txid, conflict chainhash.Hash) {
+func (m *Machine) spliceDead(txid, conflict chainhash.Hash,
+	op wire.OutPoint) {
+
 	a := m.active
-	if a == nil || a.txid != txid {
+	switch {
+	case a == nil:
+		return
+
+	// Spent by another transaction of the same splice: that one is the
+	// splice, adopted at its lock depth.
+	case conflict == a.txid || m.candidate(conflict) != nil:
+		return
+
+	// An earlier transaction of the splice spent elsewhere: no longer a
+	// candidate.
+	case m.candidate(txid) != nil:
+		m.dropCandidate(m.candidate(txid))
+		return
+
+	case a.txid != txid:
 		return
 	}
 
-	// Spent by an earlier transaction of the same splice: that one is
-	// the splice, adopted at its lock depth.
-	if m.candidate(conflict) != nil {
+	// The latest transaction is dead; an earlier one that doesn't spend
+	// that input is the splice again.
+	if prev := m.liveCandidate(op); prev != nil {
+		m.fallBackTo(prev, op)
 		return
 	}
 

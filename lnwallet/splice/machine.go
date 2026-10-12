@@ -337,6 +337,10 @@ type active struct {
 	// watching is set once the splice's confirmations are watched.
 	watching bool
 
+	// pendingWatched is set once the transaction is republished at every
+	// block and its inputs watched (watchPendingOf).
+	pendingWatched bool
+
 	// broadcastHeight is when we first published it, from its record
 	// after a restart.
 	broadcastHeight uint32

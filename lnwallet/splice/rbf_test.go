@@ -3,6 +3,7 @@
 package splice
 
 import (
+	"github.com/btcsuite/btcd/wire"
 	"testing"
 	"time"
 
@@ -70,6 +71,17 @@ func replaceAliceSplice(t *testing.T, h *acceptorHarness, prev *aliceSplice,
 
 	t.Helper()
 
+	return replaceAliceSpliceWith(t, h, prev, bobKey, feeRate, nil)
+}
+
+// replaceAliceSpliceWith is replaceAliceSplice with more coins of Alice's
+// in the replacement.
+func replaceAliceSpliceWith(t *testing.T, h *acceptorHarness,
+	prev *aliceSplice, bobKey *btcec.PublicKey,
+	feeRate chainfee.SatPerKWeight, extra []Coin) *aliceSplice {
+
+	t.Helper()
+
 	amount := prev.sel.Contribution
 	h.machine.HandleSpliceMessage(&lnwire.TxInitRbf{
 		ChannelID:                 h.machine.cfg.ChanID,
@@ -106,6 +118,16 @@ func replaceAliceSplice(t *testing.T, h *acceptorHarness, prev *aliceSplice,
 		FundingScript:       newOut.PkScript,
 	}, []Coin{s.coin}, amount, false, feeRate, s.change, dustLimit)
 	require.NoError(t, err)
+	if len(extra) > 0 {
+		// Every coin in, a fee within the session's bounds out of
+		// the change.
+		total := s.coin.Value
+		for _, c := range extra {
+			total += c.Value
+			h.chain.outs[c.OutPoint] = c.PrevTx.TxOut[0]
+		}
+		s.sel.Change = total - amount - 5_000
+	}
 
 	s.session, err = interactivetx.NewSession(interactivetx.Config{
 		Role:      interactivetx.Initiator,
@@ -135,6 +157,13 @@ func replaceAliceSplice(t *testing.T, h *acceptorHarness, prev *aliceSplice,
 		PkScript: s.coin.PkScript, Sequence: interactivetx.MaxSequence,
 		MaxWitnessWeight: input.P2WKHWitnessSize, PrevTx: s.coin.PrevTx,
 	})
+	for _, c := range extra {
+		s.session.AddLocalInput(interactivetx.Input{
+			OutPoint: c.OutPoint, Value: c.Value,
+			PkScript: c.PkScript, Sequence: interactivetx.MaxSequence,
+			MaxWitnessWeight: input.P2WKHWitnessSize, PrevTx: c.PrevTx,
+		})
+	}
 	if s.sel.Change > 0 {
 		s.session.AddLocalOutput(interactivetx.Output{
 			Value: s.sel.Change, PkScript: s.change,
@@ -310,19 +339,16 @@ func TestAcceptSpliceReplacementRefused(t *testing.T) {
 		})
 	}
 
-	// A replacement paying less in fees than what it replaces is
-	// refused once built; one paying the same, as the Core Lightning port
-	// sends at the fee floor, is a fine candidate.
-	t.Run("less in fees", func(t *testing.T) {
+	// A replacement at a falling fee rate is refused at once.
+	t.Run("a falling fee rate", func(t *testing.T) {
 		t.Parallel()
 
 		h := newAcceptorHarness(t)
 		first := startAliceSplice(t, h, 40_000_000, 2_500)
 		first.construct(t, h)
-		bobKey := signSplice(t, h, first, nil)
+		signSplice(t, h, first, nil)
 
-		second := replaceAliceSplice(t, h, first, bobKey, 2_000)
-		second.construct(t, h)
+		rbf(h, 2_000)
 		require.Contains(t, abortReason(t, h), codeFeeBelowFloor)
 		requireResumed(t, h)
 		require.Len(t, h.bob.PendingFundings(), 1)
@@ -371,4 +397,196 @@ func TestAcceptSpliceReplacementRefused(t *testing.T) {
 		rbf(h, 5_000)
 		require.Contains(t, abortReason(t, h), codeRbfUnsupported)
 	})
+}
+
+// TestCheckReplacementFee checks that a replacement must pay at least the
+// total fee of what it replaces.
+func TestCheckReplacementFee(t *testing.T) {
+	t.Parallel()
+
+	prev := &active{res: &interactivetx.Result{Fee: 1_000}}
+	m := &Machine{active: &active{replaced: []*active{prev}}}
+
+	require.NoError(t, m.checkReplacementFee(&interactivetx.Result{Fee: 1_000}))
+	require.NoError(t, m.checkReplacementFee(&interactivetx.Result{Fee: 1_001}))
+	require.Error(t, m.checkReplacementFee(&interactivetx.Result{Fee: 999}))
+
+	// Not a replacement: nothing to compare.
+	m.active.replaced = nil
+	require.NoError(t, m.checkReplacementFee(&interactivetx.Result{Fee: 1}))
+}
+
+// TestAcceptSpliceReplacedEdges checks the replacement's harder cases: a
+// restart in the middle of signing an equal-rate replacement, the peer's
+// lock of the original named in channel_reestablish, a replacement whose
+// own coin is spent elsewhere, a replacement dropped after a restart, and a
+// replacement whose construction breaks.
+func TestAcceptSpliceReplacedEdges(t *testing.T) {
+	t.Parallel()
+
+	restart := func(t *testing.T, h *acceptorHarness) *Machine {
+		t.Helper()
+
+		restarted := NewMachine(h.machine.cfg)
+		require.NoError(t, restarted.Start())
+		t.Cleanup(restarted.Stop)
+		h.machine.Stop()
+		h.machine = restarted
+
+		return restarted
+	}
+
+	// Our signatures out for an equal-rate replacement, Alice's not: the
+	// restarted machine takes the replacement as the latest and asks
+	// for its signatures on reconnecting.
+	t.Run("a restart while signing an equal-rate replacement",
+		func(t *testing.T) {
+			t.Parallel()
+
+			h := newAcceptorHarness(t)
+			first := startAliceSplice(t, h, 40_000_000, 2_500)
+			first.construct(t, h)
+			bobKey := signSplice(t, h, first, nil)
+			second := replaceAliceSplice(t, h, first, bobKey, 2_500)
+			second.construct(t, h)
+			commitOnly(t, h, second, bobKey)
+
+			m := restart(t, h)
+			next, _ := m.ReestablishTLVs()
+			require.Equal(t, second.res.Tx.TxHash(),
+				next.UnsafeFromSome().Txid)
+		})
+
+	// Alice locked the original and says so only in her reestablish.
+	t.Run("the peer's lock named on reconnecting", func(t *testing.T) {
+		t.Parallel()
+
+		h := newAcceptorHarness(t)
+		first, _ := rbfPair(t, h)
+		txid := first.res.Tx.TxHash()
+		h.machine.HandleReestablish(&lnwire.ChannelReestablish{
+			MyCurrentFundingLocked: fn.Some(lnwire.FundingTxidFlags{
+				Txid: txid,
+			}),
+		})
+		h.chain.confirm(t, txid, 6, 1, &chainntnfs.TxConfirmation{
+			BlockHeight: 900_006, TxIndex: 3,
+		})
+		next[*lnwire.SpliceLocked](t, h)
+		require.Eventually(t, func() bool {
+			return h.bob.State().CurrentFundingOutpoint().Hash ==
+				txid
+		}, 5*time.Second, 20*time.Millisecond)
+	})
+
+	// The replacement adds a coin the original doesn't spend; spent
+	// elsewhere, the replacement is dead and the original the splice.
+	t.Run("a dead replacement falls back", func(t *testing.T) {
+		t.Parallel()
+
+		h := newAcceptorHarness(t)
+		first := startAliceSplice(t, h, 40_000_000, 2_500)
+		first.construct(t, h)
+		bobKey := signSplice(t, h, first, nil)
+		extra := coin(78, first.coin.PkScript, 1_000_000)
+		second := replaceAliceSpliceWith(t, h, first, bobKey, 2_600,
+			[]Coin{extra})
+		second.construct(t, h)
+		signSplice(t, h, second, bobKey)
+		require.Len(t, h.bob.PendingFundings(), 2)
+
+		elsewhere := wire.NewMsgTx(2)
+		elsewhere.AddTxIn(&wire.TxIn{PreviousOutPoint: extra.OutPoint})
+		elsewhere.AddTxOut(&wire.TxOut{Value: 900_000, PkScript: p2tr(9)})
+		h.chain.spend(t, extra.OutPoint, elsewhere, 1)
+		h.chain.confirm(t, elsewhere.TxHash(), deadDepth, 1,
+			&chainntnfs.TxConfirmation{})
+
+		require.Eventually(t, func() bool {
+			return len(h.bob.PendingFundings()) == 1
+		}, 5*time.Second, 10*time.Millisecond)
+		require.Equal(t, first.res.Tx.TxHash(),
+			h.bob.PendingFundings()[0].OutPoint.Hash)
+		lockOn(t, h, first)
+	})
+
+	// After a restart the replacement, signed by neither, is dropped:
+	// the original, a candidate only since the restart, is published
+	// and watched again.
+	t.Run("a replacement dropped after a restart", func(t *testing.T) {
+		t.Parallel()
+
+		h := newAcceptorHarness(t)
+		first := startAliceSplice(t, h, 40_000_000, 2_500)
+		first.construct(t, h)
+		bobKey := signSplice(t, h, first, nil)
+		second := replaceAliceSplice(t, h, first, bobKey, 2_600)
+		second.construct(t, h)
+		<-h.link.commits
+
+		restart(t, h)
+		h.machine.HandleReestablish(&lnwire.ChannelReestablish{})
+		before := h.wallet.publishCount()
+		h.machine.HandleSpliceMessage(&lnwire.TxAbort{
+			ChannelID: h.machine.cfg.ChanID, Data: []byte("nah"),
+		})
+		next[*lnwire.TxAbort](t, h)
+		require.Eventually(t, func() bool {
+			return h.wallet.publishCount() > before
+		}, 5*time.Second, 10*time.Millisecond)
+		require.Len(t, h.bob.PendingFundings(), 1)
+		lockOn(t, h, first)
+	})
+
+	// A replacement whose construction breaks (a tx_complete before the
+	// shared input, then a message outside any negotiation): the peer is
+	// dropped, the original stays the splice.
+	t.Run("a broken construction", func(t *testing.T) {
+		t.Parallel()
+
+		h := newAcceptorHarness(t)
+		first := startAliceSplice(t, h, 40_000_000, 2_500)
+		first.construct(t, h)
+		bobKey := signSplice(t, h, first, nil)
+		replaceAliceSplice(t, h, first, bobKey, 2_600)
+
+		// Alice's construction never starts properly.
+		h.machine.HandleSpliceMessage(&lnwire.TxComplete{
+			ChannelID: h.machine.cfg.ChanID,
+		})
+		h.machine.HandleSpliceMessage(&lnwire.TxComplete{
+			ChannelID: h.machine.cfg.ChanID,
+		})
+		requireDisconnected(t, h)
+		require.Len(t, h.bob.PendingFundings(), 1)
+		h.machine.mu.Lock()
+		a := h.machine.active
+		h.machine.mu.Unlock()
+		require.NotNil(t, a)
+		require.Equal(t, first.res.Tx.TxHash(), a.txid)
+	})
+}
+
+// commitOnly runs a replacement's commitment exchange and Bob's
+// tx_signatures, keeping Alice's back.
+func commitOnly(t *testing.T, h *acceptorHarness, s *aliceSplice,
+	bobKey *btcec.PublicKey) {
+
+	t.Helper()
+
+	txid := s.res.Tx.TxHash()
+	bobCommit := <-h.link.commits
+	require.NoError(t, h.alice.AddPendingFunding(
+		s.pendingFunding(h, bobKey),
+	))
+	require.NoError(t, h.alice.ReceiveSpliceCommitment(txid,
+		&lnwallet.CommitSigs{
+			CommitSig: bobCommit.CommitSig,
+			HtlcSigs:  bobCommit.HtlcSigs,
+		}))
+	aliceSigs, err := h.alice.SignSpliceCommitment(t.Context(), txid)
+	require.NoError(t, err)
+	h.machine.SpliceCommitReceived(txid,
+		h.bob.ReceiveSpliceCommitment(txid, aliceSigs))
+	require.Equal(t, txid, next[*lnwire.TxSignatures](t, h).TxID)
 }

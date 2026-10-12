@@ -1,7 +1,10 @@
 package splice
 
 import (
+	"errors"
 	"fmt"
+	"github.com/btcsuite/btcd/wire"
+	"github.com/lightningnetwork/lnd/lnwallet"
 
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
@@ -100,6 +103,15 @@ func (m *Machine) checkTxInitRbf(msg *lnwire.TxInitRbf) (string, string) {
 	case m.cfg.Disabled:
 		return codeDisabled, ""
 
+	case m.misbehaved || m.cfg.Limits.isMisbehaved(m.cfg.ChanID):
+		return codePeerMisbehaved, ""
+
+	// The rate may stay (the Core Lightning port replaces at the fee
+	// floor), not fall.
+	case chainfee.SatPerKWeight(msg.FeeRatePerKw) < a.feeRate:
+		return codeFeeBelowFloor, fmt.Sprintf("%d sat/kw replacing %v",
+			msg.FeeRatePerKw, a.feeRate)
+
 	case m.cfg.Chain != nil && !m.cfg.Chain.Synced():
 		return codeChainNotSynced, ""
 	}
@@ -123,10 +135,7 @@ func (m *Machine) forgetReplacement() {
 		a.timeout.Stop()
 	}
 	if a.res != nil {
-		err := m.cfg.Channel.RemovePendingFunding(a.txid)
-		if err != nil {
-			m.forgetRecord(a.txid)
-		}
+		m.removeFunding(a.txid)
 	}
 
 	prev := a.replaced[len(a.replaced)-1]
@@ -137,7 +146,111 @@ func (m *Machine) forgetReplacement() {
 	log.Infof("ChannelID(%v): replacement of splice %v dropped: %v",
 		m.cfg.ChanID, prev.txid, a.abortReason)
 
+	m.ensurePending()
 	m.resume()
+}
+
+// removeFunding drops a transaction of the splice from the channel's
+// funding set, and its record.
+func (m *Machine) removeFunding(txid chainhash.Hash) {
+	err := m.cfg.Channel.RemovePendingFunding(txid)
+	switch {
+	case errors.Is(err, lnwallet.ErrUnknownFunding):
+		m.forgetRecord(txid)
+
+	case err != nil:
+		log.Errorf("ChannelID(%v): unable to drop splice %v: %v",
+			m.cfg.ChanID, txid, err)
+	}
+}
+
+// ensurePending republishes the splice's transaction and starts watching
+// it, if that isn't running: for one that became the splice again, or that
+// a restart left as a candidate only.
+func (m *Machine) ensurePending() {
+	a := m.active
+	if a == nil || a.phase != phasePending || a.pendingWatched {
+		return
+	}
+	if tx, err := m.signedTx(); err == nil {
+		m.publish(tx)
+	}
+	height := a.broadcastHeight
+	if height == 0 {
+		height, _ = m.cfg.Chain.BestHeight()
+	}
+	m.watchConfirmationOf(a, height)
+	m.watchPendingOf(a, height)
+}
+
+// dropCandidate drops an earlier transaction of the splice that can no
+// longer confirm: one of its inputs was spent elsewhere.
+func (m *Machine) dropCandidate(c *active) {
+	a := m.active
+	kept := a.replaced[:0]
+	for _, r := range a.replaced {
+		if r != c {
+			kept = append(kept, r)
+		}
+	}
+	m.mu.Lock()
+	a.replaced = kept
+	m.mu.Unlock()
+	m.removeFunding(c.txid)
+	log.Infof("ChannelID(%v): splice candidate %v can no longer confirm",
+		m.cfg.ChanID, c.txid)
+}
+
+// liveCandidate returns the newest earlier transaction of the splice that
+// doesn't spend op.
+func (m *Machine) liveCandidate(op wire.OutPoint) *active {
+	a := m.active
+	for i := len(a.replaced) - 1; i >= 0; i-- {
+		if !spends(a.replaced[i], op) {
+			return a.replaced[i]
+		}
+	}
+
+	return nil
+}
+
+// spends reports whether a transaction of the splice spends op.
+func spends(a *active, op wire.OutPoint) bool {
+	for _, in := range a.res.Inputs {
+		if in.OutPoint == op {
+			return true
+		}
+	}
+
+	return false
+}
+
+// fallBackTo makes an earlier transaction of the splice the splice again:
+// the latest is dead, op having been spent elsewhere. Candidates spending
+// op go too.
+func (m *Machine) fallBackTo(prev *active, op wire.OutPoint) {
+	a := m.active
+	m.removeFunding(a.txid)
+
+	var kept []*active
+	for _, c := range a.replaced {
+		switch {
+		case c == prev:
+		case spends(c, op):
+			m.removeFunding(c.txid)
+		default:
+			kept = append(kept, c)
+		}
+	}
+	prev.replaced = kept
+	m.mu.Lock()
+	m.active = prev
+	m.mu.Unlock()
+	log.Warnf("ChannelID(%v): splice replacement %v can no longer "+
+		"confirm (%v spent elsewhere); %v is the splice again",
+		m.cfg.ChanID, a.txid, op, prev.txid)
+
+	m.ensurePending()
 }
 
 // candidate returns the earlier transaction of the splice with txid, if
@@ -179,6 +292,7 @@ func (m *Machine) adopt(txid chainhash.Hash) *active {
 	if a.phase != phasePending {
 		m.resume()
 	}
+	m.ensurePending()
 
 	return c
 }
