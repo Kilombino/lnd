@@ -721,6 +721,9 @@ func DefaultConfig() Config {
 			UserAgentName:    neutrino.UserAgentName,
 			UserAgentVersion: neutrino.UserAgentVersion,
 			MaxPeers:         defaultNeutrinoMaxPeers,
+			// Checked against the chain by default on this fork:
+			// see initNeutrinoBackend.
+			ValidateChannels: true,
 		},
 		BlockCacheSize:     defaultBlockCacheSize,
 		MaxPendingChannels: lncfg.DefaultMaxPendingChannels,
@@ -1508,7 +1511,8 @@ func ValidateConfig(cfg Config, interceptor signal.Interceptor, fileParser,
 
 	default:
 		str := "only bitcoind (a Bitcoin Knots node on the Bitcoin " +
-			"BLAKE2b chain) and nochainbackend are supported"
+			"BLAKE2b chain), neutrino and nochainbackend are " +
+			"supported"
 
 		return nil, mkErr(str)
 	}
