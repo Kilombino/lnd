@@ -57,7 +57,7 @@ jobs:
             . ./chainreg/... ./discovery/... ./feature/... ./funding/... \
             ./graph/... ./input/... ./lnwire/... ./netann/... ./legacychain/... \
             ./lnwallet ./lnwallet/btcwallet/... ./lnwallet/chanfunding/... \
-            ./lnwallet/interactivetx/... ./channeldb/... \
+            ./lnwallet/interactivetx/... ./lnwallet/splice/... ./channeldb/... \
             ./lnwallet/rpcwallet/... ./zpay32/... ./bolt12/... \
             ./offers/... ./offerpay/... ./offerserve/... ./chanbackup/... \
             ./routing/... ./peer/... ./sweep/... ./contractcourt/... \

@@ -870,12 +870,12 @@ type sideWeights struct {
 func (s *Session) weights(res *Result) sideWeights {
 	var w sideWeights
 
-	common := commonWeight(len(res.Inputs), len(res.Outputs))
+	common := CommonWeight(len(res.Inputs), len(res.Outputs))
 	w.initiator += common
 	w.total += common
 
 	for _, in := range res.Inputs {
-		iw := inputWeight(in)
+		iw := InputWeight(in.MaxWitnessWeight)
 		w.total += iw
 		if in.Shared || addedBy(in.SerialID) == Initiator {
 			w.initiator += iw
@@ -884,7 +884,7 @@ func (s *Session) weights(res *Result) sideWeights {
 		}
 	}
 	for _, out := range res.Outputs {
-		ow := outputWeight(out.PkScript)
+		ow := OutputWeight(out.PkScript)
 		w.total += ow
 		if out.Funding || addedBy(out.SerialID) == Initiator {
 			w.initiator += ow
@@ -896,23 +896,25 @@ func (s *Session) weights(res *Result) sideWeights {
 	return w
 }
 
-// commonWeight is the weight of the fields every transaction has: version,
-// locktime, the input and output counts, and the segwit marker and flag.
-func commonWeight(numInputs, numOutputs int) int64 {
+// CommonWeight is the weight of the fields every transaction has: version,
+// locktime, the input and output counts, and the segwit marker and flag. The
+// initiator pays for it.
+func CommonWeight(numInputs, numOutputs int) int64 {
 	base := 4 + 4 + wire.VarIntSerializeSize(uint64(numInputs)) +
 		wire.VarIntSerializeSize(uint64(numOutputs))
 
 	return int64(base)*4 + 2
 }
 
-// inputWeight is an input's weight with its largest witness.
-func inputWeight(in *Input) int64 {
+// InputWeight is the weight of an input whose largest witness weighs
+// maxWitnessWeight.
+func InputWeight(maxWitnessWeight int64) int64 {
 	// Outpoint, empty scriptSig length, sequence.
-	return (32+4+1+4)*4 + in.MaxWitnessWeight
+	return (32+4+1+4)*4 + maxWitnessWeight
 }
 
-// outputWeight is an output's weight.
-func outputWeight(pkScript []byte) int64 {
+// OutputWeight is an output's weight.
+func OutputWeight(pkScript []byte) int64 {
 	size := 8 + wire.VarIntSerializeSize(uint64(len(pkScript))) +
 		len(pkScript)
 
