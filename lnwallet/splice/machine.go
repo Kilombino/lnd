@@ -170,6 +170,11 @@ type Config struct {
 	// Policy is this node's splice policy.
 	Policy Policy
 
+	// Disabled refuses new splices, ours and the peer's, while a splice
+	// already started carries on: splicing was turned off with one
+	// pending somewhere.
+	Disabled bool
+
 	// NotifyEvent, if set, is told of each step of the channel's splices:
 	// "started", "signed", "locked", "aborted".
 	NotifyEvent func(kind string, txid chainhash.Hash, reason string,
@@ -187,6 +192,7 @@ func (m *Machine) notify(kind string, txid chainhash.Hash, reason string,
 
 // Refusal codes, sent as tx_abort's reason and reported to the user.
 const (
+	codeDisabled          = "disabled"
 	codeNoUnifiedSigs     = "no_unified_sigs"
 	codeTaproot           = "taproot"
 	codeZeroConf          = "zero_conf"
@@ -597,6 +603,9 @@ func (m *Machine) currentFunding() (wire.OutPoint, btcutil.Amount, []byte,
 func (m *Machine) spliceable() string {
 	state := m.cfg.Channel.State()
 	switch {
+	case m.cfg.Disabled:
+		return codeDisabled
+
 	case !state.ChanType.HasUnifiedSigs():
 		return codeNoUnifiedSigs
 

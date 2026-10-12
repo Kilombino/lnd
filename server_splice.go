@@ -9,6 +9,7 @@ import (
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightningnetwork/lnd/chainntnfs"
+	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/channelnotifier"
 	"github.com/lightningnetwork/lnd/lnwallet"
 	"github.com/lightningnetwork/lnd/lnwallet/splice"
@@ -100,6 +101,7 @@ func (s *server) newSpliceMachine(base splice.Config,
 
 		return err == nil
 	}
+	cfg.Disabled = !s.cfg.ProtocolOptions.Splice()
 	cfg.KeyRing = s.cc.KeyRing
 	cfg.Signer = s.cc.Signer
 	cfg.Estimator = s.cc.FeeEstimator
@@ -182,4 +184,30 @@ func (s *server) releaseForgottenSpliceLeases() error {
 	}
 
 	return nil
+}
+
+// pendingSplices reports whether any open channel has a splice to finish:
+// splicing stays advertised then, even turned off, or the peer would fail
+// the channel at the next batch or reestablish.
+func pendingSplices(db *channeldb.ChannelStateDB) bool {
+	channels, err := db.FetchAllOpenChannels()
+	if err != nil {
+		srvrLog.Errorf("Unable to read channels for pending splices: "+
+			"%v", err)
+
+		return false
+	}
+	for _, ch := range channels {
+		records, err := ch.SpliceRecords()
+		if err != nil {
+			continue
+		}
+		for _, r := range records {
+			if !r.Retired {
+				return true
+			}
+		}
+	}
+
+	return false
 }

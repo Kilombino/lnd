@@ -520,9 +520,9 @@ type Config struct {
 	// otherwise the node will disconnect.
 	QuiescenceTimeout time.Duration
 
-	// SpliceEnabled is whether this node splices: it starts splices and
-	// accepts the peer's. A channel with a splice still to finish keeps
-	// its machine when it is off.
+	// SpliceEnabled is whether this node advertises splicing: on, or
+	// kept on because a channel has a splice to finish. Each machine
+	// knows whether it may start new splices.
 	SpliceEnabled bool
 
 	// SpliceMachine returns a channel's splice machine, filling the

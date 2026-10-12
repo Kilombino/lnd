@@ -30,8 +30,9 @@ func (p *Brontide) spliceUnlocked(chanID lnwire.ChannelID) bool {
 }
 
 // spliceNegotiated reports whether splicing applies to this connection: we
-// and the peer support it, or a channel with the peer still has a splice to
-// finish, which keeps it on even after it was turned off.
+// advertise it (on, or kept on for a splice still to finish somewhere) and
+// the peer supports it. A machine that can't start new splices refuses
+// them.
 func (p *Brontide) spliceNegotiated(lnChan *lnwallet.LightningChannel) bool {
 	if !p.remoteFeatures.HasFeature(lnwire.SpliceOptional) {
 		return false

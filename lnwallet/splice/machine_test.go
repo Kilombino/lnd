@@ -734,6 +734,22 @@ func TestAcceptSpliceRefused(t *testing.T) {
 		requireDisconnected(t, h)
 	})
 
+	t.Run("splicing turned off", func(t *testing.T) {
+		t.Parallel()
+
+		h := newAcceptorHarness(t)
+		h.machine.cfg.Disabled = true
+		init(h, 1_000_000, 2_500)
+		require.Contains(t, abortReason(t, h), codeDisabled)
+		requireResumed(t, h)
+
+		_, err := h.machine.Splice(Request{
+			Direction: DirectionOut, Amount: 1_000_000,
+			FeeRate: 2_500, Destination: p2tr(1),
+		})
+		require.ErrorContains(t, err, codeDisabled)
+	})
+
 	t.Run("replacement", func(t *testing.T) {
 		t.Parallel()
 
