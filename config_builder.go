@@ -656,6 +656,7 @@ func (d *DefaultWalletImpl) BuildWalletConfig(ctx context.Context,
 			d.logger.Criticalf("Stopping: %v", err)
 			d.interceptor.RequestShutdown()
 		},
+		Shutdown: d.interceptor.ShutdownChannel(),
 	}
 
 	// Let's go ahead and create the partial chain control now that is only

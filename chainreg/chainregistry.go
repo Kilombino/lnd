@@ -80,6 +80,12 @@ type Config struct {
 	// chain. It is expected to stop the daemon.
 	OnChainMismatch func(error)
 
+	// Shutdown, when set, ends the chain-identity check's wait for the
+	// activation height: a daemon still waiting there (a node that never
+	// gets there, a light client with only SHA256d peers) must stop when
+	// asked to.
+	Shutdown <-chan struct{}
+
 	// WalletUnlockParams are the parameters that were used for unlocking
 	// the main wallet.
 	WalletUnlockParams *walletunlocker.WalletUnlockParams

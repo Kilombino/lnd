@@ -3,6 +3,7 @@ package chainreg
 import (
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/lightningnetwork/lnd/lncfg"
 	"github.com/stretchr/testify/require"
@@ -32,4 +33,31 @@ func TestChainIdentityStatusPathSelection(t *testing.T) {
 			lncfg.NormalizeNetwork(BitcoinTestNetParams.Name),
 			ChainIdentityFileName),
 		chainIdentityStatusPath(cfg))
+}
+
+// TestChainIdentityWaitStopsOnShutdown pins that a daemon still waiting for
+// the backend to reach the activation height stops when asked to.
+func TestChainIdentityWaitStopsOnShutdown(t *testing.T) {
+	shutdown := make(chan struct{})
+	cfg := &Config{
+		Bitcoin:         &lncfg.Chain{ChainDir: t.TempDir()},
+		ActiveNetParams: BitcoinMainNetParams,
+		Shutdown:        shutdown,
+	}
+	// A backend that never gets there.
+	rpc := &neutrinoIdentityRPC{
+		src:   &fakeNeutrino{height: 961000},
+		chain: "main",
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- verifyBlake2bChain(rpc, cfg, make(chan struct{})) }()
+	close(shutdown)
+
+	select {
+	case err := <-done:
+		require.ErrorContains(t, err, "shutting down")
+	case <-time.After(10 * time.Second):
+		t.Fatal("the wait did not stop on shutdown")
+	}
 }

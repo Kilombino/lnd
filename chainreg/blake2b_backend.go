@@ -49,6 +49,19 @@ func verifyBlake2bNeutrino(cs *neutrino.ChainService, cfg *Config,
 func verifyBlake2bChain(rpc blake2bChainRPC, cfg *Config,
 	quit <-chan struct{}) error {
 
+	if cfg.Shutdown != nil {
+		either := make(chan struct{})
+		stop := quit
+		go func() {
+			select {
+			case <-stop:
+			case <-cfg.Shutdown:
+			}
+			close(either)
+		}()
+		quit = either
+	}
+
 	params := cfg.ActiveNetParams
 	statusPath := chainIdentityStatusPath(cfg)
 
