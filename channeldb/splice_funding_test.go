@@ -227,3 +227,136 @@ func TestLockSpliceRefused(t *testing.T) {
 	// The same lock again is fine (a retry after a crash).
 	require.NoError(t, b.LockSplice(moved))
 }
+
+// TestLockSplicePreviousFundings checks that each lock keeps the funding the
+// channel moved away from, with its keys, and that a repeated lock adds
+// nothing.
+func TestLockSplicePreviousFundings(t *testing.T) {
+	t.Parallel()
+
+	fullDB, err := MakeTestDB(t)
+	require.NoError(t, err)
+	channel := createTestChannel(t, fullDB.ChannelStateDB())
+	original := channel.FundingOutpoint
+	originalKey := channel.LocalChanCfg.MultiSigKey
+	originalCapacity := channel.Capacity
+
+	first := testSpliceLock(t, 0x81, 3_000_000)
+	require.NoError(t, channel.LockSplice(first))
+	require.NoError(t, channel.LockSplice(first))
+	second := testSpliceLock(t, 0x82, 2_000_000)
+	require.NoError(t, channel.LockSplice(second))
+
+	prev, err := channel.PreviousFundings()
+	require.NoError(t, err)
+	require.Len(t, prev, 2)
+
+	byOutpoint := make(map[wire.OutPoint]PreviousFunding)
+	for _, f := range prev {
+		byOutpoint[f.OutPoint] = f
+	}
+	f := byOutpoint[original]
+	require.Equal(t, originalCapacity, f.Capacity)
+	require.Equal(t, first.Funding.OutPoint, f.LockedTo)
+	require.True(t, originalKey.PubKey.IsEqual(f.LocalKey.PubKey))
+	require.Equal(t, originalKey.KeyLocator, f.LocalKey.KeyLocator)
+
+	f = byOutpoint[first.Funding.OutPoint]
+	require.Equal(t, first.Capacity, f.Capacity)
+	require.Equal(t, second.Funding.OutPoint, f.LockedTo)
+	require.True(t, first.RemoteMultiSigKey.PubKey.IsEqual(f.RemoteKey))
+}
+
+// TestLockSpliceSwapsCommitments checks a lock with commitments: the
+// channel's commitments, and a pending one with our signatures from the
+// splice's record, move to the new funding in the same transaction, the
+// splice records go, and inconsistent locks change nothing.
+func TestLockSpliceSwapsCommitments(t *testing.T) {
+	t.Parallel()
+
+	fullDB, err := MakeTestDB(t)
+	require.NoError(t, err)
+	cdb := fullDB.ChannelStateDB()
+	channel := createTestChannel(t, cdb)
+
+	r := testSpliceRecord(t, channel)
+	lock := testSpliceLock(t, 0, 0)
+	lock.Funding.OutPoint = r.OutPoint
+	lock.Capacity = r.Capacity
+	lock.LocalMultiSigKey = r.LocalKey
+	lock.RemoteMultiSigKey = keychain.KeyDescriptor{PubKey: r.RemoteKey}
+
+	local := spliceTestCommit(
+		channel.LocalCommitment, channel.LocalCommitment.CommitHeight,
+		r.OutPoint, 4e8,
+	)
+	remote := spliceTestCommit(
+		channel.RemoteCommitment,
+		channel.RemoteCommitment.CommitHeight, r.OutPoint, 3e8,
+	)
+	tip := spliceTestCommit(
+		channel.RemoteCommitment,
+		channel.RemoteCommitment.CommitHeight+1, r.OutPoint, 2e8,
+	)
+	tipSig := &lnwire.CommitSig{
+		ChanID: lnwire.ChannelID{5}, CommitSig: wireSig,
+		HtlcSigs: []lnwire.Sig{wireSig},
+	}
+	r.RemoteTip, r.RemoteTipSig = tip, tipSig
+	require.NoError(t, channel.PutSpliceRecord(r))
+
+	// A pending commitment for the peer on the current funding.
+	pending := channel.RemoteCommitment
+	pending.CommitHeight++
+	require.NoError(t, channel.AppendRemoteCommitChain(&CommitDiff{
+		Commitment: pending,
+		CommitSig: &lnwire.CommitSig{
+			ChanID: lnwire.ChannelID(key), CommitSig: wireSig,
+		},
+	}))
+
+	// Inconsistent locks are refused and change nothing.
+	bad := lock
+	bad.LocalCommit, bad.RemoteCommit = local, remote
+	require.Error(t, channel.LockSplice(bad), "without the tip")
+
+	bad.RemoteTip = tip
+	bad.RemoteCommit = nil
+	require.Error(t, channel.LockSplice(bad), "without remote")
+
+	bad.RemoteCommit = spliceTestCommit(
+		channel.RemoteCommitment,
+		channel.RemoteCommitment.CommitHeight+5, r.OutPoint, 3e8,
+	)
+	require.Error(t, channel.LockSplice(bad), "other height")
+
+	fetched, err := cdb.FetchChannel(channel.FundingOutpoint)
+	require.NoError(t, err)
+	require.True(t, fetched.SpliceFundingInfo().IsNone())
+	records, err := fetched.SpliceRecords()
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+
+	// The consistent lock.
+	good := lock
+	good.LocalCommit, good.RemoteCommit, good.RemoteTip = local, remote, tip
+	require.NoError(t, channel.LockSplice(good))
+
+	fetched, err = cdb.FetchChannel(r.OutPoint)
+	require.NoError(t, err)
+	require.Equal(t, r.OutPoint, fetched.CurrentFundingOutpoint())
+	require.Equal(t, local.CommitTx.TxHash(),
+		fetched.LocalCommitment.CommitTx.TxHash())
+	require.Equal(t, remote.CommitTx.TxHash(),
+		fetched.RemoteCommitment.CommitTx.TxHash())
+
+	diff, err := fetched.RemoteCommitChainTip()
+	require.NoError(t, err)
+	require.Equal(t, tip.CommitTx.TxHash(),
+		diff.Commitment.CommitTx.TxHash())
+	requireSigEqual(t, tipSig, diff.CommitSig)
+
+	records, err = fetched.SpliceRecords()
+	require.NoError(t, err)
+	require.Empty(t, records)
+}

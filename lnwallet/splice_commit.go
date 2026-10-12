@@ -1018,3 +1018,86 @@ func (lc *LightningChannel) minAvailableOnPendingFundings(view *HtlcView,
 
 	return available
 }
+
+// LockPendingFunding completes a splice once both sides have sent and
+// received splice_locked for it: its funding output becomes the channel's,
+// the commitments on it replace the current ones, and every other pending
+// splice is dropped (they spend the same output and can't confirm). The
+// database moves in one transaction, before anything is signed for the new
+// funding alone. scid is the splice's short channel id.
+func (lc *LightningChannel) LockPendingFunding(txid chainhash.Hash,
+	scid lnwire.ShortChannelID) error {
+
+	lc.Lock()
+	defer lc.Unlock()
+
+	p, err := lc.pendingFunding(txid)
+	if err != nil {
+		return err
+	}
+
+	// Every commitment in both chains must exist on the new funding.
+	replacement := func(chain *commitmentChain,
+		on map[uint64]*commitment) (map[*fn.Node[*commitment]]*commitment,
+		error) {
+
+		swap := make(map[*fn.Node[*commitment]]*commitment)
+		for e := chain.commitments.Front(); e != nil; e = e.Next() {
+			c, ok := on[e.Value.height]
+			if !ok {
+				return nil, fmt.Errorf("no commitment at "+
+					"height %d on splice %v",
+					e.Value.height, txid)
+			}
+			swap[e] = c
+		}
+
+		return swap, nil
+	}
+	localSwap, err := replacement(lc.commitChains.Local, p.local)
+	if err != nil {
+		return err
+	}
+	remoteSwap, err := replacement(lc.commitChains.Remote, p.remote)
+	if err != nil {
+		return err
+	}
+	if c := p.local[lc.commitChains.Local.tail().height]; c.sig == nil {
+		return fmt.Errorf("commitment on splice %v not signed", txid)
+	}
+
+	remoteTail := lc.commitChains.Remote.tail()
+	lock := channeldb.SpliceLock{
+		Funding: channeldb.SpliceFunding{
+			OutPoint: p.OutPoint, Scid: scid,
+		},
+		Capacity:         p.Capacity,
+		LocalMultiSigKey: p.LocalKey,
+		RemoteMultiSigKey: keychain.KeyDescriptor{
+			PubKey: p.RemoteKey,
+		},
+		LocalCommit: p.local[lc.commitChains.Local.tail().height].
+			toDiskCommit(lntypes.Local),
+		RemoteCommit: p.remote[remoteTail.height].toDiskCommit(
+			lntypes.Remote,
+		),
+	}
+	if lc.commitChains.Remote.hasUnackedCommitment() {
+		lock.RemoteTip = p.remote[lc.commitChains.Remote.tip().height].
+			toDiskCommit(lntypes.Remote)
+	}
+	if err := lc.channelState.LockSplice(lock); err != nil {
+		return err
+	}
+
+	for e, c := range localSwap {
+		e.Value = c
+	}
+	for e, c := range remoteSwap {
+		e.Value = c
+	}
+	lc.pendingFundings = nil
+	lc.Capacity = p.Capacity
+
+	return lc.createSignDesc()
+}

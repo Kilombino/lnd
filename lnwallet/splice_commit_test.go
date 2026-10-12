@@ -792,3 +792,133 @@ func TestSpliceSanity(t *testing.T) {
 	require.NoError(t, err)
 	requireSpends(t, bob, txid, tx)
 }
+
+// requireCommitSpends checks with the script engine that lc's own signed
+// commitment spends its current funding output.
+func requireCommitSpends(t *testing.T, lc *LightningChannel) {
+	t.Helper()
+
+	tx, err := lc.getSignedCommitTx()
+	require.NoError(t, err)
+	require.Equal(t, lc.channelState.CurrentFundingOutpoint(),
+		tx.TxIn[0].PreviousOutPoint)
+
+	out := lc.fundingOutput
+	fetcher := txscript.NewCannedPrevOutputFetcher(out.PkScript, out.Value)
+	vm, err := txscript.NewEngine(
+		out.PkScript, tx, 0, txscript.StandardVerifyFlags, nil,
+		txscript.NewTxSigHashes(tx, fetcher), out.Value, fetcher,
+	)
+	require.NoError(t, err)
+	require.NoError(t, vm.Execute())
+}
+
+// TestSpliceLock checks completing a splice: the channel moves to the new
+// funding output with its commitments, updates go on without batches, the
+// channel's own commitment spends the new output, and all of it survives a
+// restart. The lock is taken in the middle of a state transition, with a
+// commitment in flight on both chains.
+func TestSpliceLock(t *testing.T) {
+	t.Parallel()
+
+	const added = btcutil.Amount(100_000_000)
+
+	alice, bob, txid := splicedPair(t, added, 0)
+	capacity := alice.channelState.Capacity + added
+	p, err := alice.pendingFunding(txid)
+	require.NoError(t, err)
+	newFunding := p.OutPoint
+	scid := lnwire.ShortChannelID{BlockHeight: 900_100, TxIndex: 4}
+
+	htlc, _ := createHTLC(3, lnwire.NewMSatFromSatoshis(400_000))
+	addAndReceiveHTLC(t, alice, bob, htlc, nil)
+	forceBatchTransition(t, alice, bob)
+
+	// Alice signs; Bob has it but hasn't revoked; then both lock.
+	htlc, _ = createHTLC(4, lnwire.NewMSatFromSatoshis(150_000))
+	addAndReceiveHTLC(t, alice, bob, htlc, nil)
+	aCommit, err := alice.SignNextCommitment(ctxb)
+	require.NoError(t, err)
+	require.NoError(t, bob.ReceiveNewCommitmentBatch(
+		aCommit.CommitSigs, aCommit.SpliceSigs,
+	))
+
+	require.NoError(t, alice.LockPendingFunding(txid, scid))
+	require.NoError(t, bob.LockPendingFunding(txid, scid))
+
+	for _, lc := range []*LightningChannel{alice, bob} {
+		require.Empty(t, lc.PendingFundings())
+		require.Equal(t, newFunding,
+			lc.channelState.CurrentFundingOutpoint())
+		require.Equal(t, capacity, lc.channelState.Capacity)
+		require.Equal(t, capacity, lc.Capacity)
+		require.Equal(t, int64(capacity), lc.fundingOutput.Value)
+	}
+
+	// The transition finishes, on the new funding alone.
+	bRev, _, _, err := bob.RevokeCurrentCommitment()
+	require.NoError(t, err)
+	_, _, err = alice.ReceiveRevocation(bRev)
+	require.NoError(t, err)
+	require.NoError(t, ForceStateTransition(bob, alice))
+
+	bCommit, err := bob.SignNextCommitment(ctxb)
+	require.NoError(t, err)
+	require.Empty(t, bCommit.SpliceSigs)
+	require.NoError(t, alice.ReceiveNewCommitment(bCommit.CommitSigs))
+	aRev, _, _, err := alice.RevokeCurrentCommitment()
+	require.NoError(t, err)
+	_, _, err = bob.ReceiveRevocation(aRev)
+	require.NoError(t, err)
+	require.NoError(t, ForceStateTransition(alice, bob))
+
+	requireCommitSpends(t, alice)
+	requireCommitSpends(t, bob)
+
+	// Both restart: the new funding and commitments come back.
+	alice, err = restartChannel(alice)
+	require.NoError(t, err)
+	bob, err = restartChannel(bob)
+	require.NoError(t, err)
+	require.Equal(t, newFunding, alice.channelState.CurrentFundingOutpoint())
+	require.Empty(t, alice.PendingFundings())
+	requireCommitSpends(t, alice)
+	requireCommitSpends(t, bob)
+
+	htlc, _ = createHTLC(5, lnwire.NewMSatFromSatoshis(90_000))
+	addAndReceiveHTLC(t, alice, bob, htlc, nil)
+	require.NoError(t, ForceStateTransition(alice, bob))
+	require.NoError(t, ForceStateTransition(alice, bob))
+	requireCommitSpends(t, alice)
+	requireCommitSpends(t, bob)
+
+	// The old funding is kept for reorgs.
+	prev, err := alice.channelState.PreviousFundings()
+	require.NoError(t, err)
+	require.Len(t, prev, 1)
+	require.Equal(t, alice.channelState.FundingOutpoint, prev[0].OutPoint)
+	require.Equal(t, newFunding, prev[0].LockedTo)
+}
+
+// TestSpliceLockRefused checks that a splice can't lock before its
+// commitments were exchanged, or under a txid that isn't pending.
+func TestSpliceLockRefused(t *testing.T) {
+	t.Parallel()
+
+	alice, bob, err := CreateTestChannels(t, spliceChanTypes["anchors"])
+	require.NoError(t, err)
+	keys := newSpliceKeys(t, alice, bob)
+	txid := chainhash.Hash{0x74}
+	addSplice(t, alice, bob, keys, txid, 10_000_000, 0)
+
+	scid := lnwire.ShortChannelID{BlockHeight: 900_100}
+	require.Error(t, alice.LockPendingFunding(txid, scid))
+	require.ErrorIs(t, alice.LockPendingFunding(chainhash.Hash{1}, scid),
+		ErrUnknownFunding)
+
+	// Signed by us only: not enough either.
+	_, err = alice.SignSpliceCommitment(ctxb, txid)
+	require.NoError(t, err)
+	require.Error(t, alice.LockPendingFunding(txid, scid))
+	require.Len(t, alice.PendingFundings(), 1)
+}
