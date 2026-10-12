@@ -19,6 +19,7 @@ import (
 	"github.com/lightningnetwork/lnd/input"
 	"github.com/lightningnetwork/lnd/keychain"
 	"github.com/lightningnetwork/lnd/lntypes"
+	"github.com/lightningnetwork/lnd/lnwallet/chainfee"
 	"github.com/lightningnetwork/lnd/lnwire"
 )
 
@@ -937,4 +938,83 @@ func (lc *LightningChannel) restorePendingFundings() error {
 	}
 
 	return nil
+}
+
+// checkPendingFundingBalances applies validateCommitmentSanity's fee and
+// reserve checks on each pending splice's funding, where both balances move
+// by the splice's contributions. ours and theirs are the balances before the
+// commitment fee; the initial balances are the commitment chain tip's.
+func (lc *LightningChannel) checkPendingFundingBalances(ours,
+	theirs, ourInitial, theirInitial lnwire.MilliSatoshi,
+	commitWeight lntypes.WeightUnit, feePerKw chainfee.SatPerKWeight,
+	buffer BufferType) error {
+
+	ourReserve := lnwire.NewMSatFromSatoshis(
+		lc.channelState.LocalChanCfg.ChanReserve,
+	)
+	theirReserve := lnwire.NewMSatFromSatoshis(
+		lc.channelState.RemoteChanCfg.ChanReserve,
+	)
+
+	for _, p := range lc.pendingFundings {
+		f := p.commitFunding()
+		ob, tb, err := f.applyDeltas(ours, theirs)
+		if err != nil {
+			return fmt.Errorf("splice %v: %w", p.txid(), err)
+		}
+		oi, ti, err := f.applyDeltas(ourInitial, theirInitial)
+		if err != nil {
+			return fmt.Errorf("splice %v: %w", p.txid(), err)
+		}
+
+		// The opener pays the fee, with the buffer only when that is
+		// us, as on the current funding.
+		if lc.channelState.IsInitiator {
+			ob, _, _, err = lc.applyCommitFee(
+				ob, commitWeight, feePerKw, buffer,
+			)
+		} else {
+			tb, _, _, err = lc.applyCommitFee(
+				tb, commitWeight, feePerKw, NoBuffer,
+			)
+		}
+		if err != nil {
+			return fmt.Errorf("splice %v: %w", p.txid(), err)
+		}
+
+		switch {
+		case ob < oi && ob < ourReserve:
+			return fmt.Errorf("%w: our balance below chan reserve "+
+				"on splice %v", ErrBelowChanReserve, p.txid())
+
+		case tb < ti && tb < theirReserve:
+			return fmt.Errorf("%w: their balance below chan "+
+				"reserve on splice %v", ErrBelowChanReserve,
+				p.txid())
+		}
+	}
+
+	return nil
+}
+
+// minAvailableOnPendingFundings lowers available, our balance available for
+// a new HTLC, to the least of it on every pending splice's funding, on both
+// commitments.
+func (lc *LightningChannel) minAvailableOnPendingFundings(view *HtlcView,
+	buffer BufferType, available lnwire.MilliSatoshi) lnwire.MilliSatoshi {
+
+	for _, p := range lc.pendingFundings {
+		for _, whose := range []lntypes.ChannelParty{
+			lntypes.Local, lntypes.Remote,
+		} {
+			b, _ := lc.availableCommitmentBalanceOn(
+				view, whose, buffer, p.commitFunding(),
+			)
+			if b < available {
+				available = b
+			}
+		}
+	}
+
+	return available
 }

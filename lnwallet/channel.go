@@ -3959,6 +3959,10 @@ func (lc *LightningChannel) validateCommitmentSanity(theirLogCounter,
 			feePerKw, chainfee.FeePerKwFloor)
 	}
 
+	// The same checks on each pending splice's funding follow, from the
+	// balances before the fee.
+	ourPreFee, theirPreFee := ourBalance, theirBalance
+
 	// The channel opener has to account for the commitment fee. This
 	// includes also a buffer type. Depending on whether we are the opener
 	// of the channel we either want to enforce a buffer on the local
@@ -4040,6 +4044,14 @@ func (lc *LightningChannel) validateCommitmentSanity(theirLogCounter,
 
 		return fmt.Errorf("%w: their balance below chan reserve",
 			ErrBelowChanReserve)
+	}
+
+	err = lc.checkPendingFundingBalances(
+		ourPreFee, theirPreFee, ourInitialBalance, theirInitialBalance,
+		commitWeight, feePerKw, buffer,
+	)
+	if err != nil {
+		return err
 	}
 
 	// validateUpdates take a set of updates, and validates them against
@@ -9331,6 +9343,12 @@ func (lc *LightningChannel) availableBalance(
 		htlcView, lntypes.Remote, buffer,
 	)
 
+	// The same on each pending splice's funding: an HTLC must fit on
+	// every one.
+	ourLocalCommitBalance = lc.minAvailableOnPendingFundings(
+		htlcView, buffer, ourLocalCommitBalance,
+	)
+
 	// Return which ever balance is lowest.
 	if ourRemoteCommitBalance < ourLocalCommitBalance {
 		return ourRemoteCommitBalance, commitWeight
@@ -9350,6 +9368,17 @@ func (lc *LightningChannel) availableCommitmentBalance(view *HtlcView,
 	whoseCommitChain lntypes.ChannelParty, buffer BufferType) (
 	lnwire.MilliSatoshi, lntypes.WeightUnit) {
 
+	return lc.availableCommitmentBalanceOn(
+		view, whoseCommitChain, buffer, commitFunding{},
+	)
+}
+
+// availableCommitmentBalanceOn is availableCommitmentBalance on a given
+// funding: a pending splice's moves both balances by its contributions.
+func (lc *LightningChannel) availableCommitmentBalanceOn(view *HtlcView,
+	whoseCommitChain lntypes.ChannelParty, buffer BufferType,
+	funding commitFunding) (lnwire.MilliSatoshi, lntypes.WeightUnit) {
+
 	// Compute the current balances for this commitment. This will take
 	// into account HTLCs to determine the commit weight, which the
 	// initiator must pay the fee for.
@@ -9360,6 +9389,12 @@ func (lc *LightningChannel) availableCommitmentBalance(view *HtlcView,
 	if err != nil {
 		lc.log.Errorf("Unable to fetch available balance: %v", err)
 		return 0, 0
+	}
+	ourBalance, theirBalance, err = funding.applyDeltas(
+		ourBalance, theirBalance,
+	)
+	if err != nil {
+		return 0, commitWeight
 	}
 
 	// We can never spend from the channel reserve, so we'll subtract it

@@ -723,3 +723,72 @@ func TestSpliceBatchTwoPending(t *testing.T) {
 		aCommit.CommitSigs, swapped,
 	), &sigErr)
 }
+
+// TestSpliceAvailableBalance checks that while a splice is pending, what we
+// can send is the least on any funding: moving funds out lowers it by the
+// amount, adding funds doesn't raise it, and the peer's splice doesn't change
+// ours.
+func TestSpliceAvailableBalance(t *testing.T) {
+	t.Parallel()
+
+	const out = btcutil.Amount(300_000_000)
+
+	alice, bob, err := CreateTestChannels(t, spliceChanTypes["anchors"])
+	require.NoError(t, err)
+	withHTLCs(t, alice, bob)
+	aliceBefore := alice.AvailableBalance()
+	bobBefore := bob.AvailableBalance()
+
+	keys := newSpliceKeys(t, alice, bob)
+	addSplice(t, alice, bob, keys, chainhash.Hash{0x71}, -out, 0)
+	require.Equal(t, aliceBefore-lnwire.NewMSatFromSatoshis(out),
+		alice.AvailableBalance())
+	require.Equal(t, bobBefore, bob.AvailableBalance())
+
+	// A second, adding funds, changes nothing.
+	keys = newSpliceKeys(t, alice, bob)
+	addSplice(t, alice, bob, keys, chainhash.Hash{0x72}, 0, 50_000_000)
+	require.Equal(t, aliceBefore-lnwire.NewMSatFromSatoshis(out),
+		alice.AvailableBalance())
+	require.Equal(t, bobBefore, bob.AvailableBalance())
+}
+
+// TestSpliceSanity checks that an HTLC must fit on every funding: one that
+// fits on the current funding but not on a pending splice-out's is refused
+// by the sender and by the receiver.
+func TestSpliceSanity(t *testing.T) {
+	t.Parallel()
+
+	alice, bob, err := CreateTestChannels(t, spliceChanTypes["anchors"])
+	require.NoError(t, err)
+	withHTLCs(t, alice, bob)
+
+	// Alice moves out all but 2,000,000 sats of what she can send.
+	avail := alice.AvailableBalance().ToSatoshis()
+	keys := newSpliceKeys(t, alice, bob)
+	txid := chainhash.Hash{0x73}
+	addSplice(t, alice, bob, keys, txid, -(avail - 2_000_000), 0)
+	exchangeSpliceCommitments(t, alice, bob, txid)
+
+	left := alice.AvailableBalance().ToSatoshis()
+	require.InDelta(t, 2_000_000, float64(left), 1)
+
+	// Too much for the splice's funding, fine for the current one.
+	big, _ := createHTLC(3, lnwire.NewMSatFromSatoshis(left+100_000))
+	_, err = alice.AddHTLC(big, nil)
+	require.ErrorIs(t, err, ErrBelowChanReserve)
+
+	// Bob refuses it too if Alice sends it anyway.
+	_, err = bob.ReceiveHTLC(big)
+	require.ErrorIs(t, err, ErrBelowChanReserve)
+
+	// What fits on every funding goes through and locks in.
+	small, _ := createHTLC(3, lnwire.NewMSatFromSatoshis(left-100_000))
+	addAndReceiveHTLC(t, alice, bob, small, nil)
+	forceBatchTransition(t, alice, bob)
+	forceBatchTransition(t, alice, bob)
+
+	tx, err := bob.SignedSpliceCommitment(txid)
+	require.NoError(t, err)
+	requireSpends(t, bob, txid, tx)
+}
