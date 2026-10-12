@@ -1090,3 +1090,152 @@ func (c *OpenChannel) LastSplice() (*LastSplice, error) {
 
 	return last, err
 }
+
+// spliceHoldsKey holds the peer's coins in locked splices that aren't deep
+// enough yet to rule out a reorganisation.
+var spliceHoldsKey = []byte("splice-holds")
+
+// SpliceHold is the peer's coins in a locked splice, held until the splice
+// is deep enough.
+type SpliceHold struct {
+	// Txid names the splice.
+	Txid chainhash.Hash
+
+	// Amount is what the peer put in.
+	Amount btcutil.Amount
+
+	// PkScript and HeightHint find the splice's confirmations again.
+	PkScript   []byte
+	HeightHint uint32
+}
+
+// SpliceHolds returns the channel's holds.
+func (c *OpenChannel) SpliceHolds() ([]SpliceHold, error) {
+	c.RLock()
+	defer c.RUnlock()
+
+	if c.Db == nil {
+		return nil, nil
+	}
+
+	var holds []SpliceHold
+	err := kvdb.View(c.Db.backend, func(tx kvdb.RTx) error {
+		chanBucket, err := fetchChanBucket(
+			tx, c.IdentityPub, &c.FundingOutpoint, c.ChainHash,
+		)
+		switch {
+		case errors.Is(err, ErrNoChanDBExists),
+			errors.Is(err, ErrNoActiveChannels),
+			errors.Is(err, ErrChannelNotFound):
+
+			return nil
+
+		case err != nil:
+			return err
+		}
+
+		holds, err = decodeSpliceHolds(chanBucket.Get(spliceHoldsKey))
+
+		return err
+	}, func() {
+		holds = nil
+	})
+
+	return holds, err
+}
+
+// PutSpliceHold records a hold, replacing one for the same splice.
+func (c *OpenChannel) PutSpliceHold(h SpliceHold) error {
+	return c.updateSpliceHolds(func(holds []SpliceHold) []SpliceHold {
+		kept := holds[:0]
+		for _, old := range holds {
+			if old.Txid != h.Txid {
+				kept = append(kept, old)
+			}
+		}
+
+		return append(kept, h)
+	})
+}
+
+// DeleteSpliceHold drops a splice's hold.
+func (c *OpenChannel) DeleteSpliceHold(txid chainhash.Hash) error {
+	return c.updateSpliceHolds(func(holds []SpliceHold) []SpliceHold {
+		kept := holds[:0]
+		for _, h := range holds {
+			if h.Txid != txid {
+				kept = append(kept, h)
+			}
+		}
+
+		return kept
+	})
+}
+
+// updateSpliceHolds rewrites the channel's holds.
+func (c *OpenChannel) updateSpliceHolds(
+	change func([]SpliceHold) []SpliceHold) error {
+
+	c.Lock()
+	defer c.Unlock()
+
+	return kvdb.Update(c.Db.backend, func(tx kvdb.RwTx) error {
+		chanBucket, err := fetchChanBucketRw(
+			tx, c.IdentityPub, &c.FundingOutpoint, c.ChainHash,
+		)
+		if err != nil {
+			return err
+		}
+		holds, err := decodeSpliceHolds(chanBucket.Get(spliceHoldsKey))
+		if err != nil {
+			return err
+		}
+		holds = change(holds)
+		if len(holds) == 0 {
+			return chanBucket.Delete(spliceHoldsKey)
+		}
+
+		var b bytes.Buffer
+		if err := WriteElements(&b, uint16(len(holds))); err != nil {
+			return err
+		}
+		for _, h := range holds {
+			err := WriteElements(&b, h.Txid, uint64(h.Amount),
+				h.PkScript, h.HeightHint)
+			if err != nil {
+				return err
+			}
+		}
+
+		return chanBucket.Put(spliceHoldsKey, b.Bytes())
+	}, func() {})
+}
+
+// decodeSpliceHolds decodes the channel's holds; none for nil.
+func decodeSpliceHolds(v []byte) ([]SpliceHold, error) {
+	if v == nil {
+		return nil, nil
+	}
+
+	r := bytes.NewReader(v)
+	var n uint16
+	if err := ReadElements(r, &n); err != nil {
+		return nil, err
+	}
+	holds := make([]SpliceHold, 0, n)
+	for i := uint16(0); i < n; i++ {
+		var (
+			h      SpliceHold
+			amount uint64
+		)
+		err := ReadElements(r, &h.Txid, &amount, &h.PkScript,
+			&h.HeightHint)
+		if err != nil {
+			return nil, err
+		}
+		h.Amount = btcutil.Amount(amount)
+		holds = append(holds, h)
+	}
+
+	return holds, nil
+}

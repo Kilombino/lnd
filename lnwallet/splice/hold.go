@@ -3,7 +3,7 @@ package splice
 import (
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/lightningnetwork/lnd/input"
+	"github.com/lightningnetwork/lnd/channeldb"
 )
 
 // A peer that put coins into a splice could spend them through us once the
@@ -29,32 +29,67 @@ func (m *Machine) PeerInputHold() btcutil.Amount {
 	return held
 }
 
-// holdPeerInput holds the peer's contribution to a splice that just locked
-// (or locked before a restart) until it has PeerInputConfs confirmations.
+// holdPeerInput holds the peer's contribution to a splice about to lock
+// until it has PeerInputConfs confirmations. The hold is recorded in the
+// channel's state, so it outlives the connection and a restart whatever
+// splices come after.
 func (m *Machine) holdPeerInput(txid chainhash.Hash, peer btcutil.Amount,
 	pkScript []byte, heightHint uint32) {
 
-	confs := m.cfg.Policy.PeerInputConfs
-	if peer <= 0 || confs == 0 {
+	if peer <= 0 || m.cfg.Policy.PeerInputConfs == 0 {
 		return
 	}
 
-	conf, err := m.cfg.Chain.RegisterConfirmationsNtfn(
-		&txid, pkScript, confs, heightHint,
-	)
-	if err != nil {
-		// Without the watch nothing would release it: the peer's
-		// coins count as soon as they are deep enough to lock.
-		log.Errorf("ChannelID(%v): unable to watch splice %v for the "+
-			"peer's coins: %v", m.cfg.ChanID, txid, err)
+	h := channeldb.SpliceHold{
+		Txid: txid, Amount: peer, PkScript: pkScript,
+		HeightHint: heightHint,
+	}
+	if err := m.cfg.Channel.State().PutSpliceHold(h); err != nil {
+		// Held on this connection anyway.
+		log.Errorf("ChannelID(%v): unable to record the hold of the "+
+			"peer's coins from splice %v: %v", m.cfg.ChanID, txid,
+			err)
+	}
+	m.activateHold(h)
+}
+
+// releaseHold drops a splice's hold: it didn't lock after all.
+func (m *Machine) releaseHold(txid chainhash.Hash) {
+	m.mu.Lock()
+	delete(m.holds, txid)
+	m.mu.Unlock()
+
+	if err := m.cfg.Channel.State().DeleteSpliceHold(txid); err != nil {
+		log.Errorf("ChannelID(%v): unable to drop the hold of splice "+
+			"%v: %v", m.cfg.ChanID, txid, err)
+	}
+}
+
+// activateHold holds a recorded hold's amount until the watch says the
+// splice is deep enough. Without the watch the hold stays: the next start
+// tries again.
+func (m *Machine) activateHold(h channeldb.SpliceHold) {
+	confs := m.cfg.Policy.PeerInputConfs
+	if confs == 0 {
 		return
 	}
 
 	m.mu.Lock()
-	m.holds[txid] = peer
+	m.holds[h.Txid] = h.Amount
 	m.mu.Unlock()
 	log.Infof("ChannelID(%v): holding the peer's %v from splice %v until "+
-		"%d confirmations", m.cfg.ChanID, peer, txid, confs)
+		"%d confirmations", m.cfg.ChanID, h.Amount, h.Txid, confs)
+
+	txid := h.Txid
+	conf, err := m.cfg.Chain.RegisterConfirmationsNtfn(
+		&txid, h.PkScript, confs, h.HeightHint,
+	)
+	if err != nil {
+		log.Errorf("ChannelID(%v): unable to watch splice %v for the "+
+			"peer's coins, held until a restart: %v", m.cfg.ChanID,
+			txid, err)
+		return
+	}
 
 	m.wg.Add(1)
 	go func() {
@@ -66,9 +101,7 @@ func (m *Machine) holdPeerInput(txid chainhash.Hash, peer btcutil.Amount,
 			if !ok {
 				return
 			}
-			m.mu.Lock()
-			delete(m.holds, txid)
-			m.mu.Unlock()
+			m.releaseHold(txid)
 			log.Infof("ChannelID(%v): the peer's coins from splice "+
 				"%v are %d deep, no longer held", m.cfg.ChanID,
 				txid, confs)
@@ -78,35 +111,17 @@ func (m *Machine) holdPeerInput(txid chainhash.Hash, peer btcutil.Amount,
 	}()
 }
 
-// restoreHold holds the peer's contribution to the channel's last splice
-// again after a restart, if it locked. The confirmation watch releases it at
-// once when the splice is already deep enough.
+// restoreHold holds the peer's coins again after a restart or a
+// reconnection, from every hold the channel records. A watch for a splice
+// already deep enough releases its hold at once.
 func (m *Machine) restoreHold() error {
-	state := m.cfg.Channel.State()
-	last, err := state.LastSplice()
-	if err != nil || last == nil || last.Outcome != "locked" ||
-		last.RemoteDelta <= 0 {
-
-		return err
-	}
-
-	// The channel is on that splice's funding output now.
-	if state.CurrentFundingOutpoint().Hash != last.Txid {
-		return nil
-	}
-	_, out, err := input.GenFundingPkScript(
-		state.LocalChanCfg.MultiSigKey.PubKey.SerializeCompressed(),
-		state.RemoteChanCfg.MultiSigKey.PubKey.SerializeCompressed(),
-		int64(state.Capacity),
-	)
+	holds, err := m.cfg.Channel.State().SpliceHolds()
 	if err != nil {
 		return err
 	}
-
-	m.holdPeerInput(
-		last.Txid, last.RemoteDelta, out.PkScript,
-		state.CurrentShortChanID().BlockHeight,
-	)
+	for _, h := range holds {
+		m.activateHold(h)
+	}
 
 	return nil
 }

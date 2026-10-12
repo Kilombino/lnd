@@ -391,3 +391,46 @@ func TestLastSplice(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, newer, last)
 }
+
+// TestSpliceHolds checks the record of the peer's coins held in locked
+// splices: added, replaced for the same splice, kept apart for different
+// ones, deleted, and gone with the last.
+func TestSpliceHolds(t *testing.T) {
+	t.Parallel()
+
+	fullDB, err := MakeTestDB(t)
+	require.NoError(t, err)
+	channel := createTestChannel(t, fullDB.ChannelStateDB())
+
+	holds, err := channel.SpliceHolds()
+	require.NoError(t, err)
+	require.Empty(t, holds)
+
+	a := SpliceHold{
+		Txid: chainhash.Hash{1}, Amount: 300_000,
+		PkScript: []byte{0x00, 0x20, 1, 2, 3}, HeightHint: 900_006,
+	}
+	b := SpliceHold{
+		Txid: chainhash.Hash{2}, Amount: 50_000,
+		PkScript: []byte{0x00, 0x20, 4}, HeightHint: 900_100,
+	}
+	require.NoError(t, channel.PutSpliceHold(a))
+	require.NoError(t, channel.PutSpliceHold(b))
+	a.Amount = 310_000
+	require.NoError(t, channel.PutSpliceHold(a))
+
+	holds, err = channel.SpliceHolds()
+	require.NoError(t, err)
+	require.ElementsMatch(t, []SpliceHold{a, b}, holds)
+
+	require.NoError(t, channel.DeleteSpliceHold(a.Txid))
+	holds, err = channel.SpliceHolds()
+	require.NoError(t, err)
+	require.Equal(t, []SpliceHold{b}, holds)
+
+	require.NoError(t, channel.DeleteSpliceHold(b.Txid))
+	require.NoError(t, channel.DeleteSpliceHold(b.Txid))
+	holds, err = channel.SpliceHolds()
+	require.NoError(t, err)
+	require.Empty(t, holds)
+}

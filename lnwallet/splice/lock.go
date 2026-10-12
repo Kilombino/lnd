@@ -88,13 +88,14 @@ func (m *Machine) reachedDepth(txid chainhash.Hash,
 		return
 	}
 
-	// Confirmed without the peer's tx_signatures ever reaching us: the
-	// peer published it with our signatures and withheld its own. The
-	// splice goes on to its lock; the peer's next ones are refused.
+	// Confirmed without the peer's tx_signatures reaching us: the peer
+	// published it with ours, and kept its own or sent them while we
+	// were apart (they are taken if they come). The splice goes on to
+	// its lock; an honest peer can't be told from one that withheld them,
+	// and the latter gains nothing, so neither is marked.
 	if a.phase == phaseSigning {
 		log.Warnf("ChannelID(%v): splice %v confirmed without the "+
 			"peer's tx_signatures", m.cfg.ChanID, txid)
-		m.setMisbehaved()
 		m.update(func(a *active) { a.phase = phasePending })
 		m.resume()
 	}
@@ -178,9 +179,16 @@ func (m *Machine) maybeComplete() {
 		return
 	}
 
+	// Held before the link moves to the new funding, so no HTLC of the
+	// peer's sees the coins unheld.
+	m.holdPeerInput(
+		a.txid, a.theirContribution, a.fundingScript, scid.BlockHeight,
+	)
 	if err := m.wait(m.cfg.Link.LockSplice(a.txid, scid)); err != nil {
 		log.Errorf("ChannelID(%v): unable to complete splice %v: %v",
 			m.cfg.ChanID, a.txid, err)
+		m.releaseHold(a.txid)
+
 		return
 	}
 	log.Infof("ChannelID(%v): splice %v locked at %v", m.cfg.ChanID,
@@ -193,9 +201,6 @@ func (m *Machine) maybeComplete() {
 		}
 	}
 	m.recordLast("locked", "", false)
-	m.holdPeerInput(
-		a.txid, a.theirContribution, a.fundingScript, scid.BlockHeight,
-	)
 	m.notify("locked", a.txid, "", false)
 	m.report(Update{State: StateLocked, Txid: a.txid})
 	m.update(func(a *active) { a.lockDone = true })
@@ -406,8 +411,12 @@ func (m *Machine) restore() error {
 			m.resumePending(n.BroadcastHeight)
 
 		// Ours went out and the peer's never came: it may publish
-		// the splice.
+		// the splice. Once we had locked it, it is pending (we owe
+		// splice_locked on reconnecting, not next_funding).
 		case a.ourTxSigs != nil:
+			if a.lockedSent {
+				a.phase = phasePending
+			}
 			m.watchWithheld()
 		}
 

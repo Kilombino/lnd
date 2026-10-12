@@ -3,6 +3,8 @@
 package splice
 
 import (
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/lightningnetwork/lnd/channeldb"
 	"testing"
 	"time"
 
@@ -45,22 +47,31 @@ func TestSplicePeerInputHold(t *testing.T) {
 	}, 5*time.Second, 10*time.Millisecond)
 	require.Zero(t, p.alice.machine.PeerInputHold())
 
-	// Deep enough: released.
-	p.chain.confirm(t, u.Txid, confs, 1, &chainntnfs.TxConfirmation{})
-	require.Eventually(t, func() bool {
-		return p.bob.machine.PeerInputHold() == 0
-	}, 5*time.Second, 10*time.Millisecond)
-
-	// A restart holds them again from the last splice, until the new
-	// watch (on the funding the channel is on now) answers.
+	// A later splice that ends without locking overwrites the last
+	// splice's record; a restart still holds the coins, from the
+	// channel's own record of the hold.
+	require.NoError(t, p.bob.ch.State().PutLastSplice(&channeldb.LastSplice{
+		Txid: chainhash.Hash{9}, Outcome: "aborted",
+	}))
 	restarted := NewMachine(p.bob.machine.cfg)
 	startReestablished(t, restarted)
 	t.Cleanup(restarted.Stop)
 	require.Equal(t, amount, restarted.PeerInputHold())
+
+	// Deep enough: released on both machines, and for good.
 	p.chain.confirm(t, u.Txid, confs, 2, &chainntnfs.TxConfirmation{})
-	require.Eventually(t, func() bool {
-		return restarted.PeerInputHold() == 0
-	}, 5*time.Second, 10*time.Millisecond)
+	for _, m := range []*Machine{p.bob.machine, restarted} {
+		require.Eventually(t, func() bool {
+			return m.PeerInputHold() == 0
+		}, 5*time.Second, 10*time.Millisecond)
+	}
+	holds, err := p.bob.ch.State().SpliceHolds()
+	require.NoError(t, err)
+	require.Empty(t, holds)
+	again := NewMachine(p.bob.machine.cfg)
+	startReestablished(t, again)
+	t.Cleanup(again.Stop)
+	require.Zero(t, again.PeerInputHold())
 
 	// With no confirmations asked for, nothing is held.
 	none := p.bob.machine.cfg
