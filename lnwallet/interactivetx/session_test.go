@@ -10,6 +10,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightningnetwork/lnd/fn/v2"
 	"github.com/lightningnetwork/lnd/input"
+	"github.com/lightningnetwork/lnd/lntypes"
 	"github.com/lightningnetwork/lnd/lnwallet/chainfee"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/stretchr/testify/require"
@@ -62,6 +63,16 @@ func witnessWeight(pkScript []byte) (int64, error) {
 	}
 }
 
+// dustLimit is 294 for P2WPKH and 330 for the other segwit outputs, as
+// Bitcoin Core computes them at its default relay fee.
+func dustLimit(pkScript []byte) btcutil.Amount {
+	if len(pkScript) == 22 {
+		return 294
+	}
+
+	return 330
+}
+
 type params struct {
 	capacity      btcutil.Amount
 	initBalance   btcutil.Amount
@@ -102,6 +113,9 @@ func config(role Role, p params) Config {
 		Reserve: func(c btcutil.Amount) btcutil.Amount {
 			return c / 100
 		},
+		CheckPeerInput:   func(*Input) error { return nil },
+		CheckPeerOutput:  func(*Output) error { return nil },
+		DustLimit:        dustLimit,
 		InitiatorBalance: p.initBalance,
 		AcceptorBalance:  p.accBalance,
 	}
@@ -167,7 +181,7 @@ func TestSpliceInByInitiator(t *testing.T) {
 		MaxWitnessWeight: input.P2WKHWitnessSize,
 		PrevTx:           wallet,
 	})
-	init.AddLocalOutput(Output{Value: 95_000, PkScript: p2wpkh(2)})
+	init.AddLocalOutput(Output{Value: 98_500, PkScript: p2wpkh(2)})
 
 	require.NoError(t, run(init, acc))
 
@@ -180,7 +194,7 @@ func TestSpliceInByInitiator(t *testing.T) {
 	require.Equal(t, ri.Tx.TxHash(), ra.Tx.TxHash())
 	require.Equal(t, btcutil.Amount(1_500_000),
 		btcutil.Amount(ra.Tx.TxOut[ra.FundingIndex].Value))
-	require.Equal(t, btcutil.Amount(5_000), ra.Fee)
+	require.Equal(t, btcutil.Amount(1_500), ra.Fee)
 	require.GreaterOrEqual(t, int64(ra.Fee),
 		int64(p.feeRate.FeeForWeight(0))+ra.Weight*int64(p.feeRate)/1000)
 	require.Equal(t, uint32(p.lockTime), ra.Tx.LockTime)
@@ -198,7 +212,7 @@ func TestSpliceOutByInitiator(t *testing.T) {
 	// The amount entered arrives in full; the initiator's contribution
 	// covers it and the fee.
 	p := defaultParams()
-	const fee = 3_000
+	const fee = 1_500
 	p.initContrib = -(300_000 + fee)
 	init, acc := pair(t, p)
 	init.AddLocalOutput(Output{Value: 300_000, PkScript: p2tr(9)})
@@ -207,7 +221,7 @@ func TestSpliceOutByInitiator(t *testing.T) {
 	res, err := acc.Build()
 	require.NoError(t, err)
 	require.Equal(t, btcutil.Amount(fee), res.Fee)
-	require.Equal(t, btcutil.Amount(1_000_000-303_000),
+	require.Equal(t, btcutil.Amount(1_000_000-301_500),
 		btcutil.Amount(res.Tx.TxOut[res.FundingIndex].Value))
 }
 
@@ -228,6 +242,7 @@ func TestAcceptorAddsNothing(t *testing.T) {
 		MaxWitnessWeight: 67,
 		PrevTx:           wallet,
 	})
+	init.AddLocalOutput(Output{Value: 48_500, PkScript: p2tr(4)})
 
 	require.NoError(t, run(init, acc))
 	res, err := acc.Build()
@@ -446,7 +461,7 @@ func TestPeerPolicyHooks(t *testing.T) {
 	acc, err = NewSession(cfg)
 	require.NoError(t, err)
 	requireAbort(t, acc.Receive(&lnwire.TxAddOutput{
-		SerialID: 2, Amount: 0, Script: []byte{0x6a},
+		SerialID: 2, Amount: 1_000, Script: []byte{0x6a},
 	}), "an OP_RETURN")
 }
 
@@ -521,7 +536,7 @@ func TestAcceptorAddsFundingOutput(t *testing.T) {
 	require.NoError(t, err)
 
 	requireAbort(t, init.Receive(&lnwire.TxAddOutput{
-		SerialID: 1, Amount: 1, Script: fundingScript,
+		SerialID: 1, Amount: 1_000, Script: fundingScript,
 	}), "acceptor added the funding output")
 }
 
@@ -572,7 +587,7 @@ func TestBuildRefusals(t *testing.T) {
 		p := defaultParams()
 		p.initContrib = -700_000
 		init, acc := pair(t, p)
-		init.AddLocalOutput(Output{Value: 690_000, PkScript: p2wpkh(1)})
+		init.AddLocalOutput(Output{Value: 698_500, PkScript: p2wpkh(1)})
 		require.NoError(t, run(init, acc))
 		_, err := acc.Build()
 		requireAbort(t, err, "below zero")
@@ -607,7 +622,7 @@ func TestBuildRefusals(t *testing.T) {
 	t.Run("two funding outputs", func(t *testing.T) {
 		p := defaultParams()
 		init, acc := pair(t, p)
-		init.AddLocalOutput(Output{Value: 1, PkScript: fundingScript})
+		init.AddLocalOutput(Output{Value: 1_000, PkScript: fundingScript})
 		require.NoError(t, run(init, acc))
 		_, err := acc.Build()
 		requireAbort(t, err, "2 funding outputs")
@@ -632,7 +647,7 @@ func TestBuildRefusals(t *testing.T) {
 		init, acc := pair(t, p)
 		for i := 0; i < 8; i++ {
 			init.AddLocalOutput(Output{
-				Value:    1,
+				Value:    400,
 				PkScript: bytes.Repeat([]byte{0x6a}, 15_000),
 			})
 		}
@@ -660,7 +675,10 @@ func TestHonestSplicesProperty(t *testing.T) {
 		amt := btcutil.Amount(rapid.IntRange(10_000, 300_000).Draw(
 			rt, "amount",
 		))
-		const feeBudget = 60_000
+		// The initiator pays its share at the feerate, for a weight a
+		// little above what these transactions weigh, within the cap
+		// of twice its share.
+		feeBudget := p.feeRate.FeeForWeight(1_200)
 
 		if spliceIn {
 			p.initContrib = amt
@@ -725,7 +743,7 @@ func TestAcceptorPaysForItsOwn(t *testing.T) {
 			// (common fields, shared input, funding output) out of
 			// its channel balance.
 			p := defaultParams()
-			p.initContrib = -2_000
+			p.initContrib = -1_000
 			p.accContrib = 50_000
 			init, acc := pair(t, p)
 
@@ -799,4 +817,239 @@ func FuzzSessionReceive(f *testing.F) {
 			}
 		}
 	})
+}
+
+func TestCompleteResetsOnNewMessages(t *testing.T) {
+	t.Parallel()
+
+	// The peer's tx_complete counts only if its next message is also
+	// tx_complete: after the peer completes, this node adds, the peer
+	// adds again, this node completes, and the construction is not done
+	// until the peer completes once more.
+	wallet := prevTx(30, p2wpkh(30), 100_000)
+
+	p := defaultParams()
+	init, err := NewSession(config(Initiator, p))
+	require.NoError(t, err)
+	init.AddLocalOutput(Output{Value: 1_000, PkScript: p2wpkh(31)})
+	init.AddLocalOutput(Output{Value: 1_000, PkScript: p2wpkh(32)})
+
+	_, err = init.Next() // our first output
+	require.NoError(t, err)
+	require.NoError(t, init.Receive(&lnwire.TxComplete{}))
+	_, err = init.Next() // our second output
+	require.NoError(t, err)
+	require.NoError(t, init.Receive(walletAdd(t, 1, wallet, 0)))
+	msg, err := init.Next()
+	require.NoError(t, err)
+	require.IsType(t, &lnwire.TxComplete{}, msg)
+	require.False(t, init.Done())
+
+	require.NoError(t, init.Receive(&lnwire.TxComplete{}))
+	require.True(t, init.Done())
+}
+
+func TestSentCompleteResetsOnOurAdd(t *testing.T) {
+	t.Parallel()
+
+	// This node's tx_complete is cleared when it sends anything else.
+	p := defaultParams()
+	acc := acceptorFor(t, p)
+	acc.AddLocalOutput(Output{Value: 1_000, PkScript: p2wpkh(33)})
+
+	require.NoError(t, acc.Receive(sharedAdd(0)))
+	msg, err := acc.Next()
+	require.NoError(t, err)
+	require.IsType(t, &lnwire.TxAddOutput{}, msg)
+	require.NoError(t, acc.Receive(&lnwire.TxComplete{}))
+	require.False(t, acc.Done())
+}
+
+func TestPeerAmountRanges(t *testing.T) {
+	t.Parallel()
+
+	acc := acceptorFor(t, defaultParams())
+	requireAbort(t, acc.Receive(&lnwire.TxAddOutput{
+		SerialID: 0, Amount: -1, Script: p2wpkh(1),
+	}), "out of range")
+
+	acc = acceptorFor(t, defaultParams())
+	requireAbort(t, acc.Receive(&lnwire.TxAddOutput{
+		SerialID: 0, Amount: maxMoney + 1, Script: p2wpkh(1),
+	}), "out of range")
+
+	acc = acceptorFor(t, defaultParams())
+	requireAbort(t, acc.Receive(&lnwire.TxAddOutput{
+		SerialID: 0, Amount: 293, Script: p2wpkh(1),
+	}), "dust")
+
+	// A prevtx output can claim any value; the engine refuses one out of
+	// range before adding it up.
+	for _, v := range []int64{-1, int64(maxMoney) + 1} {
+		tx := prevTx(34, p2wpkh(34), 0)
+		tx.TxOut[0].Value = v
+		acc = acceptorFor(t, defaultParams())
+		requireAbort(t, acc.Receive(walletAdd(t, 0, tx, 0)),
+			"out of range")
+	}
+}
+
+func TestPeerCoinbaseInput(t *testing.T) {
+	t.Parallel()
+
+	cb := wire.NewMsgTx(2)
+	cb.AddTxIn(&wire.TxIn{PreviousOutPoint: wire.OutPoint{
+		Index: wire.MaxPrevOutIndex,
+	}})
+	cb.AddTxOut(&wire.TxOut{Value: 300_000_000, PkScript: p2wpkh(35)})
+
+	acc := acceptorFor(t, defaultParams())
+	requireAbort(t, acc.Receive(walletAdd(t, 0, cb, 0)), "coinbase")
+}
+
+func TestPeerInputLimitIsLive(t *testing.T) {
+	t.Parallel()
+
+	p := defaultParams()
+	p.maxPeerAddMsg = 1_000
+	acc := acceptorFor(t, p)
+
+	var msgs []lnwire.Message
+	for i := 0; i < MaxInputsOrOutputs+1; i++ {
+		tx := prevTx(byte(i), p2wpkh(byte(i)), 10_000)
+		tx.LockTime = uint32(i)
+		msgs = append(msgs, walletAdd(t, uint64(2*i), tx, 0))
+	}
+	requireAbort(t, exchange(acc, msgs...), "more than 252 inputs")
+}
+
+func TestFundingOutputAsPlainInput(t *testing.T) {
+	t.Parallel()
+
+	// The peer knows the real funding transaction and sends it as a
+	// prevtx. With a witness weight hook that accepts P2WSH, the engine's
+	// own check refuses it.
+	funding := prevTx(36, oldFundingScript, 1_000_000)
+	cfg := config(Acceptor, defaultParams())
+	cfg.Shared.OutPoint = wire.OutPoint{Hash: funding.TxHash()}
+	cfg.WitnessWeight = func([]byte) (int64, error) { return 222, nil }
+	acc, err := NewSession(cfg)
+	require.NoError(t, err)
+
+	requireAbort(t, acc.Receive(walletAdd(t, 0, funding, 0)),
+		"funding output added as a plain input")
+}
+
+func TestOurCoinAddedByThePeerFirst(t *testing.T) {
+	t.Parallel()
+
+	// This node, the acceptor, has one of its coins queued; the peer
+	// adds that same coin first (it can know it, from an earlier splice's
+	// change for instance). This node refuses to spend it twice.
+	coin := prevTx(37, p2wpkh(37), 100_000)
+	acc := acceptorFor(t, defaultParams())
+	acc.AddLocalInput(Input{
+		OutPoint: wire.OutPoint{Hash: coin.TxHash()}, Value: 100_000,
+		PkScript: p2wpkh(37), Sequence: MaxSequence,
+		MaxWitnessWeight: input.P2WKHWitnessSize, PrevTx: coin,
+	})
+
+	require.NoError(t, acc.Receive(walletAdd(t, 0, coin, 0)))
+	_, err := acc.Next()
+	requireAbort(t, err, "already added")
+}
+
+func TestFeeBoundaries(t *testing.T) {
+	t.Parallel()
+
+	// The initiator's share for a splice-out with one P2TR output.
+	shareFor := func(t *testing.T) btcutil.Amount {
+		p := defaultParams()
+		p.initContrib = -(300_000 + 1_500)
+		init, acc := pair(t, p)
+		init.AddLocalOutput(Output{Value: 300_000, PkScript: p2tr(9)})
+		require.NoError(t, run(init, acc))
+		res, err := acc.Build()
+		require.NoError(t, err)
+
+		return p.feeRate.FeeForWeight(lntypes.WeightUnit(res.Weight))
+	}
+	share := shareFor(t)
+
+	try := func(paid btcutil.Amount) error {
+		p := defaultParams()
+		p.initContrib = -(300_000 + paid)
+		init, acc := pair(t, p)
+		init.AddLocalOutput(Output{Value: 300_000, PkScript: p2tr(9)})
+		require.NoError(t, run(init, acc))
+		_, err := acc.Build()
+
+		return err
+	}
+
+	require.NoError(t, try(share))
+	requireAbort(t, try(share-1), "don't cover")
+	require.NoError(t, try(2*share+maxExcessFee))
+	requireAbort(t, try(2*share+maxExcessFee+1), "far more than")
+}
+
+func TestReserveOnNegativeContribution(t *testing.T) {
+	t.Parallel()
+
+	// The initiator takes 2,000 out of a 2,500 balance as fees only, no
+	// output of its own: still bound by the reserve.
+	p := defaultParams()
+	p.initBalance = 2_500
+	p.accBalance = 997_500
+	p.initContrib = -1_500
+	init, acc := pair(t, p)
+	require.NoError(t, run(init, acc))
+	_, err := acc.Build()
+	requireAbort(t, err, "below the reserve")
+}
+
+func TestSequenceBoundary(t *testing.T) {
+	t.Parallel()
+
+	wallet := prevTx(39, p2wpkh(39), 100_000)
+	m := walletAdd(t, 0, wallet, 0)
+	m.Sequence = 0xfffffffe
+	acc := acceptorFor(t, defaultParams())
+	requireAbort(t, acc.Receive(m), "final")
+
+	m = walletAdd(t, 0, wallet, 0)
+	m.Sequence = MaxSequence
+	acc = acceptorFor(t, defaultParams())
+	require.NoError(t, acc.Receive(m))
+}
+
+func TestSignsFirstCountsSharedInput(t *testing.T) {
+	t.Parallel()
+
+	// The shared input counts in full as the initiator's: an acceptor
+	// adding a bigger wallet input than the initiator's own still signs
+	// first while the capacity outweighs it.
+	res := &Result{Inputs: []*Input{
+		{SerialID: 0, Value: 1_000_000, Shared: true},
+		{SerialID: 1, Value: 500_000},
+	}}
+	init, acc := Contributed(res)
+	require.Equal(t, btcutil.Amount(1_000_000), init)
+	require.Equal(t, btcutil.Amount(500_000), acc)
+	require.True(t, SignsFirst(res, Acceptor, []byte{9}, []byte{1}))
+}
+
+func TestHooksRequired(t *testing.T) {
+	t.Parallel()
+
+	for _, clear := range []func(*Config){
+		func(c *Config) { c.CheckPeerInput = nil },
+		func(c *Config) { c.CheckPeerOutput = nil },
+		func(c *Config) { c.DustLimit = nil },
+	} {
+		cfg := config(Acceptor, defaultParams())
+		clear(&cfg)
+		_, err := NewSession(cfg)
+		require.Error(t, err)
+	}
 }

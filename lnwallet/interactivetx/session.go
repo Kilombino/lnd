@@ -76,6 +76,16 @@ const (
 	// tx_add_output, messages a peer may send.
 	SpecMaxAddMessages = 4096
 
+	// DefaultMaxPeerAddMessages is how many of each this node accepts
+	// unless configured otherwise. Aborting is always allowed, and a
+	// splice needs only a few.
+	DefaultMaxPeerAddMessages = 64
+
+	// maxExcessFee is how far beyond its share of the fee a side may
+	// pay, on top of twice its share: a side can't hand its balance to
+	// the miners and go below its reserve that way.
+	maxExcessFee = btcutil.Amount(1_000)
+
 	// MaxSequence is the highest sequence an input may use: the
 	// transaction must stay replaceable.
 	MaxSequence = 0xfffffffd
@@ -123,8 +133,10 @@ type Input struct {
 	// MaxWitnessWeight is the largest witness this input can carry.
 	MaxWitnessWeight int64
 
-	// PrevTx is the transaction holding the spent output, nil for the
-	// shared input. The engine keeps only what it needs from it.
+	// PrevTx is the transaction holding the spent output, for this
+	// node's own inputs (it is sent in tx_add_input). For the peer's
+	// inputs only the outpoint, value and script are kept, never the
+	// whole transaction.
 	PrevTx *wire.MsgTx
 }
 
@@ -180,17 +192,22 @@ type Config struct {
 	// MaxPeerAddMessages is how many tx_add_input, and separately
 	// tx_add_output, messages this node accepts from the peer. Aborting is
 	// always allowed, so it can be far below the spec's 4096. Zero means
-	// the spec's limit.
+	// DefaultMaxPeerAddMessages.
 	MaxPeerAddMessages int
 
-	// CheckPeerInput, if set, applies this node's policy to an input the
-	// peer adds: confirmed, not a coinbase, not one of our own outpoints,
-	// of an accepted type. An error aborts the construction.
+	// CheckPeerInput applies this node's policy to an input the peer
+	// adds: confirmed and unspent, not one of this node's own outpoints
+	// (wallet coins, locked or not, and every channel's funding output).
+	// An error aborts the construction. Required.
 	CheckPeerInput func(in *Input) error
 
-	// CheckPeerOutput, if set, applies this node's policy to an output
-	// the peer adds (relay standardness, dust). An error aborts.
+	// CheckPeerOutput applies this node's policy to an output the peer
+	// adds (relay standardness). An error aborts. Required.
 	CheckPeerOutput func(out *Output) error
+
+	// DustLimit returns the dust limit of an output with the given script:
+	// no output, the funding output included, may be below it. Required.
+	DustLimit func(pkScript []byte) btcutil.Amount
 
 	// WitnessWeight returns the largest witness for an input spending the
 	// given script, or an error for a script this node won't accept from
@@ -260,12 +277,34 @@ func NewSession(cfg Config) (*Session, error) {
 	if cfg.Reserve == nil {
 		return nil, errors.New("Reserve is required")
 	}
+	if cfg.CheckPeerInput == nil || cfg.CheckPeerOutput == nil ||
+		cfg.DustLimit == nil {
+
+		return nil, errors.New("CheckPeerInput, CheckPeerOutput and " +
+			"DustLimit are required")
+	}
+	for _, amt := range []btcutil.Amount{
+		cfg.Shared.Value, cfg.InitiatorBalance, cfg.AcceptorBalance,
+	} {
+		if amt < 0 || amt > maxMoney {
+			return nil, fmt.Errorf("amount %d out of range", amt)
+		}
+	}
+	for _, c := range []btcutil.Amount{
+		cfg.InitiatorContribution, cfg.AcceptorContribution,
+	} {
+		if c < -maxMoney || c > maxMoney {
+			return nil, fmt.Errorf("contribution %d out of range",
+				c)
+		}
+	}
 	if len(cfg.FundingScript) == 0 {
 		return nil, errors.New("FundingScript is required")
 	}
-	if cfg.MaxPeerAddMessages <= 0 ||
-		cfg.MaxPeerAddMessages > SpecMaxAddMessages {
-
+	if cfg.MaxPeerAddMessages <= 0 {
+		cfg.MaxPeerAddMessages = DefaultMaxPeerAddMessages
+	}
+	if cfg.MaxPeerAddMessages > SpecMaxAddMessages {
 		cfg.MaxPeerAddMessages = SpecMaxAddMessages
 	}
 
@@ -384,6 +423,14 @@ func (s *Session) Next() (lnwire.Message, error) {
 
 // sendInput records and encodes one of this node's inputs.
 func (s *Session) sendInput(in *Input) (lnwire.Message, error) {
+	// The peer may have added the same outpoint first (it can know one of
+	// this node's coins); a transaction spending it twice could never
+	// confirm.
+	if prev, ok := s.spent[in.OutPoint]; ok {
+		return nil, s.fail(abortf("outpoint %v already added as "+
+			"serial id %d", in.OutPoint, prev))
+	}
+
 	s.inputs[in.SerialID] = in
 	s.spent[in.OutPoint] = in.SerialID
 
@@ -399,8 +446,10 @@ func (s *Session) sendInput(in *Input) (lnwire.Message, error) {
 		return msg, nil
 	}
 
+	// Without witnesses: the txid is the same, and the message stays
+	// within its u16 length.
 	var b bytes.Buffer
-	if err := in.PrevTx.Serialize(&b); err != nil {
+	if err := in.PrevTx.SerializeNoWitness(&b); err != nil {
 		return nil, err
 	}
 	msg.PrevTx = b.Bytes()
@@ -488,6 +537,9 @@ func (s *Session) receiveInput(m *lnwire.TxAddInput) error {
 	if err := s.checkPeerSerial(m.SerialID); err != nil {
 		return err
 	}
+	if len(s.inputs) >= MaxInputsOrOutputs {
+		return abortf("more than %d inputs", MaxInputsOrOutputs)
+	}
 	if m.Sequence > MaxSequence {
 		return abortf("input sequence %#x is final", m.Sequence)
 	}
@@ -530,6 +582,16 @@ func (s *Session) receiveInput(m *lnwire.TxAddInput) error {
 		if !txscript.IsWitnessProgram(out.PkScript) {
 			return abortf("input spends a non-segwit output")
 		}
+		if out.Value < 0 || btcutil.Amount(out.Value) > maxMoney {
+			return abortf("input value %d out of range", out.Value)
+		}
+
+		// A coinbase output relays only after a long maturity on this
+		// chain, so a splice spending one could sit unconfirmed with
+		// the channel unable to close cooperatively or splice again.
+		if blockchainIsCoinBase(prevTx) {
+			return abortf("input spends a coinbase output")
+		}
 		weight, err := s.cfg.WitnessWeight(out.PkScript)
 		if err != nil {
 			return abortf("input type refused: %v", err)
@@ -543,7 +605,6 @@ func (s *Session) receiveInput(m *lnwire.TxAddInput) error {
 		in.Value = btcutil.Amount(out.Value)
 		in.PkScript = out.PkScript
 		in.MaxWitnessWeight = weight
-		in.PrevTx = prevTx
 
 		if in.OutPoint == s.cfg.Shared.OutPoint {
 			return abortf("the funding output added as a plain " +
@@ -563,7 +624,7 @@ func (s *Session) receiveInput(m *lnwire.TxAddInput) error {
 		}
 	}
 
-	if !in.Shared && s.cfg.CheckPeerInput != nil {
+	if !in.Shared {
 		if err := s.cfg.CheckPeerInput(in); err != nil {
 			return abortf("input %v refused: %v", in.OutPoint, err)
 		}
@@ -585,8 +646,15 @@ func (s *Session) receiveOutput(m *lnwire.TxAddOutput) error {
 	if err := s.checkPeerSerial(m.SerialID); err != nil {
 		return err
 	}
+	if len(s.outputs) >= MaxInputsOrOutputs {
+		return abortf("more than %d outputs", MaxInputsOrOutputs)
+	}
 	if m.Amount < 0 || m.Amount > maxMoney {
 		return abortf("output amount %d out of range", m.Amount)
+	}
+	if m.Amount < s.cfg.DustLimit(m.Script) {
+		return abortf("output of %d is below the dust limit",
+			m.Amount)
 	}
 
 	out := &Output{
@@ -602,7 +670,7 @@ func (s *Session) receiveOutput(m *lnwire.TxAddOutput) error {
 		if addedBy(m.SerialID) != Initiator {
 			return abortf("the acceptor added the funding output")
 		}
-	} else if s.cfg.CheckPeerOutput != nil {
+	} else {
 		if err := s.cfg.CheckPeerOutput(out); err != nil {
 			return abortf("output refused: %v", err)
 		}
@@ -694,6 +762,15 @@ func (s *Session) Build() (*Result, error) {
 			MaxInputsOrOutputs))
 	}
 
+	seen := make(map[wire.OutPoint]struct{}, len(res.Inputs))
+	for _, in := range res.Inputs {
+		if _, ok := seen[in.OutPoint]; ok {
+			return nil, s.fail(abortf("outpoint %v spent twice",
+				in.OutPoint))
+		}
+		seen[in.OutPoint] = struct{}{}
+	}
+
 	var shared, funding int
 	for i, in := range res.Inputs {
 		res.Tx.AddTxIn(&wire.TxIn{
@@ -727,6 +804,10 @@ func (s *Session) Build() (*Result, error) {
 		return nil, s.fail(abortf("funding output of %d, expected %d",
 			got, s.fundingValue()))
 	}
+	if s.fundingValue() < s.cfg.DustLimit(s.cfg.FundingScript) {
+		return nil, s.fail(abortf("funding output of %d is dust",
+			s.fundingValue()))
+	}
 
 	// A transaction of a single input with the state hint markers would
 	// look like a commitment to the chain watchers of both nodes.
@@ -751,6 +832,8 @@ func (s *Session) Build() (*Result, error) {
 		return nil, s.fail(err)
 	}
 
+	// Every value was range checked, so neither sum can pass the 64-bit
+	// range before the check below catches it.
 	var in, out btcutil.Amount
 	for _, i := range res.Inputs {
 		in += i.Value
@@ -758,7 +841,18 @@ func (s *Session) Build() (*Result, error) {
 	for _, o := range res.Outputs {
 		out += o.Value
 	}
+	if in > maxMoney*MaxInputsOrOutputs || in < out {
+		return nil, s.fail(abortf("inputs of %d don't cover outputs "+
+			"of %d", in, out))
+	}
 	res.Fee = in - out
+
+	// Each side's share is rounded down; the transaction as a whole must
+	// still pay the agreed feerate.
+	if res.Fee < s.cfg.FeeRate.FeeForWeight(lntypes.WeightUnit(res.Weight)) {
+		return nil, s.fail(abortf("fee of %d below the feerate for "+
+			"weight %d", res.Fee, res.Weight))
+	}
 
 	return res, nil
 }
@@ -862,10 +956,18 @@ func (s *Session) checkAccounting(res *Result, w sideWeights) error {
 		weight int64) error {
 
 		fee := s.cfg.FeeRate.FeeForWeight(lntypes.WeightUnit(weight))
-		if in-out-contribution < fee {
+		paid := in - out - contribution
+		if paid < fee {
 			return abortf("the %v's inputs (%d) less outputs (%d) "+
 				"and contribution (%d) don't cover its fee "+
 				"(%d)", role, in, out, contribution, fee)
+		}
+
+		// Paying far more than its share would let a side move its
+		// balance to the miners, past the reserve rule below.
+		if paid > 2*fee+maxExcessFee {
+			return abortf("the %v pays %d in fees, far more than "+
+				"its share of %d", role, paid, fee)
 		}
 
 		return nil
@@ -891,7 +993,13 @@ func (s *Session) checkReserves(res *Result) error {
 	capacity := s.fundingValue()
 	reserve := s.cfg.Reserve(capacity)
 
-	addedOutput := map[Role]bool{}
+	// The reserve binds a side that adds an output, as the spec says,
+	// and also one that takes funds out of the channel by any other
+	// route, fees included.
+	addedOutput := map[Role]bool{
+		Initiator: s.cfg.InitiatorContribution < 0,
+		Acceptor:  s.cfg.AcceptorContribution < 0,
+	}
 	for _, out := range res.Outputs {
 		if !out.Funding {
 			addedOutput[addedBy(out.SerialID)] = true
@@ -918,4 +1026,15 @@ func (s *Session) checkReserves(res *Result) error {
 	}
 
 	return nil
+}
+
+// blockchainIsCoinBase reports whether tx is a coinbase: a single input
+// spending the null outpoint.
+func blockchainIsCoinBase(tx *wire.MsgTx) bool {
+	if len(tx.TxIn) != 1 {
+		return false
+	}
+	prev := tx.TxIn[0].PreviousOutPoint
+
+	return prev.Index == wire.MaxPrevOutIndex && prev.Hash == (chainhash.Hash{})
 }

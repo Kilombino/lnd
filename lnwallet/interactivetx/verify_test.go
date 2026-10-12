@@ -50,8 +50,8 @@ func newSplice(t *testing.T) *splice {
 	require.NoError(t, err)
 
 	p := defaultParams()
-	p.accContrib = 150_000
-	p.initContrib = -2_000
+	p.accContrib = 158_500
+	p.initContrib = -1_000
 	initCfg := config(Initiator, p)
 	initCfg.Shared.PkScript = sharedPkScript
 	accCfg := config(Acceptor, p)
