@@ -183,6 +183,17 @@ type LightningClient interface {
 	//closure transaction is confirmed, or a manual fee rate. If neither are
 	//specified, then a default lax, block confirmation target is used.
 	CloseChannel(ctx context.Context, in *CloseChannelRequest, opts ...grpc.CallOption) (Lightning_CloseChannelClient, error)
+	// lncli: `splice estimate`
+	//EstimateSplice reports what adding funds to, or moving funds out of, an
+	//open channel would cost and allow, for a splice this node would start. It
+	//is purely local: the peer is not contacted and no coins are leased.
+	EstimateSplice(ctx context.Context, in *EstimateSpliceRequest, opts ...grpc.CallOption) (*EstimateSpliceResponse, error)
+	// lncli: `splice in`, `splice out`
+	//SpliceChannel adds funds from the wallet to an open channel, or moves funds
+	//out of it to an address, without closing it. The stream reports progress
+	//until the splice locks or ends. Once the transaction is agreed with the
+	//peer, the splice carries on whether or not the stream is still open.
+	SpliceChannel(ctx context.Context, in *SpliceChannelRequest, opts ...grpc.CallOption) (Lightning_SpliceChannelClient, error)
 	// lncli: `abandonchannel`
 	//AbandonChannel removes all channel state from the database except for a
 	//close summary. This method can be used to get rid of permanently unusable
@@ -815,6 +826,47 @@ func (x *lightningCloseChannelClient) Recv() (*CloseStatusUpdate, error) {
 	return m, nil
 }
 
+func (c *lightningClient) EstimateSplice(ctx context.Context, in *EstimateSpliceRequest, opts ...grpc.CallOption) (*EstimateSpliceResponse, error) {
+	out := new(EstimateSpliceResponse)
+	err := c.cc.Invoke(ctx, "/lnrpc.Lightning/EstimateSplice", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *lightningClient) SpliceChannel(ctx context.Context, in *SpliceChannelRequest, opts ...grpc.CallOption) (Lightning_SpliceChannelClient, error) {
+	stream, err := c.cc.NewStream(ctx, &Lightning_ServiceDesc.Streams[6], "/lnrpc.Lightning/SpliceChannel", opts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &lightningSpliceChannelClient{stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+type Lightning_SpliceChannelClient interface {
+	Recv() (*SpliceUpdate, error)
+	grpc.ClientStream
+}
+
+type lightningSpliceChannelClient struct {
+	grpc.ClientStream
+}
+
+func (x *lightningSpliceChannelClient) Recv() (*SpliceUpdate, error) {
+	m := new(SpliceUpdate)
+	if err := x.ClientStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
 func (c *lightningClient) AbandonChannel(ctx context.Context, in *AbandonChannelRequest, opts ...grpc.CallOption) (*AbandonChannelResponse, error) {
 	out := new(AbandonChannelResponse)
 	err := c.cc.Invoke(ctx, "/lnrpc.Lightning/AbandonChannel", in, out, opts...)
@@ -852,7 +904,7 @@ func (c *lightningClient) LookupInvoice(ctx context.Context, in *PaymentHash, op
 }
 
 func (c *lightningClient) SubscribeInvoices(ctx context.Context, in *InvoiceSubscription, opts ...grpc.CallOption) (Lightning_SubscribeInvoicesClient, error) {
-	stream, err := c.cc.NewStream(ctx, &Lightning_ServiceDesc.Streams[6], "/lnrpc.Lightning/SubscribeInvoices", opts...)
+	stream, err := c.cc.NewStream(ctx, &Lightning_ServiceDesc.Streams[7], "/lnrpc.Lightning/SubscribeInvoices", opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -992,7 +1044,7 @@ func (c *lightningClient) StopDaemon(ctx context.Context, in *StopRequest, opts 
 }
 
 func (c *lightningClient) SubscribeChannelGraph(ctx context.Context, in *GraphTopologySubscription, opts ...grpc.CallOption) (Lightning_SubscribeChannelGraphClient, error) {
-	stream, err := c.cc.NewStream(ctx, &Lightning_ServiceDesc.Streams[7], "/lnrpc.Lightning/SubscribeChannelGraph", opts...)
+	stream, err := c.cc.NewStream(ctx, &Lightning_ServiceDesc.Streams[8], "/lnrpc.Lightning/SubscribeChannelGraph", opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1096,7 +1148,7 @@ func (c *lightningClient) RestoreChannelBackups(ctx context.Context, in *Restore
 }
 
 func (c *lightningClient) SubscribeChannelBackups(ctx context.Context, in *ChannelBackupSubscription, opts ...grpc.CallOption) (Lightning_SubscribeChannelBackupsClient, error) {
-	stream, err := c.cc.NewStream(ctx, &Lightning_ServiceDesc.Streams[8], "/lnrpc.Lightning/SubscribeChannelBackups", opts...)
+	stream, err := c.cc.NewStream(ctx, &Lightning_ServiceDesc.Streams[9], "/lnrpc.Lightning/SubscribeChannelBackups", opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1173,7 +1225,7 @@ func (c *lightningClient) CheckMacaroonPermissions(ctx context.Context, in *Chec
 }
 
 func (c *lightningClient) RegisterRPCMiddleware(ctx context.Context, opts ...grpc.CallOption) (Lightning_RegisterRPCMiddlewareClient, error) {
-	stream, err := c.cc.NewStream(ctx, &Lightning_ServiceDesc.Streams[9], "/lnrpc.Lightning/RegisterRPCMiddleware", opts...)
+	stream, err := c.cc.NewStream(ctx, &Lightning_ServiceDesc.Streams[10], "/lnrpc.Lightning/RegisterRPCMiddleware", opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1213,7 +1265,7 @@ func (c *lightningClient) SendCustomMessage(ctx context.Context, in *SendCustomM
 }
 
 func (c *lightningClient) SubscribeCustomMessages(ctx context.Context, in *SubscribeCustomMessagesRequest, opts ...grpc.CallOption) (Lightning_SubscribeCustomMessagesClient, error) {
-	stream, err := c.cc.NewStream(ctx, &Lightning_ServiceDesc.Streams[10], "/lnrpc.Lightning/SubscribeCustomMessages", opts...)
+	stream, err := c.cc.NewStream(ctx, &Lightning_ServiceDesc.Streams[11], "/lnrpc.Lightning/SubscribeCustomMessages", opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1254,7 +1306,7 @@ func (c *lightningClient) SendOnionMessage(ctx context.Context, in *SendOnionMes
 }
 
 func (c *lightningClient) SubscribeOnionMessages(ctx context.Context, in *SubscribeOnionMessagesRequest, opts ...grpc.CallOption) (Lightning_SubscribeOnionMessagesClient, error) {
-	stream, err := c.cc.NewStream(ctx, &Lightning_ServiceDesc.Streams[11], "/lnrpc.Lightning/SubscribeOnionMessages", opts...)
+	stream, err := c.cc.NewStream(ctx, &Lightning_ServiceDesc.Streams[12], "/lnrpc.Lightning/SubscribeOnionMessages", opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1472,6 +1524,17 @@ type LightningServer interface {
 	//closure transaction is confirmed, or a manual fee rate. If neither are
 	//specified, then a default lax, block confirmation target is used.
 	CloseChannel(*CloseChannelRequest, Lightning_CloseChannelServer) error
+	// lncli: `splice estimate`
+	//EstimateSplice reports what adding funds to, or moving funds out of, an
+	//open channel would cost and allow, for a splice this node would start. It
+	//is purely local: the peer is not contacted and no coins are leased.
+	EstimateSplice(context.Context, *EstimateSpliceRequest) (*EstimateSpliceResponse, error)
+	// lncli: `splice in`, `splice out`
+	//SpliceChannel adds funds from the wallet to an open channel, or moves funds
+	//out of it to an address, without closing it. The stream reports progress
+	//until the splice locks or ends. Once the transaction is agreed with the
+	//peer, the splice carries on whether or not the stream is still open.
+	SpliceChannel(*SpliceChannelRequest, Lightning_SpliceChannelServer) error
 	// lncli: `abandonchannel`
 	//AbandonChannel removes all channel state from the database except for a
 	//close summary. This method can be used to get rid of permanently unusable
@@ -1795,6 +1858,12 @@ func (UnimplementedLightningServer) ChannelAcceptor(Lightning_ChannelAcceptorSer
 }
 func (UnimplementedLightningServer) CloseChannel(*CloseChannelRequest, Lightning_CloseChannelServer) error {
 	return status.Errorf(codes.Unimplemented, "method CloseChannel not implemented")
+}
+func (UnimplementedLightningServer) EstimateSplice(context.Context, *EstimateSpliceRequest) (*EstimateSpliceResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method EstimateSplice not implemented")
+}
+func (UnimplementedLightningServer) SpliceChannel(*SpliceChannelRequest, Lightning_SpliceChannelServer) error {
+	return status.Errorf(codes.Unimplemented, "method SpliceChannel not implemented")
 }
 func (UnimplementedLightningServer) AbandonChannel(context.Context, *AbandonChannelRequest) (*AbandonChannelResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method AbandonChannel not implemented")
@@ -2450,6 +2519,45 @@ type lightningCloseChannelServer struct {
 }
 
 func (x *lightningCloseChannelServer) Send(m *CloseStatusUpdate) error {
+	return x.ServerStream.SendMsg(m)
+}
+
+func _Lightning_EstimateSplice_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(EstimateSpliceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(LightningServer).EstimateSplice(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/lnrpc.Lightning/EstimateSplice",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(LightningServer).EstimateSplice(ctx, req.(*EstimateSpliceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Lightning_SpliceChannel_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(SpliceChannelRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(LightningServer).SpliceChannel(m, &lightningSpliceChannelServer{stream})
+}
+
+type Lightning_SpliceChannelServer interface {
+	Send(*SpliceUpdate) error
+	grpc.ServerStream
+}
+
+type lightningSpliceChannelServer struct {
+	grpc.ServerStream
+}
+
+func (x *lightningSpliceChannelServer) Send(m *SpliceUpdate) error {
 	return x.ServerStream.SendMsg(m)
 }
 
@@ -3274,6 +3382,10 @@ var Lightning_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Lightning_FundingStateStep_Handler,
 		},
 		{
+			MethodName: "EstimateSplice",
+			Handler:    _Lightning_EstimateSplice_Handler,
+		},
+		{
 			MethodName: "AbandonChannel",
 			Handler:    _Lightning_AbandonChannel_Handler,
 		},
@@ -3436,6 +3548,11 @@ var Lightning_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "CloseChannel",
 			Handler:       _Lightning_CloseChannel_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "SpliceChannel",
+			Handler:       _Lightning_SpliceChannel_Handler,
 			ServerStreams: true,
 		},
 		{

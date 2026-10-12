@@ -343,6 +343,22 @@ func MainRPCServerPermissions() map[string][]bakery.Op {
 			Entity: "offchain",
 			Action: "write",
 		}},
+		// A splice moves wallet funds into a channel or channel funds
+		// on chain: both, like opening and closing.
+		"/lnrpc.Lightning/SpliceChannel": {{
+			Entity: "onchain",
+			Action: "write",
+		}, {
+			Entity: "offchain",
+			Action: "write",
+		}},
+		"/lnrpc.Lightning/EstimateSplice": {{
+			Entity: "onchain",
+			Action: "read",
+		}, {
+			Entity: "offchain",
+			Action: "read",
+		}},
 		"/lnrpc.Lightning/GetInfo": {{
 			Entity: "info",
 			Action: "read",
