@@ -461,6 +461,7 @@ func Main() {
 		openChannelCommand,
 		batchOpenChannelCommand,
 		closeChannelCommand,
+		spliceCommand,
 		closeAllChannelsCommand,
 		abandonChannelCommand,
 		listPeersCommand,
