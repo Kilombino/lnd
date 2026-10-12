@@ -1106,7 +1106,8 @@ func newHopNetwork() *hopNetwork {
 
 func (h *hopNetwork) createChannelLink(server, peer *mockServer,
 	channel *lnwallet.LightningChannel,
-	decoder *mockIteratorDecoder) (ChannelLink, error) {
+	decoder *mockIteratorDecoder,
+	cfgOpts ...func(*ChannelLinkConfig)) (ChannelLink, error) {
 
 	const (
 		fwdPkgTimeout       = 15 * time.Second
@@ -1138,7 +1139,7 @@ func (h *hopNetwork) createChannelLink(server, peer *mockServer,
 	}
 
 	//nolint:ll
-	link := NewChannelLink(
+	linkCfg :=
 		ChannelLinkConfig{
 			BestHeight:         server.htlcSwitch.BestHeight,
 			FwrdingPolicy:      h.globalPolicy,
@@ -1179,9 +1180,11 @@ func (h *hopNetwork) createChannelLink(server, peer *mockServer,
 			HtlcNotifier:               server.htlcSwitch.cfg.HtlcNotifier,
 			GetAliases:                 getAliases,
 			ShouldFwdExpAccountability: func() bool { return true },
-		},
-		channel,
-	)
+		}
+	for _, opt := range cfgOpts {
+		opt(&linkCfg)
+	}
+	link := NewChannelLink(linkCfg, channel)
 	if err := server.htlcSwitch.AddLink(link); err != nil {
 		return nil, fmt.Errorf("unable to add channel link: %w", err)
 	}
@@ -1229,9 +1232,13 @@ type twoHopNetwork struct {
 //
 // alice                      bob
 // channel link           channel link.
+//
+// linkOpts, when given, modify the links' configurations: the first applies
+// to Alice's link, the second to Bob's.
 func newTwoHopNetwork(t testing.TB,
 	aliceChannel, bobChannel *lnwallet.LightningChannel,
-	startingHeight uint32) *twoHopNetwork {
+	startingHeight uint32,
+	linkOpts ...func(*ChannelLinkConfig)) *twoHopNetwork {
 
 	aliceDb := aliceChannel.State().Db.GetParentDB()
 	bobDb := bobChannel.State().Db.GetParentDB()
@@ -1253,15 +1260,24 @@ func newTwoHopNetwork(t testing.TB,
 	aliceDecoder := newMockIteratorDecoder()
 	bobDecoder := newMockIteratorDecoder()
 
+	var aliceOpts, bobOpts []func(*ChannelLinkConfig)
+	if len(linkOpts) > 0 {
+		aliceOpts = linkOpts[:1]
+	}
+	if len(linkOpts) > 1 {
+		bobOpts = linkOpts[1:2]
+	}
+
 	aliceChannelLink, err := hopNetwork.createChannelLink(
 		aliceServer, bobServer, aliceChannel, aliceDecoder,
+		aliceOpts...,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	bobChannelLink, err := hopNetwork.createChannelLink(
-		bobServer, aliceServer, bobChannel, bobDecoder,
+		bobServer, aliceServer, bobChannel, bobDecoder, bobOpts...,
 	)
 	if err != nil {
 		t.Fatal(err)

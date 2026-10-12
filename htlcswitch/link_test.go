@@ -2089,10 +2089,14 @@ func (m *mockPeer) SendMessage(sync bool, msgs ...lnwire.Message) error {
 		return fmt.Errorf("disconnected")
 	}
 
-	select {
-	case m.sentMsgs <- msgs[0]:
-	case <-m.quit:
-		return fmt.Errorf("mockPeer shutting down")
+	// Every message, in order: a batch of commitment_signed goes out in
+	// one call.
+	for _, msg := range msgs {
+		select {
+		case m.sentMsgs <- msg:
+		case <-m.quit:
+			return fmt.Errorf("mockPeer shutting down")
+		}
 	}
 	return nil
 }

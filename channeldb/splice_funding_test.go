@@ -427,3 +427,21 @@ func TestLockSpliceSwapsCommitments(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, records)
 }
+
+// TestSpliceFundingCopy checks that a copy of a spliced channel reports the
+// same current funding: code that works from a copy would otherwise watch or
+// name the funding the splice spent.
+func TestSpliceFundingCopy(t *testing.T) {
+	t.Parallel()
+
+	fullDB, err := MakeTestDB(t)
+	require.NoError(t, err)
+	channel := createTestChannel(t, fullDB.ChannelStateDB())
+
+	lock := testSpliceLock(t, 0x91, 3_000_000)
+	require.NoError(t, channel.LockSplice(lock))
+
+	clone := channel.Copy()
+	require.Equal(t, lock.Funding.OutPoint, clone.CurrentFundingOutpoint())
+	require.Equal(t, fn.Some(lock.Funding), clone.SpliceFundingInfo())
+}

@@ -642,6 +642,11 @@ func (s *mockServer) readHandler(message lnwire.Message) error {
 		targetChan = msg.ChanID
 	case *lnwire.Stfu:
 		targetChan = msg.ChanID
+
+	// The splice messages, routed by channel as the peer does.
+	case lnwire.LinkUpdater:
+		targetChan = msg.TargetChanID()
+
 	default:
 		return fmt.Errorf("unknown message type: %T", msg)
 	}

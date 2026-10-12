@@ -4548,6 +4548,7 @@ func (c *OpenChannel) Copy() *OpenChannel {
 		LastWasRevoke:           c.LastWasRevoke,
 		RevocationKeyLocator:    c.RevocationKeyLocator,
 		confirmedScid:           c.confirmedScid,
+		spliceFunding:           c.spliceFunding,
 		TapscriptRoot:           c.TapscriptRoot,
 	}
 

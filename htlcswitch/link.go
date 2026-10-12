@@ -256,6 +256,11 @@ type ChannelLinkConfig struct {
 	// ChannelNotifier when a channel link become inactive.
 	NotifyInactiveLinkEvent func(wire.OutPoint)
 
+	// SpliceHandler is the channel's splice machine, nil when splicing is
+	// off for this channel. The link hands it the splice messages and
+	// tells it about the splice's commitment_signed.
+	SpliceHandler SpliceHandler
+
 	// NotifyChannelUpdate allows the link to tell the ChannelNotifier when
 	// a channel's state has been updated.
 	NotifyChannelUpdate func(*channeldb.OpenChannel)
@@ -441,6 +446,14 @@ type channelLink struct {
 	// channel's state.
 	resumeReqs chan fn.Req[fn.Unit, error]
 
+	// spliceReqs is a queue of splice steps to run on the link's
+	// goroutine.
+	spliceReqs chan spliceReq
+
+	// batch collects a batch of commitment_signed messages announced by
+	// start_batch, nil outside one.
+	batch *commitBatch
+
 	// cg is a helper that encapsulates a wait group and quit channel and
 	// allows contexts that either block or cancel on those depending on
 	// the use case.
@@ -551,6 +564,7 @@ func NewChannelLink(cfg ChannelLinkConfig,
 		quiescer:            qsm,
 		quiescenceReqs:      quiescenceReqs,
 		resumeReqs:          make(chan fn.Req[fn.Unit, error], 1),
+		spliceReqs:          make(chan spliceReq, 1),
 		cg:                  fn.NewContextGuard(),
 	}
 }
@@ -1512,6 +1526,10 @@ func (l *channelLink) htlcManager(ctx context.Context) {
 		case rReq := <-l.resumeReqs:
 			rReq.Resolve(l.resumeQuiescence(ctx))
 
+		// A step of a splice.
+		case sReq := <-l.spliceReqs:
+			sReq.Resolve(sReq.Request(ctx))
+
 		case <-l.cg.Done():
 			return
 		}
@@ -1882,6 +1900,18 @@ func (l *channelLink) handleUpstreamMsg(ctx context.Context,
 		return
 	}
 
+	// Nothing but the announced commitment_signed messages may come
+	// inside a batch.
+	if _, ok := msg.(*lnwire.CommitSig); l.batch != nil && !ok {
+		l.failf(LinkFailureError{
+			code:          ErrInvalidUpdate,
+			FailureAction: LinkFailureDisconnect,
+			Warning:       true,
+		}, "%T inside a batch", msg)
+
+		return
+	}
+
 	var err error
 
 	switch msg := msg.(type) {
@@ -1898,13 +1928,35 @@ func (l *channelLink) handleUpstreamMsg(ctx context.Context,
 		err = l.processRemoteUpdateFailHTLC(msg)
 
 	case *lnwire.CommitSig:
-		err = l.processRemoteCommitSig(ctx, msg)
+		switch {
+		// A member of a batch: processed with the rest of it.
+		case l.batch != nil:
+			err = l.handleBatchedCommitSig(ctx, msg)
+
+		// A splice's own commitment_signed: checked and handed to
+		// the splice machine, not answered with a revocation.
+		case l.isSpliceCommitSig(msg):
+			l.handleSpliceCommitSig(msg)
+
+		default:
+			err = l.processRemoteCommitSig(ctx, msg, nil)
+		}
 
 		// At this point our local commitment state has been irrevocably
 		// committed to and our balances are updated. We notify our
 		// subscribers that the channel state has been updated.
 		if err == nil {
 			l.cfg.NotifyChannelUpdate(l.channel.ChannelState())
+		}
+
+	case *lnwire.StartBatch:
+		err = l.handleStartBatch(msg)
+		if err != nil {
+			l.failf(LinkFailureError{
+				code:          ErrInvalidUpdate,
+				FailureAction: LinkFailureDisconnect,
+				Warning:       true,
+			}, "start_batch: %v", err)
 		}
 
 	case *lnwire.RevokeAndAck:
@@ -1933,6 +1985,11 @@ func (l *channelLink) handleUpstreamMsg(ctx context.Context,
 		l.processRemoteError(msg)
 
 	default:
+		if isSpliceMessage(msg) {
+			l.handleSpliceMessage(msg)
+			break
+		}
+
 		if !l.unknownMessageLogged {
 			l.log.Warnf("received unknown message of type %T", msg)
 			l.unknownMessageLogged = true
@@ -2155,7 +2212,11 @@ func (l *channelLink) updateCommitTx(ctx context.Context) error {
 		PartialSig:    newCommit.PartialSig,
 		CustomRecords: auxBlobRecords,
 	}
-	err = l.cfg.Peer.SendMessage(false, commitSig)
+
+	// While splices are pending, a batch: one per funding.
+	err = l.cfg.Peer.SendMessage(
+		false, l.commitSigMessages(commitSig, newCommit.SpliceSigs)...,
+	)
 	if err != nil {
 		l.log.Errorf("failed to send CommitSig: %v", err)
 	}
@@ -4381,8 +4442,11 @@ func (l *channelLink) processRemoteUpdateFailHTLC(
 
 // processRemoteCommitSig takes a `CommitSig` msg sent from the remote and
 // processes it.
+//
+// spliceSigs are the same commitment's signatures on each pending splice's
+// funding, from the same batch.
 func (l *channelLink) processRemoteCommitSig(ctx context.Context,
-	msg *lnwire.CommitSig) error {
+	msg *lnwire.CommitSig, spliceSigs []lnwallet.SpliceCommitSigs) error {
 
 	// Since we may have learned new preimages for the first time, we'll add
 	// them to our preimage cache. By doing this, we ensure any contested
@@ -4421,12 +4485,12 @@ func (l *channelLink) processRemoteCommitSig(ctx context.Context,
 
 		return err
 	}
-	err = l.channel.ReceiveNewCommitment(&lnwallet.CommitSigs{
+	err = l.channel.ReceiveNewCommitmentBatch(&lnwallet.CommitSigs{
 		CommitSig:  msg.CommitSig,
 		HtlcSigs:   msg.HtlcSigs,
 		PartialSig: msg.PartialSig,
 		AuxSigBlob: auxSigBlob,
-	})
+	}, spliceSigs)
 	if err != nil {
 		// If we were unable to reconstruct their proposed commitment,
 		// then we'll examine the type of error. If it's an
