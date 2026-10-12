@@ -297,6 +297,17 @@ func NewPartialChainControl(cfg *Config) (*PartialChainControl, func(), error) {
 			cfg.ActiveNetParams.Params, cfg.NeutrinoCS,
 		)
 
+		// The light client checks BLAKE2b proof of work, and on
+		// mainnet a checkpoint ties it to the activation block; this
+		// confirms the chain it ended up on as the bitcoind path does
+		// (waiting for the activation height, then re-checking), and
+		// writes the same status file.
+		if err := verifyBlake2bNeutrino(
+			cfg.NeutrinoCS, cfg, chainIdentityQuit,
+		); err != nil {
+			return nil, nil, err
+		}
+
 		// Get our best block as a health check.
 		cc.HealthCheck = func() error {
 			_, _, err := cc.ChainSource.GetBestBlock()
