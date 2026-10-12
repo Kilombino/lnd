@@ -130,11 +130,7 @@ func newSplicePair(t *testing.T) *splicePair {
 	a, b, err := lnwallet.CreateTestChannels(t, spliceChanType)
 	require.NoError(t, err)
 
-	chain := &testChain{
-		height: 900_000,
-		outs:   make(map[wire.OutPoint]*wire.TxOut),
-		confs:  make(chan *chainntnfs.TxConfirmation, 2),
-	}
+	chain := newTestChain()
 	p := &splicePair{
 		alice: newNode(t, a, b, lntypes.Local, chain),
 		bob:   newNode(t, b, a, lntypes.Remote, chain),
@@ -199,15 +195,13 @@ func requireUpdates(t *testing.T, updates <-chan Update,
 	return u
 }
 
-// confirm confirms the splice for both machines.
-func (p *splicePair) confirm(t *testing.T) {
+// confirm confirms the splice at lock depth for both machines.
+func (p *splicePair) confirm(t *testing.T, txid chainhash.Hash) {
 	t.Helper()
 
-	for i := 0; i < 2; i++ {
-		p.chain.confs <- &chainntnfs.TxConfirmation{
-			BlockHeight: 900_006, TxIndex: 2,
-		}
-	}
+	p.chain.confirm(t, txid, 6, 2, &chainntnfs.TxConfirmation{
+		BlockHeight: 900_006, TxIndex: 2,
+	})
 }
 
 // requireMoved waits for both channels to be on the splice's funding.
@@ -276,7 +270,7 @@ func TestSpliceInBetweenMachines(t *testing.T) {
 	// Alice's coins stay leased until the lock.
 	require.Equal(t, 2, p.alice.wallet.leaseCount())
 
-	p.confirm(t)
+	p.confirm(t, txid)
 	requireUpdates(t, updates, StateLocked)
 	p.requireMoved(t, txid, capacity+amount)
 	require.Zero(t, p.alice.wallet.leaseCount())
@@ -348,7 +342,7 @@ func TestSpliceOutBetweenMachines(t *testing.T) {
 	require.Equal(t, Label(p.alice.ch.State().ShortChannelID, DirectionOut),
 		p.alice.wallet.publishedTxs()[u.Txid])
 
-	p.confirm(t)
+	p.confirm(t, u.Txid)
 	requireUpdates(t, updates, StateLocked)
 	p.requireMoved(t, u.Txid, btcutil.Amount(fundingValue))
 }
@@ -452,11 +446,7 @@ func soloAlice(t *testing.T) (*node, *lnwallet.LightningChannel) {
 
 	a, b, err := lnwallet.CreateTestChannels(t, spliceChanType)
 	require.NoError(t, err)
-	chain := &testChain{
-		height: 900_000,
-		outs:   make(map[wire.OutPoint]*wire.TxOut),
-		confs:  make(chan *chainntnfs.TxConfirmation, 1),
-	}
+	chain := newTestChain()
 
 	return newNode(t, a, b, lntypes.Local, chain), b
 }
@@ -669,4 +659,85 @@ func TestSpliceCancel(t *testing.T) {
 		StateSigned)
 	require.False(t, p.alice.machine.Cancel())
 	requireUpdates(t, updates, StateBroadcast)
+}
+
+// TestSpliceRebroadcast checks that a published splice goes out again at
+// every block until it confirms, and not after.
+func TestSpliceRebroadcast(t *testing.T) {
+	t.Parallel()
+
+	p := newSplicePair(t)
+	p.alice.fund(t, 1, 5_000_000)
+	updates, err := p.alice.machine.Splice(Request{
+		Direction: DirectionIn, Amount: 1_000_000, FeeRate: 2_500,
+	})
+	require.NoError(t, err)
+	u := requireUpdates(t, updates, StatePreparing, StateNegotiating,
+		StateSigned, StateBroadcast)
+
+	before := p.alice.wallet.publishCount()
+	require.Eventually(t, func() bool {
+		p.chain.mine()
+		return p.alice.wallet.publishCount() >= before+2
+	}, 5*time.Second, 20*time.Millisecond)
+
+	// Confirmed: no more.
+	p.chain.confirm(t, u.Txid, 1, 2, &chainntnfs.TxConfirmation{})
+	time.Sleep(100 * time.Millisecond)
+	settled := p.alice.wallet.publishCount()
+	for i := 0; i < 3; i++ {
+		p.chain.mine()
+	}
+	time.Sleep(100 * time.Millisecond)
+	require.Equal(t, settled, p.alice.wallet.publishCount())
+}
+
+// TestSpliceDead checks a splice one of whose inputs another transaction
+// spends: at 6 confirmations of that spend both sides drop it from the
+// channel and record it as dead, the starter hears why; at 144 it leaves the
+// starter's wallet and its coins are released.
+func TestSpliceDead(t *testing.T) {
+	t.Parallel()
+
+	p := newSplicePair(t)
+	c := p.alice.fund(t, 1, 5_000_000)
+	updates, err := p.alice.machine.Splice(Request{
+		Direction: DirectionIn, Amount: 1_000_000, FeeRate: 2_500,
+	})
+	require.NoError(t, err)
+	u := requireUpdates(t, updates, StatePreparing, StateNegotiating,
+		StateSigned, StateBroadcast)
+	require.Len(t, p.alice.ch.PendingFundings(), 1)
+
+	// Alice's coin goes elsewhere: both machines watch it.
+	conflict := wire.NewMsgTx(2)
+	conflict.AddTxIn(&wire.TxIn{PreviousOutPoint: c.OutPoint})
+	conflict.AddTxOut(&wire.TxOut{Value: 4_000_000, PkScript: p2tr(3)})
+	p.chain.spend(t, c.OutPoint, conflict, 2)
+	p.chain.confirm(t, conflict.TxHash(), deadDepth, 2,
+		&chainntnfs.TxConfirmation{})
+
+	u = requireUpdates(t, updates, StateAborted)
+	require.Contains(t, u.Reason, "dead")
+	for _, n := range []*node{p.alice, p.bob} {
+		require.Eventually(t, func() bool {
+			return len(n.ch.PendingFundings()) == 0
+		}, 5*time.Second, 10*time.Millisecond)
+		last, err := n.ch.State().LastSplice()
+		require.NoError(t, err)
+		require.Equal(t, "dead", last.Outcome)
+	}
+
+	// Deep enough: out of the wallet.
+	p.chain.confirm(t, conflict.TxHash(), forgetDepth, 2,
+		&chainntnfs.TxConfirmation{})
+	require.Eventually(t, func() bool {
+		removed := p.alice.wallet.removedTxs()
+		return len(removed) == 1 && removed[0] == u.Txid
+	}, 5*time.Second, 10*time.Millisecond)
+	require.Zero(t, p.alice.wallet.leaseCount())
+
+	// The channel works on as before.
+	require.Equal(t, p.alice.ch.State().FundingOutpoint,
+		p.alice.ch.State().CurrentFundingOutpoint())
 }

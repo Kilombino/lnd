@@ -390,6 +390,7 @@ func (m *Machine) signed() {
 	m.report(Update{State: StateBroadcast, Txid: a.txid})
 	m.resume()
 	m.watchConfirmation(height)
+	m.watchPending(height)
 }
 
 // label returns the splice transaction's wallet label.

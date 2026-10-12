@@ -342,6 +342,14 @@ func (l *channelLink) SendSpliceCommitment(txid chainhash.Hash) <-chan error {
 	})
 }
 
+// RemoveSpliceFunding drops a splice that will never lock, on the link's
+// goroutine so no batch is half processed around it.
+func (l *channelLink) RemoveSpliceFunding(txid chainhash.Hash) <-chan error {
+	return l.runSpliceReq(func(context.Context) error {
+		return l.channel.RemovePendingFunding(txid)
+	})
+}
+
 // LockSplice completes a splice both sides have locked: the channel moves to
 // its funding output.
 func (l *channelLink) LockSplice(txid chainhash.Hash,
@@ -421,6 +429,7 @@ type SpliceLink interface {
 	AddSpliceFunding(f lnwallet.PendingFunding) <-chan error
 	SendSpliceCommitment(txid chainhash.Hash) <-chan error
 	LockSplice(txid chainhash.Hash, scid lnwire.ShortChannelID) <-chan error
+	RemoveSpliceFunding(txid chainhash.Hash) <-chan error
 }
 
 // A compile time check that the link can splice.

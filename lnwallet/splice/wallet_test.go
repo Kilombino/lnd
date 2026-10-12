@@ -20,6 +20,7 @@ type fakeWallet struct {
 	leases    map[wire.OutPoint]wtxmgr.LockID
 	failLease map[wire.OutPoint]bool
 	published map[chainhash.Hash]string
+	publishes int
 	removed   []chainhash.Hash
 	publish   error
 	utxos     []*lnwallet.Utxo
@@ -69,9 +70,26 @@ func (w *fakeWallet) PublishTransaction(tx *wire.MsgTx, label string) error {
 	if w.publish != nil {
 		return w.publish
 	}
+	w.publishes++
 	w.published[tx.TxHash()] = label
 
 	return nil
+}
+
+// publishCount returns how many times a transaction was published.
+func (w *fakeWallet) publishCount() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	return w.publishes
+}
+
+// removedTxs returns the transactions removed from the wallet.
+func (w *fakeWallet) removedTxs() []chainhash.Hash {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	return append([]chainhash.Hash(nil), w.removed...)
 }
 
 // leaseCount returns how many outputs are leased.

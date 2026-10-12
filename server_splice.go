@@ -33,6 +33,20 @@ func (c *spliceChain) RegisterConfirmationsNtfn(txid *chainhash.Hash,
 	)
 }
 
+// RegisterSpendNtfn implements splice.Chain.
+func (c *spliceChain) RegisterSpendNtfn(op *wire.OutPoint, pkScript []byte,
+	heightHint uint32) (*chainntnfs.SpendEvent, error) {
+
+	return c.notifier.RegisterSpendNtfn(op, pkScript, heightHint)
+}
+
+// RegisterBlockEpochNtfn implements splice.Chain.
+func (c *spliceChain) RegisterBlockEpochNtfn(
+	best *chainntnfs.BlockEpoch) (*chainntnfs.BlockEpochEvent, error) {
+
+	return c.notifier.RegisterBlockEpochNtfn(best)
+}
+
 // BestHeight implements splice.Chain.
 func (c *spliceChain) BestHeight() (uint32, error) {
 	_, height, err := c.chainIO.GetBestBlock()

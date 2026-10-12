@@ -2,8 +2,11 @@ package splice
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/wire"
+	"github.com/lightningnetwork/lnd/chainntnfs"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/fn/v2"
 	"github.com/lightningnetwork/lnd/input"
@@ -328,6 +331,7 @@ func (m *Machine) resumePending(broadcastHeight uint32) {
 	}
 
 	m.watchConfirmation(broadcastHeight)
+	m.watchPending(broadcastHeight)
 }
 
 // spliceInputs returns the transaction's inputs as the record keeps them.
@@ -343,4 +347,218 @@ func spliceInputs(res *interactivetx.Result) []channeldb.SpliceInput {
 	}
 
 	return inputs
+}
+
+// Depths at which a splice whose input was spent elsewhere is given up on,
+// and at which its trace leaves the wallet.
+const (
+	deadDepth   = 6
+	forgetDepth = 144
+)
+
+// watchPending starts what a published splice needs until it locks: it is
+// published again at every block until it confirms (an evicted splice would
+// otherwise only go out again at restart), and its inputs are watched for a
+// spend by another transaction, which kills it.
+func (m *Machine) watchPending(heightHint uint32) {
+	a := m.active
+	txid := a.txid
+
+	m.wg.Add(1)
+	go m.rebroadcastUntilConfirmed(txid, a.fundingScript, heightHint)
+
+	for _, in := range a.res.Inputs {
+		m.wg.Add(1)
+		go m.watchInput(txid, in.OutPoint, in.PkScript, heightHint)
+	}
+}
+
+// rebroadcastUntilConfirmed publishes the splice again at every block until
+// its first confirmation.
+func (m *Machine) rebroadcastUntilConfirmed(txid chainhash.Hash,
+	script []byte, heightHint uint32) {
+
+	defer m.wg.Done()
+
+	conf, err := m.cfg.Chain.RegisterConfirmationsNtfn(
+		&txid, script, 1, heightHint,
+	)
+	if err != nil {
+		log.Errorf("ChannelID(%v): unable to watch splice %v: %v",
+			m.cfg.ChanID, txid, err)
+		return
+	}
+	defer conf.Cancel()
+
+	epochs, err := m.cfg.Chain.RegisterBlockEpochNtfn(nil)
+	if err != nil {
+		log.Errorf("ChannelID(%v): unable to watch blocks: %v",
+			m.cfg.ChanID, err)
+		return
+	}
+	defer epochs.Cancel()
+
+	for {
+		select {
+		case _, ok := <-epochs.Epochs:
+			if !ok {
+				return
+			}
+			m.enqueue(func() {
+				a := m.active
+				if a == nil || a.txid != txid ||
+					a.phase != phasePending {
+
+					return
+				}
+				tx, err := m.signedTx()
+				if err != nil {
+					return
+				}
+				status := Publish(m.cfg.Wallet, tx, m.label())
+				if status.State == RelayRejected {
+					log.Warnf("ChannelID(%v): splice %v "+
+						"not relayed: %v", m.cfg.ChanID,
+						txid, status.Reason)
+				}
+			})
+
+		case <-conf.Confirmed:
+			return
+
+		case <-m.quit:
+			return
+		}
+	}
+}
+
+// watchInput watches an input of the splice. Spent by the splice, it is
+// done; spent by anything else, the splice is dead once that spend is
+// deadDepth deep, and leaves the wallet once forgetDepth deep. A reorg
+// taking the other spend out puts the input back under watch.
+func (m *Machine) watchInput(txid chainhash.Hash, op wire.OutPoint,
+	script []byte, heightHint uint32) {
+
+	defer m.wg.Done()
+
+	for {
+		spendNtfn, err := m.cfg.Chain.RegisterSpendNtfn(
+			&op, script, heightHint,
+		)
+		if err != nil {
+			log.Errorf("ChannelID(%v): unable to watch splice input "+
+				"%v: %v", m.cfg.ChanID, op, err)
+			return
+		}
+
+		var spend *chainntnfs.SpendDetail
+		select {
+		case s, ok := <-spendNtfn.Spend:
+			spendNtfn.Cancel()
+			if !ok {
+				return
+			}
+			spend = s
+		case <-m.quit:
+			spendNtfn.Cancel()
+			return
+		}
+		if *spend.SpenderTxHash == txid {
+			return
+		}
+
+		conflict := *spend.SpenderTxHash
+		height := uint32(spend.SpendingHeight)
+		outScript := spend.SpendingTx.TxOut[0].PkScript
+
+		dead, reorged := m.waitDepth(conflict, outScript, deadDepth,
+			height)
+		if reorged {
+			continue
+		}
+		if !dead {
+			return
+		}
+		m.enqueue(func() { m.spliceDead(txid, conflict) })
+
+		forget, reorged := m.waitDepth(conflict, outScript, forgetDepth,
+			height)
+		if reorged {
+			continue
+		}
+		if forget {
+			m.enqueue(func() { m.forgetDead(txid) })
+		}
+
+		return
+	}
+}
+
+// waitDepth waits for a transaction to reach a depth: true when it does,
+// reorged when a reorg takes it out first, both false when stopping.
+func (m *Machine) waitDepth(txid chainhash.Hash, script []byte,
+	depth, heightHint uint32) (bool, bool) {
+
+	conf, err := m.cfg.Chain.RegisterConfirmationsNtfn(
+		&txid, script, depth, heightHint,
+	)
+	if err != nil {
+		log.Errorf("ChannelID(%v): unable to watch %v: %v",
+			m.cfg.ChanID, txid, err)
+		return false, false
+	}
+	defer conf.Cancel()
+
+	select {
+	case <-conf.Confirmed:
+		return true, false
+	case <-conf.NegativeConf:
+		return false, true
+	case <-m.quit:
+		return false, false
+	}
+}
+
+// spliceDead gives up on a splice one of whose inputs another transaction
+// spent: it leaves the channel's funding set, and its coins and wallet trace
+// wait for forgetDead.
+func (m *Machine) spliceDead(txid, conflict chainhash.Hash) {
+	a := m.active
+	if a == nil || a.txid != txid {
+		return
+	}
+
+	tx, err := m.signedTx()
+	if err != nil {
+		tx = a.res.Tx
+	}
+	m.dead[txid] = deadSplice{tx: tx, inputs: a.ourInputs}
+
+	if err := m.wait(m.cfg.Link.RemoveSpliceFunding(txid)); err != nil {
+		log.Errorf("ChannelID(%v): unable to drop dead splice %v: %v",
+			m.cfg.ChanID, txid, err)
+	}
+
+	reason := fmt.Sprintf("dead: an input was spent by %v", conflict)
+	log.Warnf("ChannelID(%v): splice %v is %v", m.cfg.ChanID, txid,
+		reason)
+	m.recordLast("dead", reason, false)
+	m.notify("dead", txid, reason, false)
+	m.report(Update{State: StateAborted, Txid: txid, Reason: reason})
+	m.setActive(nil)
+}
+
+// forgetDead takes a dead splice out of the wallet, so the coins it spent
+// count again, and releases its leases.
+func (m *Machine) forgetDead(txid chainhash.Hash) {
+	d, ok := m.dead[txid]
+	if !ok {
+		return
+	}
+	delete(m.dead, txid)
+
+	if err := Forget(m.cfg.Wallet, d.tx, d.inputs); err != nil {
+		log.Errorf("ChannelID(%v): unable to forget dead splice %v: %v",
+			m.cfg.ChanID, txid, err)
+	}
 }

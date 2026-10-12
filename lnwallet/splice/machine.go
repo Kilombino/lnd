@@ -52,6 +52,10 @@ type Link interface {
 	// LockSplice completes a splice both sides have locked.
 	LockSplice(txid chainhash.Hash,
 		scid lnwire.ShortChannelID) <-chan error
+
+	// RemoveSpliceFunding drops a splice that will never lock from the
+	// channel's funding set.
+	RemoveSpliceFunding(txid chainhash.Hash) <-chan error
 }
 
 // Channel is the channel's state machine as the machine reads it.
@@ -86,6 +90,14 @@ type Chain interface {
 		numConfs, heightHint uint32,
 		opts ...chainntnfs.NotifierOption) (
 		*chainntnfs.ConfirmationEvent, error)
+
+	// RegisterSpendNtfn notifies when an output is spent.
+	RegisterSpendNtfn(op *wire.OutPoint, pkScript []byte,
+		heightHint uint32) (*chainntnfs.SpendEvent, error)
+
+	// RegisterBlockEpochNtfn notifies of each new block.
+	RegisterBlockEpochNtfn(*chainntnfs.BlockEpoch) (
+		*chainntnfs.BlockEpochEvent, error)
 
 	// BestHeight returns the height of the chain's tip.
 	BestHeight() (uint32, error)
@@ -235,6 +247,13 @@ const (
 	phasePending
 )
 
+// deadSplice is a dead splice's trace in the wallet: the transaction and
+// the coins we put in.
+type deadSplice struct {
+	tx     *wire.MsgTx
+	inputs []Coin
+}
+
 // active is the splice in progress on the channel, if any.
 type active struct {
 	phase phase
@@ -326,6 +345,9 @@ type Machine struct {
 	// splices are refused from then on.
 	misbehaved bool
 
+	// dead are splices given up on, waiting to leave the wallet.
+	dead map[chainhash.Hash]deadSplice
+
 	quit     chan struct{}
 	stopOnce sync.Once
 	wg       sync.WaitGroup
@@ -344,6 +366,7 @@ func NewMachine(cfg Config) *Machine {
 	return &Machine{
 		cfg:    cfg,
 		events: make(chan func(), 64),
+		dead:   make(map[chainhash.Hash]deadSplice),
 		quit:   make(chan struct{}),
 	}
 }

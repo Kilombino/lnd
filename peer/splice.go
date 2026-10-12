@@ -200,3 +200,15 @@ func (p *Brontide) stopSpliceMachines() {
 		m.Stop()
 	}
 }
+
+// RemoveSpliceFunding implements splice.Link.
+func (s *spliceLinkProxy) RemoveSpliceFunding(
+	txid chainhash.Hash) <-chan error {
+
+	l, err := s.link()
+	if err != nil {
+		return errChan(err)
+	}
+
+	return l.RemoveSpliceFunding(txid)
+}

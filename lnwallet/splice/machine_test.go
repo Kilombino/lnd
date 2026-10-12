@@ -97,6 +97,10 @@ func (l *testLink) SendSpliceCommitment(txid chainhash.Hash) <-chan error {
 	return done(nil)
 }
 
+func (l *testLink) RemoveSpliceFunding(txid chainhash.Hash) <-chan error {
+	return done(l.ch.RemovePendingFunding(txid))
+}
+
 func (l *testLink) LockSplice(txid chainhash.Hash,
 	scid lnwire.ShortChannelID) <-chan error {
 
@@ -125,38 +129,170 @@ func (p *testPeer) Disconnect(reason error) {
 	p.disconnected = reason
 }
 
-// testChain answers for the coins it knows and lets the test confirm the
-// splice.
+// testChain answers for the coins it knows and lets the test confirm
+// transactions, spend outputs and mine blocks.
 type testChain struct {
 	height uint32
 	outs   map[wire.OutPoint]*wire.TxOut
-	confs  chan *chainntnfs.TxConfirmation
 
-	mu    sync.Mutex
-	depth uint32
+	mu     sync.Mutex
+	confs  map[confKey][]*chainntnfs.ConfirmationEvent
+	spends map[wire.OutPoint][]chan *chainntnfs.SpendDetail
+	epochs []chan *chainntnfs.BlockEpoch
 }
 
-func (c *testChain) watchedDepth() uint32 {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	return c.depth
+// confKey names a confirmation registration.
+type confKey struct {
+	txid     chainhash.Hash
+	numConfs uint32
 }
 
-func (c *testChain) RegisterConfirmationsNtfn(_ *chainhash.Hash, _ []byte,
+func newTestChain() *testChain {
+	return &testChain{
+		height: 900_000,
+		outs:   make(map[wire.OutPoint]*wire.TxOut),
+		confs:  make(map[confKey][]*chainntnfs.ConfirmationEvent),
+		spends: make(map[wire.OutPoint][]chan *chainntnfs.SpendDetail),
+	}
+}
+
+func (c *testChain) RegisterConfirmationsNtfn(txid *chainhash.Hash, _ []byte,
 	numConfs, _ uint32, _ ...chainntnfs.NotifierOption) (
 	*chainntnfs.ConfirmationEvent, error) {
 
+	ev := &chainntnfs.ConfirmationEvent{
+		Confirmed:    make(chan *chainntnfs.TxConfirmation, 1),
+		NegativeConf: make(chan int32, 1),
+		Cancel:       func() {},
+	}
+
 	c.mu.Lock()
-	c.depth = numConfs
+	defer c.mu.Unlock()
+
+	k := confKey{*txid, numConfs}
+	c.confs[k] = append(c.confs[k], ev)
+
+	return ev, nil
+}
+
+func (c *testChain) RegisterSpendNtfn(op *wire.OutPoint, _ []byte,
+	_ uint32) (*chainntnfs.SpendEvent, error) {
+
+	ch := make(chan *chainntnfs.SpendDetail, 1)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.spends[*op] = append(c.spends[*op], ch)
+
+	return &chainntnfs.SpendEvent{Spend: ch, Cancel: func() {}}, nil
+}
+
+func (c *testChain) RegisterBlockEpochNtfn(
+	*chainntnfs.BlockEpoch) (*chainntnfs.BlockEpochEvent, error) {
+
+	ch := make(chan *chainntnfs.BlockEpoch, 4)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.epochs = append(c.epochs, ch)
+
+	return &chainntnfs.BlockEpochEvent{Epochs: ch, Cancel: func() {}}, nil
+}
+
+// registered reports whether txid is watched for numConfs, n times.
+func (c *testChain) registered(txid chainhash.Hash, numConfs uint32,
+	n int) bool {
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return len(c.confs[confKey{txid, numConfs}]) >= n
+}
+
+// confirm confirms txid to every registration for numConfs, waiting for n of
+// them.
+func (c *testChain) confirm(t *testing.T, txid chainhash.Hash,
+	numConfs uint32, n int, conf *chainntnfs.TxConfirmation) {
+
+	t.Helper()
+
+	require.Eventually(t, func() bool {
+		return c.registered(txid, numConfs, n)
+	}, 5*time.Second, 10*time.Millisecond)
+
+	c.mu.Lock()
+	evs := c.confs[confKey{txid, numConfs}]
+	c.mu.Unlock()
+	for _, ev := range evs {
+		ev.Confirmed <- conf
+	}
+}
+
+// reorg sends a reorg to every registration of txid for numConfs.
+func (c *testChain) reorg(t *testing.T, txid chainhash.Hash,
+	numConfs uint32) {
+
+	t.Helper()
+
+	c.mu.Lock()
+	evs := c.confs[confKey{txid, numConfs}]
+	c.mu.Unlock()
+	require.NotEmpty(t, evs)
+	for _, ev := range evs {
+		ev.NegativeConf <- 1
+	}
+}
+
+// spend spends op by tx to every watcher of op, waiting for n of them.
+func (c *testChain) spend(t *testing.T, op wire.OutPoint, tx *wire.MsgTx,
+	n int) {
+
+	t.Helper()
+
+	require.Eventually(t, func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+
+		return len(c.spends[op]) >= n
+	}, 5*time.Second, 10*time.Millisecond)
+
+	c.mu.Lock()
+	chans := c.spends[op]
+	c.spends[op] = nil
+	height := c.height
 	c.mu.Unlock()
 
-	return &chainntnfs.ConfirmationEvent{
-		Confirmed: c.confs, Cancel: func() {},
-	}, nil
+	hash := tx.TxHash()
+	for _, ch := range chans {
+		ch <- &chainntnfs.SpendDetail{
+			SpentOutPoint: &op, SpenderTxHash: &hash,
+			SpendingTx: tx, SpendingHeight: int32(height),
+		}
+	}
+}
+
+// mine sends a block to every block watcher.
+func (c *testChain) mine() {
+	c.mu.Lock()
+	chans := c.epochs
+	c.height++
+	height := c.height
+	c.mu.Unlock()
+
+	for _, ch := range chans {
+		select {
+		case ch <- &chainntnfs.BlockEpoch{Height: int32(height)}:
+		default:
+		}
+	}
 }
 
 func (c *testChain) BestHeight() (uint32, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	return c.height, nil
 }
 
@@ -222,12 +358,8 @@ func newAcceptorHarness(t *testing.T) *acceptorHarness {
 			commits: make(chan *lnwire.CommitSig, 4),
 			resumed: make(chan struct{}, 4),
 		},
-		peer: &testPeer{msgs: make(chan lnwire.Message, 64)},
-		chain: &testChain{
-			height: 900_000,
-			outs:   make(map[wire.OutPoint]*wire.TxOut),
-			confs:  make(chan *chainntnfs.TxConfirmation, 1),
-		},
+		peer:   &testPeer{msgs: make(chan lnwire.Message, 64)},
+		chain:  newTestChain(),
 		wallet: newFakeWallet(),
 	}
 
@@ -558,7 +690,7 @@ func TestAcceptSpliceIn(t *testing.T) {
 	require.Equal(t, Label(h.bob.State().ShortChannelID, DirectionIn),
 		label)
 	require.Eventually(t, func() bool {
-		return h.chain.watchedDepth() == 6
+		return h.chain.registered(txid, 6, 1)
 	}, 5*time.Second, 10*time.Millisecond)
 
 	// The machine's own copy of the signed transaction.
@@ -569,9 +701,9 @@ func TestAcceptSpliceIn(t *testing.T) {
 	requireValid(t, tx, s.res)
 
 	// Confirmed at depth: splice_locked; then Alice's; then moved.
-	h.chain.confs <- &chainntnfs.TxConfirmation{
+	h.chain.confirm(t, txid, 6, 1, &chainntnfs.TxConfirmation{
 		BlockHeight: 900_006, TxIndex: 3,
-	}
+	})
 	locked := next[*lnwire.SpliceLocked](t, h)
 	require.Equal(t, txid, locked.SpliceTxid)
 	h.machine.HandleSpliceMessage(&lnwire.SpliceLocked{
@@ -782,7 +914,7 @@ func TestAcceptSpliceNotUnified(t *testing.T) {
 		Link:      link,
 		Channel:   bob,
 		Peer:      peer,
-		Chain:     &testChain{height: 900_000},
+		Chain:     newTestChain(),
 		Estimator: chainfee.NewStaticEstimator(2_500, 253),
 	})
 	require.NoError(t, m.Start())
@@ -994,7 +1126,9 @@ func TestAcceptSpliceRestart(t *testing.T) {
 	restart()
 	require.Len(t, h.wallet.publishedTxs(), 1)
 
-	h.chain.confs <- &chainntnfs.TxConfirmation{BlockHeight: 900_010}
+	h.chain.confirm(t, txid, 6, 2, &chainntnfs.TxConfirmation{
+		BlockHeight: 900_010,
+	})
 	next[*lnwire.SpliceLocked](t, h)
 	h.machine.HandleSpliceMessage(&lnwire.SpliceLocked{
 		ChannelID: h.machine.cfg.ChanID, SpliceTxid: txid,
