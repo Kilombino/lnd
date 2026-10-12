@@ -157,16 +157,27 @@ type syncedWallet interface {
 }
 
 // spliceLockDepth is the confirmations at which a splice of a channel locks:
-// at least 6, at least the channel's own, and more for a large amount the
-// peer put in (it could double-spend it in a reorg).
+// at least 6, at least the channel's own, and more for coins the peer put
+// in, which it could take back by reorganising the chain: one more block
+// per 1/30 of a non-wumbo channel's worth, up to 36, where the hold on the
+// peer's coins ends (protocol.splice-peer-input-confs' default).
 func spliceLockDepth(numConfsRequired uint16, peer btcutil.Amount) uint32 {
-	if peer < 0 {
-		peer = 0
-	}
 	depth := max(uint32(6), uint32(numConfsRequired))
-	scaled := uint32(lnwallet.ScaleNumConfs(peer, 0))
+	if peer <= 0 {
+		return depth
+	}
 
-	return max(depth, scaled)
+	const (
+		maxExtra = 30
+		scale    = btcutil.Amount(16_777_215)
+	)
+	extra := uint32(maxExtra)
+	if peer < scale {
+		extra = uint32((int64(peer)*maxExtra + int64(scale) - 1) /
+			int64(scale))
+	}
+
+	return max(depth, 6+extra)
 }
 
 // newSpliceMachine fills the node's part of a channel's splice machine's

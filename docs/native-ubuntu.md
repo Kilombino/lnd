@@ -210,8 +210,9 @@ lncli listchannels          # pending_splice shows how far it got
 ```
 
 The channel keeps working while the change confirms; its new size counts
-once both nodes have seen at least six confirmations. Turning the setting
-off stops new resizes, and one already in progress finishes first.
+once both nodes have seen at least six confirmations (more, up to 36,
+when the peer puts coins in). Turning the setting off stops new resizes,
+and one already in progress finishes first.
 
 ## Being reachable over clearnet
 
