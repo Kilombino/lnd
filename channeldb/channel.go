@@ -2637,8 +2637,12 @@ func syncNewChannel(tx kvdb.RwTx, c *OpenChannel, addrs []net.Addr) error {
 // A map is returned of all the htlc resolutions that were locked in this
 // commitment. Keys correspond to htlc indices and values indicate whether the
 // htlc was settled or failed.
+//
+// splices are the pending splices' writes for the same step, made in the same
+// transaction: our new commitment on each splice's funding.
 func (c *OpenChannel) UpdateCommitment(newCommitment *ChannelCommitment,
-	unsignedAckedUpdates []LogUpdate) (map[uint64]bool, error) {
+	unsignedAckedUpdates []LogUpdate,
+	splices ...SpliceCommitWrite) (map[uint64]bool, error) {
 
 	c.Lock()
 	defer c.Unlock()
@@ -2682,6 +2686,10 @@ func (c *OpenChannel) UpdateCommitment(newCommitment *ChannelCommitment,
 		if err != nil {
 			return fmt.Errorf("unable to store chan "+
 				"revocations: %v", err)
+		}
+		err = applySpliceWrites(chanBucket, splices, false, false)
+		if err != nil {
+			return err
 		}
 
 		// Persist unsigned but acked remote updates that need to be
@@ -3394,7 +3402,12 @@ func deserializeCommitDiff(r io.Reader) (*CommitDiff, error) {
 // transmit it to the remote party. The contents of the argument should be
 // sufficient to retransmit the updates and signature needed to reconstruct the
 // state in full, in the case that we need to retransmit.
-func (c *OpenChannel) AppendRemoteCommitChain(diff *CommitDiff) error {
+//
+// splices are the pending splices' writes for the same step, made in the same
+// transaction.
+func (c *OpenChannel) AppendRemoteCommitChain(diff *CommitDiff,
+	splices ...SpliceCommitWrite) error {
+
 	c.Lock()
 	defer c.Unlock()
 
@@ -3463,7 +3476,11 @@ func (c *OpenChannel) AppendRemoteCommitChain(diff *CommitDiff) error {
 		if err := serializeCommitDiff(&b2, diff); err != nil {
 			return err
 		}
-		return chanBucket.Put(commitDiffKey, b2.Bytes())
+		if err := chanBucket.Put(commitDiffKey, b2.Bytes()); err != nil {
+			return err
+		}
+
+		return applySpliceWrites(chanBucket, splices, false, false)
 	}, func() {})
 }
 
@@ -3618,8 +3635,13 @@ func (c *OpenChannel) InsertNextRevocation(revKey *btcec.PublicKey) error {
 // commitment to the current remote commitment. The updates parameter is the
 // set of local updates that the peer still needs to send us a signature for.
 // We store this set of updates in case we go down.
+//
+// splices are the pending splices' writes for the same step, made in the same
+// transaction: each moves the peer's revoked commitment on that splice's
+// funding into its revocation log.
 func (c *OpenChannel) AdvanceCommitChainTail(fwdPkg *FwdPkg,
-	updates []LogUpdate, ourOutputIndex, theirOutputIndex uint32) error {
+	updates []LogUpdate, ourOutputIndex, theirOutputIndex uint32,
+	splices ...SpliceCommitWrite) error {
 
 	c.Lock()
 	defer c.Unlock()
@@ -3695,6 +3717,12 @@ func (c *OpenChannel) AdvanceCommitChainTail(fwdPkg *FwdPkg,
 		err = putRevocationLog(
 			logBucket, &c.RemoteCommitment, ourOutputIndex,
 			theirOutputIndex, c.Db.parent.noRevLogAmtData,
+		)
+		if err != nil {
+			return err
+		}
+		err = applySpliceWrites(
+			chanBucket, splices, true, c.Db.parent.noRevLogAmtData,
 		)
 		if err != nil {
 			return err
