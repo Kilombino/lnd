@@ -45,6 +45,8 @@ jobs:
           [ -z "$files" ] || { out=$(gofmt -l $files); [ -z "$out" ] || { echo "gofmt:"; echo "$out"; exit 1; }; }
           pkgs=$(echo "$files" | xargs -r -n1 dirname | sort -u | sed 's|^|./|')
           [ -z "$pkgs" ] || go vet $pkgs
+      - name: Chain registrations use the current funding output
+        run: ./scripts/check-funding-outpoint.sh
       - name: Install bitcoind
         # routing/chainview runs against a regtest bitcoind. Same image and
         # version as upstream's CI.
@@ -55,6 +57,7 @@ jobs:
             . ./chainreg/... ./discovery/... ./feature/... ./funding/... \
             ./graph/... ./input/... ./lnwire/... ./netann/... ./legacychain/... \
             ./lnwallet ./lnwallet/btcwallet/... ./lnwallet/chanfunding/... \
+            ./lnwallet/interactivetx/... ./channeldb/... \
             ./lnwallet/rpcwallet/... ./zpay32/... ./bolt12/... \
             ./offers/... ./offerpay/... ./offerserve/... ./chanbackup/... \
             ./routing/... ./peer/... ./sweep/... ./contractcourt/... \

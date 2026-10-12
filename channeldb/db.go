@@ -764,12 +764,18 @@ func (c *ChannelStateDB) fetchNodeChannels(tx kvdb.RTx,
 }
 
 // FetchChannel attempts to locate a channel specified by the passed channel
-// point. If the channel cannot be found, then an error will be returned.
+// point: the outpoint that names it, or any funding output a splice moved it
+// to. If the channel cannot be found, then an error will be returned.
 func (c *ChannelStateDB) FetchChannel(chanPoint wire.OutPoint) (*OpenChannel,
 	error) {
 
+	chanPoint, err := c.channelName(chanPoint)
+	if err != nil {
+		return nil, err
+	}
+
 	var targetChanPoint bytes.Buffer
-	err := graphdb.WriteOutpoint(&targetChanPoint, &chanPoint)
+	err = graphdb.WriteOutpoint(&targetChanPoint, &chanPoint)
 	if err != nil {
 		return nil, err
 	}
