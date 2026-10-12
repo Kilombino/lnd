@@ -317,7 +317,8 @@ func (r *Manager) createEdge(channel *channeldb.OpenChannel,
 
 	// We need to make sure we use the real scid for public confirmed
 	// zero-conf channels.
-	shortChanID := channel.ShortChanID()
+	// A splice moves the edge to its own scid and funding output.
+	shortChanID := channel.CurrentShortChanID()
 	isPublic := channel.ChannelFlags&lnwire.FFAnnounceChannel != 0
 	if isPublic && channel.IsZeroConf() && channel.ZeroConfConfirmed() {
 		shortChanID = channel.ZeroConfRealScid()
@@ -353,7 +354,7 @@ func (r *Manager) createEdge(channel *channeldb.OpenChannel,
 			BitcoinKey2Bytes: bitcoinKey2,
 		},
 		models.WithCapacity(channel.Capacity),
-		models.WithChannelPoint(channel.FundingOutpoint),
+		models.WithChannelPoint(channel.CurrentFundingOutpoint()),
 		models.WithFundingScript(fundingScript),
 	)
 	if err != nil {

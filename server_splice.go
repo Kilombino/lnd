@@ -166,7 +166,10 @@ func (s *server) newSpliceMachine(base splice.Config,
 	}
 	cfg.ResendAnnouncement = func() {
 		state := ch.State()
+		s.wg.Add(1)
 		go func() {
+			defer s.wg.Done()
+
 			err := s.resendSpliceAnnouncement(state)
 			if err != nil {
 				srvrLog.Errorf("ChannelPoint(%v): unable to "+
@@ -301,7 +304,7 @@ type spliceGraph struct {
 
 	mu     sync.Mutex
 	loaded bool
-	txids  map[chainhash.Hash]struct{}
+	txids  map[chainhash.Hash]wire.OutPoint
 	latest map[lnwire.ShortChannelID]lnwire.ShortChannelID
 }
 
@@ -309,7 +312,7 @@ type spliceGraph struct {
 func newSpliceGraph(db *channeldb.ChannelStateDB) *spliceGraph {
 	return &spliceGraph{
 		db:     db,
-		txids:  make(map[chainhash.Hash]struct{}),
+		txids:  make(map[chainhash.Hash]wire.OutPoint),
 		latest: make(map[lnwire.ShortChannelID]lnwire.ShortChannelID),
 	}
 }
@@ -337,37 +340,41 @@ func (g *spliceGraph) load() {
 		}
 		for _, r := range records {
 			if !r.Retired {
-				g.txids[r.Txid()] = struct{}{}
+				g.txids[r.Txid()] = ch.CurrentFundingOutpoint()
 			}
 		}
 		g.lockedLocked(ch)
 	}
 }
 
-// isOwnSplice reports whether txid is a pending splice of one of our
-// channels.
-func (g *spliceGraph) isOwnSplice(txid chainhash.Hash) bool {
+// ownSplice returns the funding output a pending splice of one of our
+// channels spends.
+func (g *spliceGraph) ownSplice(txid chainhash.Hash) (wire.OutPoint, bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
 	g.load()
-	_, ok := g.txids[txid]
+	funding, ok := g.txids[txid]
 
-	return ok
+	return funding, ok
 }
 
-// pending records a splice of ours that may confirm, or with ok false, one
-// that won't.
-func (g *spliceGraph) pending(txid chainhash.Hash, ok bool) {
+// pending records a splice of ours that may confirm, spending funding.
+func (g *spliceGraph) pending(txid chainhash.Hash, funding wire.OutPoint) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
 	g.load()
-	if ok {
-		g.txids[txid] = struct{}{}
-	} else {
-		delete(g.txids, txid)
-	}
+	g.txids[txid] = funding
+}
+
+// gone forgets a splice of ours that won't confirm, or has locked.
+func (g *spliceGraph) gone(txid chainhash.Hash) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	g.load()
+	delete(g.txids, txid)
 }
 
 // locked records a channel's short channel ids after a splice locked.
@@ -417,13 +424,19 @@ func (s *server) spliceStep(kind string, txid chainhash.Hash,
 
 	switch kind {
 	case "signed":
-		s.spliceGraph.pending(txid, true)
+		ch, err := s.chanStateDB.FetchChannel(chanPoint)
+		if err != nil {
+			srvrLog.Errorf("ChannelPoint(%v): unable to read the "+
+				"channel for its splice: %v", chanPoint, err)
+			return
+		}
+		s.spliceGraph.pending(txid, ch.CurrentFundingOutpoint())
 
 	case "aborted", "dead":
-		s.spliceGraph.pending(txid, false)
+		s.spliceGraph.gone(txid)
 
 	case "locked":
-		s.spliceGraph.pending(txid, false)
+		s.spliceGraph.gone(txid)
 
 		ch, err := s.chanStateDB.FetchChannel(chanPoint)
 		if err != nil {
@@ -445,7 +458,10 @@ func (s *server) spliceStep(kind string, txid chainhash.Hash,
 
 		// The edge waits on the gossiper, which mustn't hold up the
 		// splice machine.
+		s.wg.Add(1)
 		go func() {
+			defer s.wg.Done()
+
 			if err := s.moveSpliceEdge(ch); err != nil {
 				srvrLog.Errorf("ChannelPoint(%v): unable to "+
 					"move its graph edge to the splice's "+
@@ -458,6 +474,11 @@ func (s *server) spliceStep(kind string, txid chainhash.Hash,
 // moveSpliceEdge puts a channel a splice moved in the graph on its current
 // funding output.
 func (s *server) moveSpliceEdge(ch *channeldb.OpenChannel) error {
+	// One at a time: the lock, the peer asking for the announcement and
+	// the reconciliation at start can overlap.
+	s.spliceEdgeMu.Lock()
+	defer s.spliceEdgeMu.Unlock()
+
 	var ourKey route.Vertex
 	copy(ourKey[:], s.identityECDH.PubKey().SerializeCompressed())
 
@@ -483,9 +504,11 @@ type spliceAnnouncer func(ch *channeldb.OpenChannel,
 	ourPolicy *models.ChannelEdgePolicy, addEdge bool) error
 
 // moveSpliceEdge puts a channel a splice moved in the graph on its current
-// funding output: the edges of the outputs it left go, our policy carried
-// over, and a public channel is announced there. Repeatable: a channel
-// already moved is only announced again while its proof is missing.
+// funding output: added there with our policy carried over, before the edges
+// of the outputs it left go, and announced there if public. Repeatable, and
+// safe to repeat after a crash at any point: a new edge without our policy
+// gets it, edges left on old outputs go, and a public channel's proof is
+// asked for again while missing.
 func moveSpliceEdge(ctx context.Context, graph spliceEdgeGraph,
 	ourKey route.Vertex, announce spliceAnnouncer,
 	ch *channeldb.OpenChannel) error {
@@ -495,26 +518,36 @@ func moveSpliceEdge(ctx context.Context, graph spliceEdgeGraph,
 		return nil
 	}
 
-	public := ch.ChannelFlags&lnwire.FFAnnounceChannel != 0
-	info, _, _, err := graph.FetchChannelEdgesByOutpoint(ctx, &current)
-	switch {
-	case err == nil:
-		if public && info.AuthProof == nil {
-			return announce(ch, nil, false)
+	// ourPolicy returns our direction of an edge.
+	ourPolicy := func(info *models.ChannelEdgeInfo, e1,
+		e2 *models.ChannelEdgePolicy) *models.ChannelEdgePolicy {
+
+		if info.NodeKey1Bytes == ourKey {
+			return e1
 		}
 
-		return nil
+		return e2
+	}
 
+	info, e1, e2, err := graph.FetchChannelEdgesByOutpoint(ctx, &current)
+	moved := err == nil
+	switch {
+	case moved:
 	case !errors.Is(err, graphdb.ErrEdgeNotFound):
 		return err
 	}
+	var policy *models.ChannelEdgePolicy
+	if moved {
+		policy = ourPolicy(info, e1, e2)
+	}
+	needsPolicy := policy == nil
 
+	// The edges of the outputs the channel left, and our policy on them.
 	previous, err := ch.PreviousFundings()
 	if err != nil {
 		return err
 	}
-
-	var ourPolicy *models.ChannelEdgePolicy
+	var stale []uint64
 	for _, pf := range previous {
 		info, e1, e2, err := graph.FetchChannelEdgesByOutpoint(
 			ctx, &pf.OutPoint,
@@ -526,40 +559,51 @@ func moveSpliceEdge(ctx context.Context, graph spliceEdgeGraph,
 		case err != nil:
 			return err
 		}
-
-		policy := e2
-		if info.NodeKey1Bytes == ourKey {
-			policy = e1
+		if old := ourPolicy(info, e1, e2); old != nil && policy == nil {
+			policy = old
 		}
+		stale = append(stale, info.ChannelID)
+	}
+
+	public := ch.ChannelFlags&lnwire.FFAnnounceChannel != 0
+	switch {
+	// Not there, or there without our policy (a crash between the
+	// announcement and the update): added, with the policy.
+	case needsPolicy:
 		if policy != nil {
-			ourPolicy = policy
+			// A splice out can leave the old maximum above the
+			// new capacity.
+			carried := *policy
+			capacity := lnwire.NewMSatFromSatoshis(ch.Capacity)
+			if carried.MaxHTLC > capacity {
+				carried.MaxHTLC = capacity
+			}
+			policy = &carried
+		} else {
+			srvrLog.Warnf("ChannelPoint(%v): no policy of ours on "+
+				"any of its edges; announcing the splice's "+
+				"with the default policy", ch.FundingOutpoint)
 		}
 
-		err = graph.DeleteChannelEdges(ctx, false, false, info.ChannelID)
-		if err != nil {
+		srvrLog.Infof("ChannelPoint(%v): moving its graph edge to %v, "+
+			"short_chan_id=%v", ch.FundingOutpoint, current,
+			ch.CurrentShortChanID())
+
+		if err := announce(ch, policy, true); err != nil {
+			return err
+		}
+
+	case public && info.AuthProof == nil:
+		if err := announce(ch, nil, false); err != nil {
 			return err
 		}
 	}
 
-	// A splice out can leave the old maximum above the new capacity.
-	if ourPolicy != nil {
-		policy := *ourPolicy
-		capacity := lnwire.NewMSatFromSatoshis(ch.Capacity)
-		if policy.MaxHTLC > capacity {
-			policy.MaxHTLC = capacity
-		}
-		ourPolicy = &policy
-	} else {
-		srvrLog.Warnf("ChannelPoint(%v): no edge on the funding it "+
-			"left; announcing the splice's with the default "+
-			"policy", ch.FundingOutpoint)
+	if len(stale) == 0 {
+		return nil
 	}
 
-	srvrLog.Infof("ChannelPoint(%v): moving its graph edge to %v, "+
-		"short_chan_id=%v", ch.FundingOutpoint, current,
-		ch.CurrentShortChanID())
-
-	return announce(ch, ourPolicy, true)
+	return graph.DeleteChannelEdges(ctx, false, false, stale...)
 }
 
 // reconcileSpliceEdges moves the graph edges of channels whose splice locked
@@ -616,13 +660,52 @@ func (g *spliceAwareGraph) FetchChannelEdgesByOutpoint(ctx context.Context,
 func (s *server) updateForwardingPolicies(
 	policies map[wire.OutPoint]models.ForwardingPolicy) {
 
+	// One read of the channels, not one per policy.
+	names := make(map[wire.OutPoint]wire.OutPoint)
+	channels, err := s.chanStateDB.FetchAllOpenChannels()
+	if err != nil {
+		srvrLog.Errorf("Unable to read channels for policy updates: %v",
+			err)
+	}
+	for _, ch := range channels {
+		names[ch.CurrentFundingOutpoint()] = ch.FundingOutpoint
+	}
+
 	named := make(map[wire.OutPoint]models.ForwardingPolicy, len(policies))
 	for op, policy := range policies {
-		if ch, err := s.chanStateDB.FetchChannel(op); err == nil {
-			op = ch.FundingOutpoint
+		if name, ok := names[op]; ok {
+			op = name
 		}
 		named[op] = policy
 	}
 
 	s.htlcSwitch.UpdateForwardingPolicies(named)
+}
+
+// findBaseByAlias finds the scid a channel's graph edge goes by from an alias
+// of it: the alias manager's base, unless a splice moved the edge to its own.
+func (s *server) findBaseByAlias(
+	alias lnwire.ShortChannelID) (lnwire.ShortChannelID, error) {
+
+	base, err := s.aliasMgr.FindBaseSCID(alias)
+	if err != nil {
+		return base, err
+	}
+	if latest, ok := s.spliceGraph.latestScid(base); ok {
+		return latest, nil
+	}
+
+	return base, nil
+}
+
+// channelName returns the outpoint a channel named by either of its outpoints
+// was opened with, which the status manager and the switch know it by; op
+// itself for anything else.
+func (s *server) channelName(op wire.OutPoint) wire.OutPoint {
+	ch, err := s.chanStateDB.FetchChannel(op)
+	if err != nil {
+		return op
+	}
+
+	return ch.FundingOutpoint
 }

@@ -92,3 +92,48 @@ func TestSwitchSpliceScids(t *testing.T) {
 	require.Empty(t, s.spliceIndex)
 	s.indexMtx.RUnlock()
 }
+
+// TestSwitchSpliceScidPrivateAlias checks a splice's scid can't be used to
+// forward over a private channel that negotiated scid aliases, as its
+// confirmed scid can't: it would reveal the channel's funding output.
+func TestSwitchSpliceScidPrivateAlias(t *testing.T) {
+	t.Parallel()
+
+	alicePeer, err := newMockServer(
+		t, "alice", testStartingHeight, nil, testDefaultDelta,
+	)
+	require.NoError(t, err)
+	bobPeer, err := newMockServer(
+		t, "bob", testStartingHeight, nil, testDefaultDelta,
+	)
+	require.NoError(t, err)
+
+	s, err := initSwitchWithTempDB(t, testStartingHeight)
+	require.NoError(t, err)
+	require.NoError(t, s.Start())
+	t.Cleanup(func() { _ = s.Stop() })
+
+	chanID1, chanID2, aliceScid, bobScid := genIDs()
+	aliceLink := newMockChannelLink(
+		s, chanID1, aliceScid, emptyScid, alicePeer, true, false,
+		false, false,
+	)
+	bobLink := newMockChannelLink(
+		s, chanID2, bobScid, emptyScid, bobPeer, true, true, false,
+		true,
+	)
+	require.NoError(t, s.AddLink(aliceLink))
+	require.NoError(t, s.AddLink(bobLink))
+
+	spliceScid := lnwire.NewShortChanIDFromInt(bobScid.ToUint64() + 1000)
+	require.NoError(t, s.AddSpliceScids(chanID2, spliceScid))
+
+	packet := &htlcPacket{
+		incomingChanID: aliceLink.ShortChanID(),
+		outgoingChanID: spliceScid,
+	}
+	s.indexMtx.RLock()
+	_, err = s.getLinkByMapping(packet)
+	s.indexMtx.RUnlock()
+	require.ErrorIs(t, err, ErrChannelLinkNotFound)
+}

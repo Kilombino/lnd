@@ -110,11 +110,11 @@ type Config struct {
 	// only used for our local channels.
 	IsAlias func(scid lnwire.ShortChannelID) bool
 
-	// IsOwnSplice reports whether a transaction is a splice of one of our
-	// channels: its spend of the channel's funding output moves the
-	// channel, whose edge is moved when the splice locks, rather than
-	// closing it. Nil for none.
-	IsOwnSplice func(txid chainhash.Hash) bool
+	// OwnSplice returns, for a splice of one of our channels, the
+	// channel's funding output it spends: that spend moves the channel,
+	// whose edge is moved when the splice locks, rather than closing it.
+	// The splice's other inputs are spent as usual. Nil for none.
+	OwnSplice func(txid chainhash.Hash) (wire.OutPoint, bool)
 }
 
 // Builder builds and maintains a view of the Lightning Network graph.
@@ -451,10 +451,10 @@ func (b *Builder) syncGraphWithChain() error {
 		// spent in the block, so collate all the referenced previous
 		// outpoints within each tx and input.
 		for _, tx := range filterBlock.Transactions {
-			if b.isOwnSplice(tx) {
-				continue
-			}
 			for _, txIn := range tx.TxIn {
+				if b.keepsSpent(tx, txIn.PreviousOutPoint) {
+					continue
+				}
 				spentOutputs = append(spentOutputs,
 					&txIn.PreviousOutPoint)
 			}
@@ -909,10 +909,10 @@ func (b *Builder) updateGraphWithClosedChannels(
 	// each tx and input.
 	var spentOutputs []*wire.OutPoint
 	for _, tx := range chainUpdate.Transactions {
-		if b.isOwnSplice(tx) {
-			continue
-		}
 		for _, txIn := range tx.TxIn {
+			if b.keepsSpent(tx, txIn.PreviousOutPoint) {
+				continue
+			}
 			spentOutputs = append(spentOutputs,
 				&txIn.PreviousOutPoint)
 		}
@@ -1495,17 +1495,19 @@ func (b *Builder) MarkEdgeLive(v lnwire.GossipVersion,
 	)
 }
 
-// isOwnSplice reports whether tx is a splice of one of our channels, whose
-// spend of the funding output doesn't close the channel.
-func (b *Builder) isOwnSplice(tx *wire.MsgTx) bool {
-	if b.cfg.IsOwnSplice == nil {
+// keepsSpent reports whether tx's spend of op leaves op's channel in the
+// graph: tx is a splice of one of our channels and op its funding output.
+func (b *Builder) keepsSpent(tx *wire.MsgTx, op wire.OutPoint) bool {
+	if b.cfg.OwnSplice == nil {
 		return false
 	}
-	if !b.cfg.IsOwnSplice(tx.TxHash()) {
+	funding, ok := b.cfg.OwnSplice(tx.TxHash())
+	if !ok || funding != op {
 		return false
 	}
 
-	log.Infof("Keeping the channel spent by our splice %v", tx.TxHash())
+	log.Infof("Keeping channel %v, spent by our splice %v", op,
+		tx.TxHash())
 
 	return true
 }

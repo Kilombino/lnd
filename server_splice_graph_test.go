@@ -68,14 +68,21 @@ func TestSpliceGraph(t *testing.T) {
 	}))
 
 	g := newSpliceGraph(db)
-	require.True(t, g.isOwnSplice(pending))
-	require.False(t, g.isOwnSplice(chainhash.Hash{0x52}))
-	g.pending(chainhash.Hash{0x52}, true)
-	require.True(t, g.isOwnSplice(chainhash.Hash{0x52}))
-	g.pending(pending, false)
-	require.False(t, g.isOwnSplice(pending))
+	funding, ok := g.ownSplice(pending)
+	require.True(t, ok)
+	require.Equal(t, state.FundingOutpoint, funding)
+	_, ok = g.ownSplice(chainhash.Hash{0x52})
+	require.False(t, ok)
+	other := wire.OutPoint{Hash: chainhash.Hash{0x53}}
+	g.pending(chainhash.Hash{0x52}, other)
+	funding, ok = g.ownSplice(chainhash.Hash{0x52})
+	require.True(t, ok)
+	require.Equal(t, other, funding)
+	g.gone(pending)
+	_, ok = g.ownSplice(pending)
+	require.False(t, ok)
 
-	_, ok := g.latestScid(identity)
+	_, ok = g.latestScid(identity)
 	require.False(t, ok)
 
 	first := testSpliceLock(t, 0x61, 6_000_000, 900_000)
@@ -269,5 +276,85 @@ func TestSpliceAwareGraph(t *testing.T) {
 	// Anything else is as it was.
 	other := wire.OutPoint{Hash: chainhash.Hash{0x99}}
 	_, _, _, err = aware.FetchChannelEdgesByOutpoint(t.Context(), &other)
+	require.ErrorIs(t, err, graphdb.ErrEdgeNotFound)
+}
+
+// TestMoveSpliceEdgeAfterCrash checks a move interrupted by a crash is
+// finished: a new edge without our policy gets the old one's, and an old edge
+// left behind goes.
+func TestMoveSpliceEdgeAfterCrash(t *testing.T) {
+	t.Parallel()
+
+	alice, _, err := lnwallet.CreateTestChannels(
+		t, channeldb.SingleFunderTweaklessBit,
+	)
+	require.NoError(t, err)
+	state := alice.State()
+
+	graph := graphdb.MakeTestGraph(t)
+	vgraph := graphdb.NewVersionedGraph(graph, lnwire.GossipVersion1)
+	vertex := func() route.Vertex {
+		priv, err := btcec.NewPrivateKey()
+		require.NoError(t, err)
+		return route.NewVertex(priv.PubKey())
+	}
+	ours, theirs := vertex(), vertex()
+
+	var policies []*models.ChannelEdgePolicy
+	announce := func(_ *channeldb.OpenChannel,
+		policy *models.ChannelEdgePolicy, addEdge bool) error {
+
+		require.True(t, addEdge)
+		policies = append(policies, policy)
+		return nil
+	}
+
+	old := testEdge(
+		t, graph, ours, theirs, state.ShortChanID(),
+		state.FundingOutpoint, false,
+	)
+	lock := testSpliceLock(t, 0x72, 3_000_000, 900_000)
+	require.NoError(t, state.LockSplice(lock))
+
+	// The new edge, without our update.
+	edge, err := models.NewV1Channel(
+		lock.Funding.Scid.ToUint64(), chainhash.Hash{}, ours, theirs,
+		&models.ChannelV1Fields{
+			BitcoinKey1Bytes: ours, BitcoinKey2Bytes: theirs,
+		}, models.WithChannelPoint(lock.Funding.OutPoint),
+		models.WithCapacity(3_000_000),
+	)
+	require.NoError(t, err)
+	require.NoError(t, graph.AddChannelEdge(t.Context(), edge))
+
+	require.NoError(t, moveSpliceEdge(
+		t.Context(), vgraph, ours, announce, state,
+	))
+	require.Len(t, policies, 1)
+	require.Equal(t, old.FeeBaseMSat, policies[0].FeeBaseMSat)
+	_, _, _, err = graph.FetchChannelEdgesByOutpoint(
+		t.Context(), &state.FundingOutpoint,
+	)
+	require.ErrorIs(t, err, graphdb.ErrEdgeNotFound)
+
+	// An old edge left behind after the new one got our update goes,
+	// nothing announced.
+	policies = nil
+	testEdge(
+		t, graph, ours, theirs, state.ShortChanID(),
+		state.FundingOutpoint, false,
+	)
+	policy := *old
+	policy.ChannelID = lock.Funding.Scid.ToUint64()
+	policy.LastUpdate = old.LastUpdate.Add(time.Hour)
+	require.NoError(t, graph.UpdateEdgePolicy(t.Context(), &policy))
+
+	require.NoError(t, moveSpliceEdge(
+		t.Context(), vgraph, ours, announce, state,
+	))
+	require.Empty(t, policies)
+	_, _, _, err = graph.FetchChannelEdgesByOutpoint(
+		t.Context(), &state.FundingOutpoint,
+	)
 	require.ErrorIs(t, err, graphdb.ErrEdgeNotFound)
 }

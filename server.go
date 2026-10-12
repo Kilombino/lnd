@@ -444,6 +444,9 @@ type server struct {
 	// spliceLimits bounds the splices peers start, across the node.
 	spliceLimits *splice.Limits
 
+	// spliceEdgeMu serialises moving spliced channels' graph edges.
+	spliceEdgeMu sync.Mutex
+
 	// chanEventStore tracks the behaviour of channels and their remote peers to
 	// provide insights into their health and performance.
 	chanEventStore *chanfitness.ChannelEventStore
@@ -1300,7 +1303,7 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 		AssumeChannelValid:  cfg.Routing.AssumeChannelValid,
 		StrictZombiePruning: strictPruning,
 		IsAlias:             aliasmgr.IsAlias,
-		IsOwnSplice:         s.spliceGraph.isOwnSplice,
+		OwnSplice:           s.spliceGraph.ownSplice,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("can't create graph builder: %w", err)
@@ -1383,7 +1386,7 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 		ChannelUpdateInterval:   cfg.Gossip.ChannelUpdateInterval,
 		IsAlias:                 aliasmgr.IsAlias,
 		SignAliasUpdate:         s.signAliasUpdate,
-		FindBaseByAlias:         s.aliasMgr.FindBaseSCID,
+		FindBaseByAlias:         s.findBaseByAlias,
 		GetAlias:                s.aliasMgr.GetPeerAlias,
 		FindChannel:             s.findChannel,
 		IsStillZombieChannel:    s.graphBuilder.IsZombieChannel,
@@ -2694,7 +2697,11 @@ func (s *server) Start(ctx context.Context) error {
 
 		// Graph edges of channels whose splice locked as the node
 		// stopped, moved now the gossiper runs.
-		go s.reconcileSpliceEdges()
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			s.reconcileSpliceEdges()
+		}()
 
 		cleanup = cleanup.add(s.invoices.Stop)
 		if err := s.invoices.Start(); err != nil {

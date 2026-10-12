@@ -2409,8 +2409,18 @@ func (s *Switch) getLinkByMapping(pkt *htlcPacket) (ChannelLink, error) {
 		link, ok := s.forwardingIndex[chanID]
 		if !ok {
 			// A scid a splice gave the channel: the forward is
-			// recorded under the link's.
+			// recorded under the link's. Like a confirmed scid,
+			// it can't reach a private channel that hides behind
+			// aliases.
 			link, ok = s.spliceLink(chanID)
+			if ok && link.IsUnadvertised() &&
+				link.negotiatedAliasFeature() {
+
+				log.Debugf("Link is unadvertised, chanID=%v",
+					chanID)
+
+				return nil, ErrChannelLinkNotFound
+			}
 			if ok {
 				pkt.outgoingChanID = link.ShortChanID()
 			}

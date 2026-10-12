@@ -38,6 +38,7 @@ import (
 	"github.com/lightningnetwork/lnd/lnwallet/chainfee"
 	"github.com/lightningnetwork/lnd/lnwallet/chanfunding"
 	"github.com/lightningnetwork/lnd/lnwire"
+	"github.com/lightningnetwork/lnd/tlv"
 	"golang.org/x/crypto/salsa20"
 )
 
@@ -3952,6 +3953,15 @@ func (f *Manager) annAfterSixConfs(completeChan *channeldb.OpenChannel,
 			return fmt.Errorf("unable to send node announcement "+
 				"to peer %x: %v", pubKey, err)
 		}
+	} else if completeChan.CurrentFundingOutpoint() !=
+		completeChan.FundingOutpoint {
+
+		// A splice moved the channel before it was announced: it is
+		// announced on the splice's funding output, once the splice
+		// locks, and never on this one.
+		log.Infof("ChannelPoint(%v) moved by a splice before its "+
+			"announcement; announced on the splice's funding "+
+			"instead", completeChan.FundingOutpoint)
 	} else {
 		// Otherwise, we'll wait until the funding transaction has
 		// reached 6 confirmations before announcing it.
@@ -4806,6 +4816,11 @@ func (f *Manager) newChanAnnouncement(localPubKey,
 		chanUpdateAnn.FeeRate = uint32(
 			ourPolicy.FeeProportionalMillionths,
 		)
+		ourPolicy.InboundFee.WhenSome(func(fee lnwire.Fee) {
+			chanUpdateAnn.InboundFee = tlv.SomeRecordT(
+				tlv.NewRecordT[tlv.TlvType55555](fee),
+			)
+		})
 
 	case storedFwdingPolicy != nil:
 		chanUpdateAnn.BaseFee = uint32(storedFwdingPolicy.BaseFee)

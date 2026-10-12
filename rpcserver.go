@@ -760,12 +760,20 @@ func (r *rpcServer) addDeps(ctx context.Context, s *server,
 		SubscribeHtlcEvents:    s.htlcNotifier.SubscribeHtlcEvents,
 		InterceptableForwarder: s.interceptableSwitch,
 		SetChannelEnabled: func(outpoint wire.OutPoint) error {
-			return s.chanStatusMgr.RequestEnable(outpoint, true)
+			return s.chanStatusMgr.RequestEnable(
+				s.channelName(outpoint), true,
+			)
 		},
 		SetChannelDisabled: func(outpoint wire.OutPoint) error {
-			return s.chanStatusMgr.RequestDisable(outpoint, true)
+			return s.chanStatusMgr.RequestDisable(
+				s.channelName(outpoint), true,
+			)
 		},
-		SetChannelAuto:     s.chanStatusMgr.RequestAuto,
+		SetChannelAuto: func(outpoint wire.OutPoint) error {
+			return s.chanStatusMgr.RequestAuto(
+				s.channelName(outpoint),
+			)
+		},
 		UseStatusInitiated: subServerCgs.RouterRPC.UseStatusInitiated,
 		ParseCustomChannelData: func(msg proto.Message) error {
 			err = fn.MapOptionZ(
