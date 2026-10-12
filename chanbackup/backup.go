@@ -43,7 +43,10 @@ func assembleChanBackup(ctx context.Context, addrSource channeldb.AddrSource,
 		return nil, fmt.Errorf("node unknown by address source")
 	}
 
-	single := NewSingle(openChan, nodeAddrs)
+	single, err := BuildSingle(openChan, nodeAddrs)
+	if err != nil {
+		return nil, err
+	}
 
 	return &single, nil
 }

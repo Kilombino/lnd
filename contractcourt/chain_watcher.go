@@ -371,6 +371,12 @@ type chainWatcher struct {
 	// previousSpends carries a spend of a funding output a locked splice
 	// replaced, by anything but that splice, to the close observer.
 	previousSpends chan *chainntnfs.SpendDetail
+
+	// movedWatch starts, once, the search for the peer's commitment on a
+	// funding output a restored channel's backup didn't know, and
+	// movedCommits carries it to the close observer.
+	movedWatch   sync.Once
+	movedCommits chan *chainntnfs.SpendDetail
 }
 
 // EarlyCoopCloseDispatched reports whether the chain watcher already fired the
@@ -431,6 +437,7 @@ func newChainWatcher(cfg chainWatcherConfig) (*chainWatcher, error) {
 		clientSubscriptions: make(map[uint64]*ChainEventSubscription),
 		fundingSpendNtfn:    spendNtfn,
 		previousSpends:      make(chan *chainntnfs.SpendDetail, 1),
+		movedCommits:        make(chan *chainntnfs.SpendDetail, 1),
 	}
 
 	// If this is a pending taproot channel, we need to register for a
@@ -1087,6 +1094,11 @@ func (c *chainWatcher) closeObserver() {
 		case spend := <-c.previousSpends:
 			c.handlePreviousFundingSpend(spend)
 
+		// The peer's commitment on a funding output a restored
+		// channel's backup didn't know.
+		case spend := <-c.movedCommits:
+			c.handleMovedCommitment(spend)
+
 		// A reorg took out the splice the watch had moved for: the old
 		// funding output is unspent again, and watched again.
 		case depth, ok := <-spliceReorgChan:
@@ -1545,13 +1557,11 @@ func isCommitmentShaped(spendingTx *wire.MsgTx) bool {
 // close sequence can be trusted to be that close. Both closers persist the
 // shutdown before producing any closing signature, in both roles, and never
 // delete it. A channel restored from a static backup has no shutdown on
-// disk, but nothing could have spent its funding output with this node's
-// cooperation other than a close.
+// disk, and a splice after the backup spends its funding output with this
+// node's cooperation too: that is no close.
 func (c *chainWatcher) closeNegotiated() bool {
 	chanState := c.cfg.chanState
-	if chanState.HasChanStatus(channeldb.ChanStatusCoopBroadcasted) ||
-		chanState.HasChanStatus(channeldb.ChanStatusRestored) {
-
+	if chanState.HasChanStatus(channeldb.ChanStatusCoopBroadcasted) {
 		return true
 	}
 
@@ -2178,6 +2188,15 @@ func (c *chainWatcher) handleCommitSpend(
 	// commitment is something this version doesn't recognise. The data
 	// loss recovery below assumes a commitment, so it must not run.
 	if !isCommitmentShaped(commitTxBroadcast) {
+		// On a restored channel it is a splice after the backup: the
+		// peer's commitment will spend the output it moved to.
+		restored := c.cfg.chanState.HasChanStatus(
+			channeldb.ChanStatusRestored,
+		)
+		if restored {
+			c.watchMovedFunding(uint32(commitSpend.SpendingHeight))
+		}
+
 		return c.handleUnknownSpend(commitSpend)
 	}
 

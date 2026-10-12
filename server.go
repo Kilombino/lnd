@@ -1919,6 +1919,7 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 	chanNotifier := &channelNotifier{
 		chanNotifier: s.channelNotifier,
 		addrs:        s.addrSource,
+		chanDB:       s.chanStateDB,
 	}
 	backupFile := chanbackup.NewMultiFile(
 		cfg.BackupFilePath, cfg.NoBackupArchive,

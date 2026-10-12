@@ -436,3 +436,70 @@ func (c *OpenChannel) SpliceView(r *SpliceRecord) *OpenChannel {
 
 	return view
 }
+
+// ShellSplice is what a backup knew of a restored channel's splices.
+type ShellSplice struct {
+	// Funding, when a splice had moved the channel, is the funding output
+	// it was on; the shell's capacity and 2-of-2 keys are that output's.
+	Funding fn.Option[SpliceFunding]
+
+	// Original is the funding output the channel was opened on, needed
+	// with Funding: the channel's later backups describe it.
+	Original *PreviousFunding
+
+	// Candidates are the splices pending on it, without commitments: a
+	// restored channel has none to publish.
+	Candidates []*SpliceRecord
+}
+
+// restoreShellSplice writes what a backup knew of a restored channel's
+// splices, in the transaction that writes the channel.
+func restoreShellSplice(tx kvdb.RwTx, c *OpenChannel, s *ShellSplice) error {
+	chanBucket, err := fetchChanBucketRw(
+		tx, c.IdentityPub, &c.FundingOutpoint, c.ChainHash,
+	)
+	if err != nil {
+		return err
+	}
+
+	if s.Funding.IsSome() {
+		f := s.Funding.UnsafeFromSome()
+		if s.Original == nil {
+			return errors.New("restored splice without the " +
+				"original funding")
+		}
+		original := *s.Original
+		original.LockedTo = f.OutPoint
+		if err := putPreviousFunding(chanBucket, &original); err != nil {
+			return err
+		}
+
+		var name, current bytes.Buffer
+		err := graphdb.WriteOutpoint(&name, &c.FundingOutpoint)
+		if err != nil {
+			return err
+		}
+		if err := graphdb.WriteOutpoint(&current, &f.OutPoint); err != nil {
+			return err
+		}
+		index, err := tx.CreateTopLevelBucket(spliceFundingIndexBucket)
+		if err != nil {
+			return err
+		}
+		prev := index.Get(current.Bytes())
+		if prev != nil && !bytes.Equal(prev, name.Bytes()) {
+			return ErrSpliceFundingInUse
+		}
+		if err := index.Put(current.Bytes(), name.Bytes()); err != nil {
+			return err
+		}
+	}
+
+	for _, r := range s.Candidates {
+		if err := putSpliceRecord(chanBucket, r); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}

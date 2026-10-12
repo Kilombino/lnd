@@ -1,6 +1,7 @@
 package contractcourt
 
 import (
+	"bytes"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -110,6 +111,25 @@ func (m *mockChainNotifier) confEventFor(
 	return nil
 }
 
+// confEventForScript returns the first live confirmation registration for a
+// script alone.
+func (m *mockChainNotifier) confEventForScript(
+	pkScript []byte) *mockConfirmationEvent {
+
+	m.confMu.Lock()
+	defer m.confMu.Unlock()
+
+	for _, event := range m.confEvents {
+		if event.txid == (chainhash.Hash{}) && !event.cancelled &&
+			bytes.Equal(event.pkScript, pkScript) {
+
+			return event
+		}
+	}
+
+	return nil
+}
+
 // confRegisteredFor reports whether txid was registered with numConfs.
 func (m *mockChainNotifier) confRegisteredFor(txid chainhash.Hash,
 	numConfs uint32) bool {
@@ -149,6 +169,7 @@ func (m *mockChainNotifier) lastSpendOutpoint() wire.OutPoint {
 // mockConfirmationEvent represents a mock confirmation event subscription.
 type mockConfirmationEvent struct {
 	txid          chainhash.Hash
+	pkScript      []byte
 	numConfs      uint32
 	confirmedChan chan *chainntnfs.TxConfirmation
 	negConfChan   chan int32
@@ -200,8 +221,14 @@ func (m *mockChainNotifier) RegisterConfirmationsNtfn(txid *chainhash.Hash,
 	opts ...chainntnfs.NotifierOption,
 ) (*chainntnfs.ConfirmationEvent, error) {
 
+	// A nil txid asks for the script's confirmation.
+	var id chainhash.Hash
+	if txid != nil {
+		id = *txid
+	}
 	mockEvent := &mockConfirmationEvent{
-		txid:          *txid,
+		txid:          id,
+		pkScript:      pkScript,
 		numConfs:      numConfs,
 		confirmedChan: make(chan *chainntnfs.TxConfirmation, 1),
 		negConfChan:   make(chan int32, 1),

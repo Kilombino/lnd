@@ -275,9 +275,10 @@ func TestChainWatcherUnknownSpendReorgedOut(t *testing.T) {
 
 // TestChainWatcherCoopCloseWithShutdown checks that a cooperative close is
 // still recognised for every way this node can know it negotiated one: a
-// persisted shutdown (the normal case), the cooperative close broadcast
-// status alone, and a channel restored from a static backup, which has
-// neither.
+// persisted shutdown (the normal case) and the cooperative close broadcast
+// status alone. A channel restored from a static backup has neither, and its
+// funding spent that way is a splice after the backup: see
+// TestChainWatcherRestoredMovedFunding.
 func TestChainWatcherCoopCloseWithShutdown(t *testing.T) {
 	t.Parallel()
 
@@ -302,14 +303,6 @@ func TestChainWatcherCoopCloseWithShutdown(t *testing.T) {
 
 			require.NoError(t, h.aliceChannel.State().
 				MarkCoopBroadcasted(tx, lntypes.Remote))
-		},
-	}, {
-		name: "restored channel",
-		prepare: func(t *testing.T, h *chainWatcherTestHarness,
-			_ *wire.MsgTx) {
-
-			require.NoError(t, h.aliceChannel.State().
-				ApplyChanStatus(channeldb.ChanStatusRestored))
 		},
 	}}
 

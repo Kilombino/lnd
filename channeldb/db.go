@@ -1752,6 +1752,10 @@ type ChannelShell struct {
 	// Chan is a shell of an OpenChannel, it contains only the items
 	// required to restore the channel on disk.
 	Chan *OpenChannel
+
+	// Splice, for a channel a splice moved or may move, is where it is
+	// and where it may go.
+	Splice *ShellSplice
 }
 
 // RestoreChannelShells is a method that allows the caller to reconstruct the
@@ -1776,11 +1780,21 @@ func (c *ChannelStateDB) RestoreChannelShells(channelShells ...*ChannelShell) er
 			// already exists, then in order to ensure this method
 			// is idempotent, we'll continue to the next step.
 			channel.Db = c
+			splice := channelShell.Splice
+			if splice != nil {
+				channel.spliceFunding = splice.Funding
+			}
 			err := syncNewChannel(
 				tx, channel, channelShell.NodeAddrs,
 			)
 			if err != nil {
 				return err
+			}
+			if splice != nil {
+				err := restoreShellSplice(tx, channel, splice)
+				if err != nil {
+					return err
+				}
 			}
 		}
 

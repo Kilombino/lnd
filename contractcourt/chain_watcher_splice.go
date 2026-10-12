@@ -120,6 +120,20 @@ func (c *chainWatcher) spliceChainSet(
 		if r.Retired || r.Txid() != w.txid {
 			continue
 		}
+
+		// A channel restored from a backup has no commitments on
+		// any funding: its own empty ones stand, and any spend is
+		// the peer's unknown state.
+		restored := c.cfg.chanState.HasChanStatus(
+			channeldb.ChanStatusRestored,
+		)
+		if restored {
+			view := c.cfg.chanState.SpliceView(r)
+			set, err := newChainSet(view)
+
+			return set, view, err
+		}
+
 		if r.LocalCommit == nil || r.RemoteTail == nil {
 			return nil, nil, fmt.Errorf("splice %v without its "+
 				"commitments", w.txid)
@@ -256,6 +270,12 @@ const reorgSafeDepth = 144
 // until each splice is reorg-safe: if a reorg takes a splice out, the old
 // output can be spent again, and every commitment on it is revoked by then.
 func (c *chainWatcher) watchPreviousFundings() {
+	// A channel restored from a backup knows neither the revoked
+	// commitments on its old fundings nor every splice between them.
+	if c.cfg.chanState.HasChanStatus(channeldb.ChanStatusRestored) {
+		return
+	}
+
 	previous, err := c.cfg.chanState.PreviousFundings()
 	if err != nil {
 		log.Errorf("ChannelPoint(%v): unable to read previous fundings: "+
