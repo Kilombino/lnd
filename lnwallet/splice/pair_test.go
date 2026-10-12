@@ -429,6 +429,26 @@ func TestSpliceRequestRefused(t *testing.T) {
 			FeeRate: 2_500, Destination: p2tr(1),
 		})
 		require.ErrorContains(t, err, "close_address_set")
+
+		// To the close address itself, it goes ahead.
+		updates, err := p.alice.machine.Splice(Request{
+			Direction: DirectionOut, Amount: 1_000_000,
+			FeeRate: 2_500, Destination: p2wpkh(5),
+		})
+		require.NoError(t, err)
+		u := requireUpdates(t, updates, StatePreparing,
+			StateNegotiating, StateSigned, StateBroadcast)
+		p.alice.machine.mu.Lock()
+		tx, err := p.alice.machine.signedTx()
+		p.alice.machine.mu.Unlock()
+		require.NoError(t, err)
+		require.Equal(t, u.Txid, tx.TxHash())
+		var paid bool
+		for _, out := range tx.TxOut {
+			paid = paid || (bytes.Equal(out.PkScript, p2wpkh(5)) &&
+				out.Value == 1_000_000)
+		}
+		require.True(t, paid, "the close address isn't paid")
 	})
 
 	t.Run("more than the balance", func(t *testing.T) {

@@ -1,10 +1,12 @@
 package lnd
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcwallet/waddrmgr"
 
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/txscript"
@@ -163,13 +165,44 @@ func (r *rpcServer) spliceDestination(addr string) ([]byte, bool, error) {
 	}
 	script, err := txscript.PayToAddrScript(a)
 
-	return script, wallet.IsOurAddress(a), err
+	return script, r.inDefaultAccount(a), err
+}
+
+// inDefaultAccount reports whether an address is one of the wallet's own in
+// its default account: what "this node's wallet" means to the user. An
+// imported or watch-only account's address is someone else's to spend.
+func (r *rpcServer) inDefaultAccount(a btcutil.Address) bool {
+	info, err := r.server.cc.Wallet.AddressInfo(a)
+	if err != nil || info == nil {
+		return false
+	}
+
+	return info.InternalAccount() == waddrmgr.DefaultAccountNum
+}
+
+// closeDestination returns the channel's close address, if it was opened
+// with one: funds moved out may only go there. It reports whether that
+// address is in this node's default account.
+func (r *rpcServer) closeDestination(
+	ch *channeldb.OpenChannel) ([]byte, bool, bool) {
+
+	script := []byte(ch.LocalShutdownScript)
+	if len(script) == 0 {
+		return nil, false, false
+	}
+	_, addrs, _, err := txscript.ExtractPkScriptAddrs(
+		script, r.cfg.ActiveNetParams.Params,
+	)
+	ours := err == nil && len(addrs) == 1 && r.inDefaultAccount(addrs[0])
+
+	return script, ours, true
 }
 
 // spliceRequest turns the RPC's request into the machine's.
-func (r *rpcServer) spliceRequest(direction lnrpc.SpliceDirection,
-	amount int64, useMax bool, satPerVByte uint64, targetConf int32,
-	addr string, force bool) (splice.Request, bool, error) {
+func (r *rpcServer) spliceRequest(ch *channeldb.OpenChannel,
+	direction lnrpc.SpliceDirection, amount int64, useMax bool,
+	satPerVByte uint64, targetConf int32, addr string,
+	force bool) (splice.Request, bool, error) {
 
 	req := splice.Request{
 		Amount: btcutil.Amount(amount), UseMax: useMax,
@@ -193,6 +226,15 @@ func (r *rpcServer) spliceRequest(direction lnrpc.SpliceDirection,
 
 	case lnrpc.SpliceDirection_SPLICE_OUT:
 		req.Direction = splice.DirectionOut
+
+		// A channel opened with a close address moves funds out
+		// there when no other is asked for.
+		if close, closeOurs, set := r.closeDestination(ch); set &&
+			addr == "" {
+
+			req.Destination, ours = close, closeOurs
+			break
+		}
 		req.Destination, ours, err = r.spliceDestination(addr)
 		if err != nil {
 			return req, false, err
@@ -241,16 +283,28 @@ func (r *rpcServer) EstimateSplice(_ context.Context,
 
 	case lnrpc.SpliceDirection_SPLICE_OUT:
 		req.Direction = splice.DirectionOut
-		if in.Addr == "" {
+		close, closeOurs, closeSet := r.closeDestination(ch)
+		switch {
+		// Only the close address, whatever is asked for.
+		case closeSet && in.Addr == "":
+			req.Destination, ours = close, closeOurs
+
+		case in.Addr == "":
 			req.Destination = make([]byte, 34)
 			req.Destination[0], req.Destination[1] = 0x51, 0x20
 			ours = true
-		} else {
+
+		default:
 			req.Destination, ours, err = r.spliceDestination(
 				in.Addr,
 			)
 			if err != nil {
 				return nil, err
+			}
+			if closeSet && !bytes.Equal(close, req.Destination) &&
+				refusal == "" {
+
+				refusal = "close_address_set"
 			}
 		}
 
@@ -336,7 +390,7 @@ func (r *rpcServer) SpliceChannel(in *lnrpc.SpliceChannelRequest,
 	}
 
 	req, _, err := r.spliceRequest(
-		in.Direction, in.AmountSat, in.UseMax, in.SatPerVbyte,
+		ch, in.Direction, in.AmountSat, in.UseMax, in.SatPerVbyte,
 		in.TargetConf, in.Addr, in.ForceLowFee,
 	)
 	if err != nil {
