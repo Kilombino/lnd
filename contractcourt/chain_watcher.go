@@ -367,6 +367,10 @@ type chainWatcher struct {
 	// the watch has moved to its funding output. Only the close observer
 	// uses it.
 	splice *spliceWatch
+
+	// previousSpends carries a spend of a funding output a locked splice
+	// replaced, by anything but that splice, to the close observer.
+	previousSpends chan *chainntnfs.SpendDetail
 }
 
 // EarlyCoopCloseDispatched reports whether the chain watcher already fired the
@@ -426,6 +430,7 @@ func newChainWatcher(cfg chainWatcherConfig) (*chainWatcher, error) {
 		quit:                make(chan struct{}),
 		clientSubscriptions: make(map[uint64]*ChainEventSubscription),
 		fundingSpendNtfn:    spendNtfn,
+		previousSpends:      make(chan *chainntnfs.SpendDetail, 1),
 	}
 
 	// If this is a pending taproot channel, we need to register for a
@@ -470,6 +475,8 @@ func (c *chainWatcher) Start() error {
 
 	c.wg.Add(1)
 	go c.closeObserver()
+
+	c.watchPreviousFundings()
 
 	return nil
 }
@@ -1074,6 +1081,11 @@ func (c *chainWatcher) closeObserver() {
 
 			log.Infof("ChannelPoint(%v): re-registered for spend "+
 				"detection", c.cfg.chanState.FundingOutpoint)
+
+		// A funding output a locked splice replaced was spent by
+		// something else: a reorg took the splice out.
+		case spend := <-c.previousSpends:
+			c.handlePreviousFundingSpend(spend)
 
 		// A reorg took out the splice the watch had moved for: the old
 		// funding output is unspent again, and watched again.

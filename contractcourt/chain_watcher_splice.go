@@ -247,3 +247,159 @@ func (c *chainWatcher) publishSpliceCommitment(r *channeldb.SpliceRecord) {
 			"%v", c.cfg.chanState.FundingOutpoint, err)
 	}
 }
+
+// reorgSafeDepth is how deep a splice must be before the funding output it
+// replaced stops being watched.
+const reorgSafeDepth = 144
+
+// watchPreviousFundings watches the funding outputs locked splices replaced
+// until each splice is reorg-safe: if a reorg takes a splice out, the old
+// output can be spent again, and every commitment on it is revoked by then.
+func (c *chainWatcher) watchPreviousFundings() {
+	previous, err := c.cfg.chanState.PreviousFundings()
+	if err != nil {
+		log.Errorf("ChannelPoint(%v): unable to read previous fundings: "+
+			"%v", c.cfg.chanState.FundingOutpoint, err)
+		return
+	}
+
+	scripts := make(map[wire.OutPoint][]byte)
+	for _, pf := range previous {
+		_, out, err := input.GenFundingPkScript(
+			pf.LocalKey.PubKey.SerializeCompressed(),
+			pf.RemoteKey.SerializeCompressed(),
+			int64(pf.Capacity),
+		)
+		if err != nil {
+			continue
+		}
+		scripts[pf.OutPoint] = out.PkScript
+	}
+	current, err := deriveFundingPkScript(c.cfg.chanState)
+	if err == nil {
+		scripts[c.cfg.chanState.CurrentFundingOutpoint()] = current
+	}
+
+	for _, pf := range previous {
+		script, ok := scripts[pf.OutPoint]
+		if !ok {
+			continue
+		}
+		c.wg.Add(1)
+		go c.watchPreviousFunding(pf, script, scripts[pf.LockedTo])
+	}
+}
+
+// watchPreviousFunding watches one replaced funding output. Its spend by the
+// splice is expected and followed until reorg-safe; any other spend goes to
+// the close observer.
+func (c *chainWatcher) watchPreviousFunding(pf channeldb.PreviousFunding,
+	script, spliceScript []byte) {
+
+	defer c.wg.Done()
+
+	heightHint := c.cfg.chanState.DeriveHeightHint()
+	for {
+		spendNtfn, err := c.cfg.notifier.RegisterSpendNtfn(
+			&pf.OutPoint, script, heightHint,
+		)
+		if err != nil {
+			log.Errorf("ChannelPoint(%v): unable to watch previous "+
+				"funding %v: %v", c.cfg.chanState.FundingOutpoint,
+				pf.OutPoint, err)
+			return
+		}
+
+		var spend *chainntnfs.SpendDetail
+		select {
+		case s, ok := <-spendNtfn.Spend:
+			spendNtfn.Cancel()
+			if !ok {
+				return
+			}
+			spend = s
+
+		case <-c.quit:
+			spendNtfn.Cancel()
+			return
+		}
+
+		if *spend.SpenderTxHash != pf.LockedTo.Hash {
+			select {
+			case c.previousSpends <- spend:
+			case <-c.quit:
+			}
+
+			return
+		}
+
+		// The splice: followed until reorg-safe, or watched again if a
+		// reorg takes it out.
+		height := uint32(spend.SpendingHeight)
+		heightHint = height
+		conf, err := c.cfg.notifier.RegisterConfirmationsNtfn(
+			spend.SpenderTxHash, spliceScript, reorgSafeDepth,
+			height,
+		)
+		if err != nil {
+			log.Errorf("ChannelPoint(%v): unable to follow splice "+
+				"%v: %v", c.cfg.chanState.FundingOutpoint,
+				spend.SpenderTxHash, err)
+			return
+		}
+
+		select {
+		case <-conf.Confirmed:
+			conf.Cancel()
+			return
+
+		case <-conf.NegativeConf:
+			conf.Cancel()
+			log.Warnf("ChannelPoint(%v): splice %v reorged out "+
+				"after it locked, watching %v again",
+				c.cfg.chanState.FundingOutpoint,
+				spend.SpenderTxHash, pf.OutPoint)
+
+		case <-c.quit:
+			conf.Cancel()
+			return
+		}
+	}
+}
+
+// handlePreviousFundingSpend judges a spend of a replaced funding output:
+// every commitment on it is revoked once the channel updated after the lock,
+// so a commitment is punished as a breach; anything else freezes the channel
+// as a spend this node doesn't recognise.
+func (c *chainWatcher) handlePreviousFundingSpend(
+	spend *chainntnfs.SpendDetail) {
+
+	log.Errorf("ChannelPoint(%v): funding output %v of a locked splice "+
+		"spent by %v", c.cfg.chanState.FundingOutpoint,
+		spend.SpendingTx.TxIn[0].PreviousOutPoint, spend.SpenderTxHash)
+
+	if isCommitmentShaped(spend.SpendingTx) {
+		chainSet, err := newChainSet(c.cfg.chanState)
+		if err == nil {
+			stateNum := c.cfg.extractStateNumHint(
+				spend.SpendingTx, c.stateHintObfuscator,
+			)
+			ok, err := c.handlePossibleBreach(
+				spend, stateNum, chainSet,
+			)
+			if err != nil {
+				log.Errorf("ChannelPoint(%v): unable to handle "+
+					"breach: %v", c.cfg.chanState.FundingOutpoint,
+					err)
+			}
+			if ok {
+				return
+			}
+		}
+	}
+
+	if err := c.handleUnknownSpend(spend); err != nil {
+		log.Errorf("ChannelPoint(%v): unable to flag spend: %v",
+			c.cfg.chanState.FundingOutpoint, err)
+	}
+}

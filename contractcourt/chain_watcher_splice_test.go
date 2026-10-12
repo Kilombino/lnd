@@ -8,10 +8,12 @@ import (
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/lightningnetwork/lnd/chainntnfs"
 	"github.com/lightningnetwork/lnd/input"
 	"github.com/lightningnetwork/lnd/keychain"
 	"github.com/lightningnetwork/lnd/lntypes"
 	"github.com/lightningnetwork/lnd/lnwallet"
+	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/stretchr/testify/require"
 )
 
@@ -247,4 +249,80 @@ func TestChainWatcherSpliceAfterForceClose(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NoError(t, vm.Execute())
+}
+
+// TestChainWatcherPreviousFundingBreach checks the funding output a locked
+// splice replaced: it stays watched after a restart; its spend by the
+// splice is followed; if a reorg takes the splice out and the peer then
+// publishes a commitment on the old output, revoked since the lock, it is
+// punished as a breach.
+func TestChainWatcherPreviousFundingBreach(t *testing.T) {
+	t.Parallel()
+
+	h := newChainWatcherTestHarness(t, withRequiredConfs(1))
+	splice := pendSplice(t, h)
+	txid := splice.TxHash()
+	oldFunding := h.aliceChannel.State().FundingOutpoint
+
+	// Bob's commitment on the old funding at the lock.
+	bobOld := h.bobChannel.State().LocalCommitment.CommitTx
+
+	scid := lnwire.ShortChannelID{BlockHeight: 900_000}
+	require.NoError(t, h.aliceChannel.LockPendingFunding(txid, scid))
+	require.NoError(t, h.bobChannel.LockPendingFunding(txid, scid))
+
+	// An update after the lock revokes it.
+	addFakeHTLC(t, 10_000_000, 0, h.aliceChannel, h.bobChannel)
+	require.NoError(t, lnwallet.ForceStateTransition(
+		h.aliceChannel, h.bobChannel,
+	))
+
+	// A restart: a new watcher for the channel as it is now.
+	require.NoError(t, h.chainWatcher.Stop())
+	h.notifier.perOutpoint = true
+	cfg := h.chainWatcher.cfg
+	cfg.chanState = h.aliceChannel.State()
+	w, err := newChainWatcher(cfg)
+	require.NoError(t, err)
+	require.NoError(t, w.Start())
+	t.Cleanup(func() { _ = w.Stop() })
+	events := w.SubscribeChannelEvents()
+
+	spendOf := func(op wire.OutPoint, tx *wire.MsgTx) {
+		t.Helper()
+
+		var ch chan *chainntnfs.SpendDetail
+		require.Eventually(t, func() bool {
+			var ok bool
+			ch, ok = h.notifier.spendChanFor(op)
+			return ok
+		}, 5*time.Second, 10*time.Millisecond)
+		hash := tx.TxHash()
+		ch <- &chainntnfs.SpendDetail{
+			SpenderTxHash: &hash, SpendingTx: tx,
+			SpendingHeight: 900_010,
+		}
+	}
+
+	// The splice spends the old output; then a reorg takes it out.
+	spendOf(oldFunding, splice)
+	require.Eventually(t, func() bool {
+		return h.notifier.confRegisteredFor(txid, reorgSafeDepth)
+	}, 5*time.Second, 10*time.Millisecond)
+	h.triggerReorg(splice, 3)
+
+	// Bob publishes his old commitment on the old output.
+	require.Eventually(t, func() bool {
+		ch, ok := h.notifier.spendChanFor(oldFunding)
+		return ok && len(ch) == 0
+	}, 5*time.Second, 10*time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
+	spendOf(oldFunding, bobOld)
+
+	select {
+	case breach := <-events.ContractBreach:
+		require.Equal(t, bobOld.TxHash(), breach.CommitHash)
+	case <-time.After(5 * time.Second):
+		t.Fatal("no breach")
+	}
 }
