@@ -89,7 +89,7 @@ func newNode(t *testing.T, ch *lnwallet.LightningChannel,
 			},
 		},
 	})
-	require.NoError(t, n.machine.Start())
+	startReestablished(t, n.machine)
 	t.Cleanup(n.machine.Stop)
 
 	return n

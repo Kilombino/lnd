@@ -777,3 +777,26 @@ func TestLinkReestablishSplice(t *testing.T) {
 		require.NoError(t, err)
 	}
 }
+
+// TestLinkNoSyncStillReestablishes checks a link of a channel just opened,
+// which has no channel_reestablish to exchange, tells the splice machine it
+// may send all the same: without it a splice's splice_locked would wait for
+// a reestablish that never comes.
+func TestLinkNoSyncStillReestablishes(t *testing.T) {
+	t.Parallel()
+
+	h, err := newSingleLinkTestHarness(t, btcutil.SatoshiPerBitcoin, 0)
+	require.NoError(t, err)
+	link := h.aliceLink.(*channelLink)
+	handler := &recordingSpliceHandler{}
+	link.cfg.SpliceHandler = handler
+	link.cfg.SyncStates = false
+	require.NoError(t, h.start())
+
+	require.Eventually(t, func() bool {
+		handler.mu.Lock()
+		defer handler.mu.Unlock()
+
+		return len(handler.reestablish) == 1
+	}, 5*time.Second, 10*time.Millisecond)
+}

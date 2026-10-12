@@ -83,13 +83,23 @@ func (m *Machine) reachedDepth(txid chainhash.Hash,
 			"%v", m.cfg.ChanID, err)
 		return
 	}
+	sent := a.lockedSent
 	m.update(func(a *active) {
 		a.lockedSent = true
 		a.scid = fn.Some(scid)
 	})
-	m.send(&lnwire.SpliceLocked{
-		ChannelID: m.cfg.ChanID, SpliceTxid: txid,
-	})
+
+	// Sent before, on this connection or the last: the peer has it, or
+	// gets it from our channel_reestablish. Before the reestablish it
+	// waits for it.
+	m.mu.Lock()
+	reestablished := m.reestablished
+	m.mu.Unlock()
+	if !sent && reestablished {
+		m.send(&lnwire.SpliceLocked{
+			ChannelID: m.cfg.ChanID, SpliceTxid: txid,
+		})
+	}
 
 	m.maybeComplete()
 }
@@ -189,6 +199,7 @@ func (m *Machine) ReestablishTLVs() (fn.Option[lnwire.FundingTxidFlags],
 
 	case a.phase == phasePending && a.lockedSent:
 		locked = fn.Some(lnwire.FundingTxidFlags{Txid: a.txid})
+		m.lockedTLV = a.txid
 	}
 
 	// The announcement on the funding a splice moved the channel to, if
@@ -244,6 +255,20 @@ func (m *Machine) handleReestablish(msg *lnwire.ChannelReestablish) {
 			m.maybeSendTxSignatures()
 		}
 	})
+
+	// Our splice_locked, if due and not named by our reestablish, goes
+	// now.
+	m.mu.Lock()
+	m.reestablished = true
+	namedLocked := m.lockedTLV
+	m.mu.Unlock()
+	if a != nil && a.phase == phasePending && a.lockedSent &&
+		namedLocked != a.txid {
+
+		m.send(&lnwire.SpliceLocked{
+			ChannelID: m.cfg.ChanID, SpliceTxid: a.txid,
+		})
+	}
 
 	msg.MyCurrentFundingLocked.WhenSome(func(f lnwire.FundingTxidFlags) {
 		if a != nil && a.phase == phasePending && a.txid == f.Txid {

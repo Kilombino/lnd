@@ -176,7 +176,7 @@ func TestAcceptSpliceLimitsRestart(t *testing.T) {
 	// The new machine restores the splice before the old one stops.
 	old := h.machine
 	h.machine = NewMachine(old.cfg)
-	require.NoError(t, h.machine.Start())
+	startReestablished(t, h.machine)
 	old.Stop()
 	require.Equal(t, h.machine, held())
 
@@ -184,7 +184,7 @@ func TestAcceptSpliceLimitsRestart(t *testing.T) {
 	old = h.machine
 	old.Stop()
 	h.machine = NewMachine(old.cfg)
-	require.NoError(t, h.machine.Start())
+	startReestablished(t, h.machine)
 	require.Equal(t, h.machine, held())
 
 	h.machine.HandleReestablish(&lnwire.ChannelReestablish{

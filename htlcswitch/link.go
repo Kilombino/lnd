@@ -4122,6 +4122,12 @@ func (l *channelLink) resumeLink(ctx context.Context) error {
 
 			return err
 		}
+	} else if l.cfg.SpliceHandler != nil {
+		// A channel just opened has nothing to reestablish: the
+		// splice machine may send from now on all the same.
+		l.cfg.SpliceHandler.HandleReestablish(
+			&lnwire.ChannelReestablish{ChanID: l.ChanID()},
+		)
 	}
 
 	// If a shutdown message has previously been sent on this link, then we

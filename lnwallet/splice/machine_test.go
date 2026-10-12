@@ -389,7 +389,7 @@ func newAcceptorHarness(t *testing.T) *acceptorHarness {
 			},
 		},
 	})
-	require.NoError(t, h.machine.Start())
+	startReestablished(t, h.machine)
 	t.Cleanup(h.machine.Stop)
 
 	return h
@@ -917,7 +917,7 @@ func TestAcceptSpliceNotUnified(t *testing.T) {
 		Chain:     newTestChain(),
 		Estimator: chainfee.NewStaticEstimator(2_500, 253),
 	})
-	require.NoError(t, m.Start())
+	startReestablished(t, m)
 	t.Cleanup(m.Stop)
 
 	key, _ := btcec.NewPrivateKey()
@@ -1096,7 +1096,7 @@ func TestAcceptSpliceRestart(t *testing.T) {
 	restart := func() {
 		h.machine.Stop()
 		h.machine = NewMachine(h.machine.cfg)
-		require.NoError(t, h.machine.Start())
+		startReestablished(t, h.machine)
 	}
 	restart()
 
@@ -1144,4 +1144,13 @@ func TestAcceptSpliceRestart(t *testing.T) {
 		}),
 	})
 	next[*lnwire.TxAbort](t, h)
+}
+
+// startReestablished starts a machine as the link does: then the peer's
+// channel_reestablish, after which splice_locked may be sent.
+func startReestablished(t *testing.T, m *Machine) {
+	t.Helper()
+
+	require.NoError(t, m.Start())
+	m.HandleReestablish(&lnwire.ChannelReestablish{})
 }
