@@ -1230,6 +1230,18 @@ func ValidateConfig(cfg Config, interceptor signal.Interceptor, fileParser,
 			"can't be set with protocol.no-quiescence")
 	}
 
+	// A splice negotiates while the channel is quiescent, and BOLT 2 gives
+	// it 60 seconds when HTLCs are pending; a shorter timeout would cut
+	// negotiations short.
+	if cfg.ProtocolOptions.Splice() && !lncfg.IsDevBuild() &&
+		cfg.Htlcswitch.QuiescenceTimeout < lncfg.DefaultQuiescenceTimeout {
+
+		return nil, mkErr("protocol.splice needs "+
+			"htlcswitch.quiescencetimeout of at least %v, got %v",
+			lncfg.DefaultQuiescenceTimeout,
+			cfg.Htlcswitch.QuiescenceTimeout)
+	}
+
 	// Don't allow superfluous --maxchansize greater than
 	// BOLT 02 soft-limit for non-wumbo channel
 	if !cfg.ProtocolOptions.Wumbo() &&
