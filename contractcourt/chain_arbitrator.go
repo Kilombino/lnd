@@ -1218,6 +1218,9 @@ func (c *ChainArbitrator) WatchNewChannel(newChan *channeldb.OpenChannel) error 
 			auxCloser:            c.cfg.AuxCloser,
 			chanCloseConfs:       c.cfg.ChannelCloseConfs,
 			notifyEarlyCoopClose: c.cfg.NotifyEarlyClosedChannel,
+			markLinkInactive: func() error {
+				return c.cfg.MarkLinkInactive(chanPoint)
+			},
 		},
 	)
 	if err != nil {
@@ -1399,6 +1402,11 @@ func (c *ChainArbitrator) loadOpenChannels() error {
 				auxCloser:            c.cfg.AuxCloser,
 				chanCloseConfs:       c.cfg.ChannelCloseConfs,
 				notifyEarlyCoopClose: notifyEarlyClose,
+				markLinkInactive: func() error {
+					return c.cfg.MarkLinkInactive(
+						chanPoint,
+					)
+				},
 			},
 		)
 		if err != nil {

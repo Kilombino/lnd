@@ -189,6 +189,16 @@ func TestChainWatcherUnknownSpendFlagged(t *testing.T) {
 		build: func(h *chainWatcherTestHarness) *wire.MsgTx {
 			return spliceShapedTx(h, false, 92_000)
 		},
+	}, {
+		// A shutdown on disk doesn't make a spend with more than one
+		// input a cooperative close: a close spends the funding
+		// output alone.
+		name: "two inputs after a shutdown was sent",
+		build: func(h *chainWatcherTestHarness) *wire.MsgTx {
+			_ = h.createCoopCloseTx(1)
+
+			return spliceShapedTx(h, true, 97_000)
+		},
 	}}
 
 	for _, tc := range cases {
@@ -204,6 +214,11 @@ func TestChainWatcherUnknownSpendFlagged(t *testing.T) {
 
 			h.sendSpend(tx)
 			h.waitForConfRegistration()
+
+			// The link comes down at once, before any
+			// confirmation: payments must not keep flowing over a
+			// channel whose funds may have moved.
+			require.Positive(t, h.linkDownCalls.Load())
 
 			// No early cooperative close event, and no close
 			// height recorded on first detection.
@@ -315,6 +330,7 @@ func TestChainWatcherCoopCloseWithShutdown(t *testing.T) {
 			require.Equal(
 				t, tx.TxHash(), closeInfo.ClosingTXID,
 			)
+			require.Zero(t, h.linkDownCalls.Load())
 			require.False(t, h.aliceChannel.State().HasChanStatus(
 				channeldb.ChanStatusFundingSpentUnknown,
 			))

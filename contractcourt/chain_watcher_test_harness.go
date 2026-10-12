@@ -2,6 +2,7 @@ package contractcourt
 
 import (
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -55,6 +56,10 @@ type chainWatcherTestHarness struct {
 	// notifyEarlyCoopClose callback when captureEarlyCoopClose was
 	// enabled. Tests assert against length and contents.
 	earlyCoopCloseSummaries []*channeldb.ChannelCloseSummary
+
+	// linkDownCalls counts the chain watcher's requests to take the
+	// channel's link out of the switch.
+	linkDownCalls atomic.Int32
 }
 
 // mockChainNotifier extends the standard mock with additional channels for
@@ -243,6 +248,10 @@ func newChainWatcherTestHarnessFromReporter(t *testing.T,
 
 	// Create chain watcher.
 	chainWatcher, err := newChainWatcher(chainWatcherConfig{
+		markLinkInactive: func() error {
+			harness.linkDownCalls.Add(1)
+			return nil
+		},
 		chanState:            aliceChannel.State(),
 		notifier:             notifier,
 		signer:               aliceChannel.Signer,

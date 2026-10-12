@@ -290,6 +290,13 @@ type chainWatcherConfig struct {
 	// + state machine advance + FULLY_RESOLVED_CHANNEL) still waits for
 	// the full required confirmation depth via the existing async path.
 	notifyEarlyCoopClose func(*channeldb.ChannelCloseSummary)
+
+	// markLinkInactive takes the channel's link out of the switch. It is
+	// called as soon as the funding output is seen spent by a transaction
+	// this version doesn't recognise: from then on no payment may be
+	// forwarded over the channel, since its funds may sit on an output
+	// this node doesn't watch. It may be nil (tests).
+	markLinkInactive func() error
 }
 
 // chainWatcher is a system that's assigned to every active channel. The duty
@@ -818,6 +825,13 @@ func (c *chainWatcher) processDetectedSpend(
 	// suppression of the duplicate notify at MarkChannelClosed time is
 	// handled in chain_arbitrator.go via a CloseType check.
 	c.maybeDispatchEarlyCoopClose(spend)
+
+	// A spend this version doesn't recognise stops payments over the
+	// channel at once; the flag itself waits for the confirmations below,
+	// so that a shallow reorg can't leave the channel flagged.
+	if c.isUnknownSpend(spend.SpendingTx) {
+		c.takeLinkDown()
+	}
 
 	numConfs := c.requiredConfsForSpend()
 	txid := spend.SpenderTxHash
@@ -1488,9 +1502,17 @@ func (c *chainWatcher) closeNegotiated() bool {
 }
 
 // isCoopCloseSpend reports whether the supplied spending tx is a cooperative
-// close of this channel: it has a cooperative close sequence, it isn't shaped
-// like a commitment, and this node negotiated a close.
+// close of this channel: a single input with a cooperative close sequence,
+// not shaped like a commitment, on a channel whose close this node
+// negotiated.
 func (c *chainWatcher) isCoopCloseSpend(spendingTx *wire.MsgTx) bool {
+	// A cooperative close spends the funding output alone (BOLT 2); a
+	// transaction with more inputs is something else, a splice for
+	// instance, even on a channel that negotiated a close.
+	if len(spendingTx.TxIn) != 1 {
+		return false
+	}
+
 	return hasCoopCloseSequence(spendingTx) &&
 		!isCommitmentShaped(spendingTx) && c.closeNegotiated()
 }
@@ -1504,6 +1526,19 @@ func (c *chainWatcher) isUnknownSpend(spendingTx *wire.MsgTx) bool {
 		!c.isCoopCloseSpend(spendingTx)
 }
 
+// takeLinkDown removes the channel's link from the switch, if a way to do so
+// was configured.
+func (c *chainWatcher) takeLinkDown() {
+	if c.cfg.markLinkInactive == nil {
+		return
+	}
+
+	if err := c.cfg.markLinkInactive(); err != nil {
+		log.Errorf("ChannelPoint(%v): unable to take the link down: %v",
+			c.cfg.chanState.FundingOutpoint, err)
+	}
+}
+
 // handleUnknownSpend handles a spend of the funding output by a transaction
 // this version doesn't recognise. Treating it as a close would be wrong in
 // both directions: as a cooperative close it would stop watching an output
@@ -1515,6 +1550,8 @@ func (c *chainWatcher) handleUnknownSpend(
 	commitSpend *chainntnfs.SpendDetail) error {
 
 	chanState := c.cfg.chanState
+
+	c.takeLinkDown()
 
 	log.Errorf("ChannelPoint(%v): funding output spent by tx %v, which "+
 		"is neither a commitment nor a cooperative close negotiated "+

@@ -1131,6 +1131,20 @@ func (c *ChannelArbitrator) stateStep(
 				return StateBroadcastCommit, nil, nil
 			}
 
+			// The funding output was already spent by a
+			// transaction this version doesn't recognise: there is
+			// no commitment to broadcast. Wait here, as for data
+			// loss; a version that recognises the spend takes the
+			// channel from there.
+			if errors.Is(err, ErrFundingSpentUnknown) {
+				log.Errorf("ChannelArbitrator(%v): not force "+
+					"closing, the funding output was spent "+
+					"by an unrecognised transaction",
+					c.cfg.ChanPoint)
+
+				return StateBroadcastCommit, nil, nil
+			}
+
 			return StateError, closeTx, err
 		}
 		closeTx = forceCloseTx

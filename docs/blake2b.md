@@ -466,14 +466,19 @@ flagged `ChanStatusFundingSpentUnknown`:
 - `lncli pendingchannels` lists it under `waiting_close_channels`, with
   `ChanStatusFundingSpentUnknown` in `chan_status_flags` and no closing
   transaction;
-- it stays out of the switch, so no payment is sent over it;
+- its link is taken out of the switch as soon as the spend is seen, so no
+  payment is sent over it;
 - nothing is broadcast or swept for it, and `lncli closechannel` refuses it.
 
 The likely cause is a splice made with a node that supports it, followed by a
-move to an older Lightning Fork, or a backup restored on an older one. Update
+move of the node's data to an older Lightning Fork. (A channel restored from a
+static channel backup is different: lnd treats any spend of it with a close
+sequence as a cooperative close, since it can do nothing else with the
+channel either way.) Update
 Lightning Fork from the StartOS Marketplace, the Umbrel App Store or the
 release page; a version that recognises the spend clears the flag. As a last
-resort, `lncli abandonchannel` makes the node forget the channel. Use it only
+resort, `lncli abandonchannel --i_know_what_i_am_doing` makes the node
+forget the channel. Use it only
 once you know what the spending transaction is: the channel may still hold
 your funds on a new output, and a forgotten channel's funds are only
 recoverable by hand.
