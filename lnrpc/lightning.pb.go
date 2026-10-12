@@ -10782,11 +10782,14 @@ type ChannelBalanceResponse struct {
 	//present.
 	CustomChannelData []byte `protobuf:"bytes,9,opt,name=custom_channel_data,json=customChannelData,proto3" json:"custom_channel_data,omitempty"`
 	//
-	//This node's contributions to splices that have not locked: in the
-	//channel once they do, counted in no other balance here until then.
+	//This node's contributions to splices whose transaction went out and that
+	//have not locked: in the channel once they do, counted in no other
+	//balance here until then. Before the transaction goes out the wallet
+	//still counts the coins it spends.
 	PendingSpliceInSat int64 `protobuf:"varint,1002,opt,name=pending_splice_in_sat,json=pendingSpliceInSat,proto3" json:"pending_splice_in_sat,omitempty"`
 	//
-	//Outputs to this node's wallet in splice transactions not yet confirmed.
+	//Outputs to this node's wallet in splice transactions that went out and
+	//are not yet confirmed: part of the wallet's unconfirmed balance.
 	PendingSpliceToWalletSat int64 `protobuf:"varint,1003,opt,name=pending_splice_to_wallet_sat,json=pendingSpliceToWalletSat,proto3" json:"pending_splice_to_wallet_sat,omitempty"`
 	unknownFields            protoimpl.UnknownFields
 	sizeCache                protoimpl.SizeCache

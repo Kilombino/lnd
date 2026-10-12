@@ -454,8 +454,7 @@ func (r *rpcServer) addSpliceFields(ch *channeldb.OpenChannel,
 // output, 0 while it is unconfirmed or can't be checked. One backend call,
 // only for a splice that went out.
 func (r *rpcServer) spliceConfirmations(rec *channeldb.SpliceRecord) uint32 {
-	n := rec.Negotiation
-	if n == nil || n.OurTxSignatures == nil || n.TheirTxSignatures == nil {
+	if !spliceWentOut(rec) {
 		return 0
 	}
 	chain := &spliceChain{wallet: r.server.cc.Wallet.WalletController}
@@ -465,6 +464,41 @@ func (r *rpcServer) spliceConfirmations(rec *channeldb.SpliceRecord) uint32 {
 	}
 
 	return confs
+}
+
+// spliceWentOut reports whether a splice's transaction is complete, both
+// sides' signatures in: from then this node broadcasts it.
+func spliceWentOut(rec *channeldb.SpliceRecord) bool {
+	n := rec.Negotiation
+
+	return n != nil && n.OurTxSignatures != nil &&
+		n.TheirTxSignatures != nil
+}
+
+// spliceBalances returns what a splice adds to a channel balance's pending
+// fields: our contribution, once the transaction went out (until then the
+// wallet still counts the coins it spends), and what it pays this node's
+// wallet while unconfirmed (the wallet counts that as unconfirmed; once
+// confirmed, as confirmed).
+func spliceBalances(rec *channeldb.SpliceRecord, confirmations func() uint32,
+	ourOutputs func(*wire.MsgTx, uint32) btcutil.Amount) (btcutil.Amount,
+	btcutil.Amount) {
+
+	if rec.Retired || !spliceWentOut(rec) {
+		return 0, 0
+	}
+
+	var in, toWallet btcutil.Amount
+	if rec.LocalDelta > 0 {
+		in = rec.LocalDelta
+	}
+	if rec.LocalDelta < 0 && rec.Negotiation.Tx != nil &&
+		confirmations() == 0 {
+
+		toWallet = ourOutputs(rec.Negotiation.Tx, rec.OutPoint.Index)
+	}
+
+	return in, toWallet
 }
 
 // setSpliceDepth adds a pending splice's confirmations and lock depth; one
@@ -554,22 +588,19 @@ func (r *rpcServer) addSpliceBalances(channels []*channeldb.OpenChannel,
 			if rec.Retired {
 				continue
 			}
-			if rec.LocalDelta > 0 {
-				in += rec.LocalDelta
-			}
+			recIn, recToWallet := spliceBalances(
+				rec, func() uint32 {
+					return r.spliceConfirmations(rec)
+				}, r.ourOutputs,
+			)
+			in += recIn
+			toWallet += recToWallet
 			if rec.LocalCommit != nil {
 				local := ch.LocalCommitment.LocalBalance
 				cand := rec.LocalCommit.LocalBalance
 				if cand < local && local-cand > least {
 					least = local - cand
 				}
-			}
-			if rec.LocalDelta < 0 && rec.Negotiation != nil &&
-				rec.Negotiation.Tx != nil {
-
-				toWallet += r.ourOutputs(
-					rec.Negotiation.Tx, rec.OutPoint.Index,
-				)
 			}
 		}
 		lower += least

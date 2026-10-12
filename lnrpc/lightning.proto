@@ -3439,13 +3439,16 @@ message ChannelBalanceResponse {
     bytes custom_channel_data = 9;
 
     /*
-    This node's contributions to splices that have not locked: in the
-    channel once they do, counted in no other balance here until then.
+    This node's contributions to splices whose transaction went out and that
+    have not locked: in the channel once they do, counted in no other
+    balance here until then. Before the transaction goes out the wallet
+    still counts the coins it spends.
     */
     int64 pending_splice_in_sat = 1002;
 
     /*
-    Outputs to this node's wallet in splice transactions not yet confirmed.
+    Outputs to this node's wallet in splice transactions that went out and
+    are not yet confirmed: part of the wallet's unconfirmed balance.
     */
     int64 pending_splice_to_wallet_sat = 1003;
 }

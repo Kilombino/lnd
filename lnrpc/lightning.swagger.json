@@ -4382,12 +4382,12 @@
         "pending_splice_in_sat": {
           "type": "string",
           "format": "int64",
-          "description": "This node's contributions to splices that have not locked: in the\nchannel once they do, counted in no other balance here until then."
+          "description": "This node's contributions to splices whose transaction went out and that\nhave not locked: in the channel once they do, counted in no other\nbalance here until then. Before the transaction goes out the wallet\nstill counts the coins it spends."
         },
         "pending_splice_to_wallet_sat": {
           "type": "string",
           "format": "int64",
-          "description": "Outputs to this node's wallet in splice transactions not yet confirmed."
+          "description": "Outputs to this node's wallet in splice transactions that went out and\nare not yet confirmed: part of the wallet's unconfirmed balance."
         }
       }
     },

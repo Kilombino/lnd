@@ -3,6 +3,7 @@ package lnd
 import (
 	"testing"
 
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightningnetwork/lnd/channeldb"
@@ -94,4 +95,58 @@ func TestSpliceLockDepth(t *testing.T) {
 	require.Equal(t, uint32(8), spliceLockDepth(8, 0))
 	require.Equal(t, uint32(6), spliceLockDepth(3, -5))
 	require.Equal(t, uint32(6), spliceLockDepth(3, 1_000_000_000))
+}
+
+// TestSpliceBalances checks what a splice adds to the channel balance's
+// pending fields: nothing before its transaction went out, our
+// contribution after, and what it pays our wallet only while unconfirmed.
+func TestSpliceBalances(t *testing.T) {
+	t.Parallel()
+
+	tx := wire.NewMsgTx(2)
+	tx.AddTxOut(&wire.TxOut{Value: 1_000_000})
+	tx.AddTxOut(&wire.TxOut{Value: 300_000})
+	ours := func(_ *wire.MsgTx, idx uint32) btcutil.Amount {
+		require.Equal(t, uint32(0), idx)
+		return 300_000
+	}
+	confs := uint32(0)
+	confirmations := func() uint32 { return confs }
+
+	in := &channeldb.SpliceRecord{
+		LocalDelta:  200_000,
+		Negotiation: &channeldb.SpliceNegotiation{Tx: tx},
+	}
+	a, b := spliceBalances(in, confirmations, ours)
+	require.Zero(t, a, "counted while the wallet still holds the coins")
+	require.Zero(t, b)
+
+	in.Negotiation.OurTxSignatures = &lnwire.TxSignatures{}
+	in.Negotiation.TheirTxSignatures = &lnwire.TxSignatures{}
+	a, _ = spliceBalances(in, confirmations, ours)
+	require.EqualValues(t, 200_000, a)
+
+	out := &channeldb.SpliceRecord{
+		LocalDelta: -300_200,
+		Negotiation: &channeldb.SpliceNegotiation{
+			Tx:              tx,
+			OurTxSignatures: &lnwire.TxSignatures{},
+		},
+	}
+	_, b = spliceBalances(out, confirmations, ours)
+	require.Zero(t, b, "not out yet")
+
+	out.Negotiation.TheirTxSignatures = &lnwire.TxSignatures{}
+	a, b = spliceBalances(out, confirmations, ours)
+	require.Zero(t, a)
+	require.EqualValues(t, 300_000, b)
+
+	confs = 1
+	_, b = spliceBalances(out, confirmations, ours)
+	require.Zero(t, b, "confirmed: the wallet counts it as confirmed")
+
+	out.Retired = true
+	confs = 0
+	_, b = spliceBalances(out, confirmations, ours)
+	require.Zero(t, b)
 }
