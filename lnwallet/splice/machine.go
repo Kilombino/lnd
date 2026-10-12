@@ -169,6 +169,20 @@ type Config struct {
 
 	// Policy is this node's splice policy.
 	Policy Policy
+
+	// NotifyEvent, if set, is told of each step of the channel's splices:
+	// "started", "signed", "locked", "aborted".
+	NotifyEvent func(kind string, txid chainhash.Hash, reason string,
+		fromPeer bool)
+}
+
+// notify tells NotifyEvent of a step.
+func (m *Machine) notify(kind string, txid chainhash.Hash, reason string,
+	fromPeer bool) {
+
+	if m.cfg.NotifyEvent != nil {
+		m.cfg.NotifyEvent(kind, txid, reason, fromPeer)
+	}
 }
 
 // Refusal codes, sent as tx_abort's reason and reported to the user.
@@ -490,6 +504,7 @@ func (m *Machine) forget() {
 	}
 
 	m.recordLast("aborted", a.abortReason, a.reasonFromPeer)
+	m.notify("aborted", a.txid, a.abortReason, a.reasonFromPeer)
 	m.report(Update{
 		State: StateAborted, Txid: a.txid, Reason: a.abortReason,
 		ReasonFromPeer: a.reasonFromPeer,

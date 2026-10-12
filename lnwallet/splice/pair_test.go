@@ -239,6 +239,13 @@ func TestSpliceInBetweenMachines(t *testing.T) {
 	capacity := p.alice.ch.State().Capacity
 	const amount = btcutil.Amount(45_000_000)
 
+	events := make(chan string, 8)
+	p.alice.machine.cfg.NotifyEvent = func(kind string, _ chainhash.Hash,
+		_ string, _ bool) {
+
+		events <- kind
+	}
+
 	updates, err := p.alice.machine.Splice(Request{
 		Direction: DirectionIn, Amount: amount, FeeRate: 2_500,
 	})
@@ -289,6 +296,11 @@ func TestSpliceInBetweenMachines(t *testing.T) {
 
 	_, open := <-updates
 	require.False(t, open)
+
+	// The channel event stream heard of each step.
+	for _, kind := range []string{"started", "signed", "locked"} {
+		require.Equal(t, kind, <-events)
+	}
 }
 
 // TestSpliceOutBetweenMachines runs a splice moving funds out of Alice's

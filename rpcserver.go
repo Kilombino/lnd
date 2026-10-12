@@ -5714,6 +5714,9 @@ func (r *rpcServer) SubscribeChannelEvents(req *lnrpc.ChannelEventSubscription,
 
 				continue
 
+			case channelnotifier.SpliceEvent:
+				update = rpcSpliceEvent(event)
+
 			case channelnotifier.FullyResolvedChannelEvent:
 				update = &lnrpc.ChannelEventUpdate{
 					Type: lnrpc.ChannelEventUpdate_FULLY_RESOLVED_CHANNEL,

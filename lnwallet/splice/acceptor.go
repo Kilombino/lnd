@@ -76,6 +76,7 @@ func (m *Machine) handleSpliceInit(msg *lnwire.SpliceInit) {
 	m.setActive(a)
 	m.startTimeout()
 
+	m.notify("started", [32]byte{}, "", false)
 	m.send(&lnwire.SpliceAck{
 		ChannelID:              m.cfg.ChanID,
 		FundingContribution:    0,

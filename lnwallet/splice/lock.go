@@ -150,6 +150,7 @@ func (m *Machine) maybeComplete() {
 		}
 	}
 	m.recordLast("locked", "", false)
+	m.notify("locked", a.txid, "", false)
 	m.report(Update{State: StateLocked, Txid: a.txid})
 	m.setActive(nil)
 }

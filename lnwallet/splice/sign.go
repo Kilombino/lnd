@@ -111,6 +111,7 @@ func (m *Machine) maybeSendTxSignatures() {
 	}
 	m.update(func(a *active) { a.ourTxSigs = sigs })
 	m.send(sigs)
+	m.notify("signed", a.txid, "", false)
 	m.report(Update{State: StateSigned, Txid: a.txid})
 
 	if a.theirTxSigs != nil {

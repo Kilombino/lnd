@@ -9,6 +9,7 @@ import (
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightningnetwork/lnd/chainntnfs"
+	"github.com/lightningnetwork/lnd/channelnotifier"
 	"github.com/lightningnetwork/lnd/lnwallet"
 	"github.com/lightningnetwork/lnd/lnwallet/splice"
 )
@@ -118,6 +119,21 @@ func (s *server) newSpliceMachine(base splice.Config,
 
 			return max(depth, scaled)
 		},
+	}
+
+	ch := base.Channel
+	cfg.NotifyEvent = func(kind string, txid chainhash.Hash,
+		reason string, fromPeer bool) {
+
+		state := ch.State()
+		s.channelNotifier.NotifySpliceEvent(channelnotifier.SpliceEvent{
+			ChannelPoint:         state.CurrentFundingOutpoint(),
+			OriginalChannelPoint: state.FundingOutpoint,
+			Kind:                 kind,
+			Txid:                 txid,
+			Reason:               reason,
+			ReasonFromPeer:       fromPeer,
+		})
 	}
 
 	return splice.NewMachine(cfg)

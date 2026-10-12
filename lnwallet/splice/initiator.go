@@ -337,6 +337,7 @@ func (m *Machine) quiesced(a *active,
 	m.startTimeout()
 	m.report(Update{State: StateNegotiating})
 
+	m.notify("started", chainhash.Hash{}, "", false)
 	m.send(&lnwire.SpliceInit{
 		ChannelID:              m.cfg.ChanID,
 		FundingContribution:    a.ourContribution,
@@ -367,6 +368,7 @@ func (m *Machine) failOurs(code string, format string, args ...interface{}) {
 	}
 
 	m.recordLast("aborted", reason, false)
+	m.notify("aborted", chainhash.Hash{}, reason, false)
 	m.report(Update{State: StateAborted, Reason: reason})
 	m.setActive(nil)
 }

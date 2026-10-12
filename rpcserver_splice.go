@@ -9,6 +9,7 @@ import (
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightningnetwork/lnd/channeldb"
+	"github.com/lightningnetwork/lnd/channelnotifier"
 	"github.com/lightningnetwork/lnd/lnrpc"
 	"github.com/lightningnetwork/lnd/lnwallet"
 	"github.com/lightningnetwork/lnd/lnwallet/chainfee"
@@ -568,4 +569,26 @@ func (r *rpcServer) ourOutputs(tx *wire.MsgTx,
 	}
 
 	return sum
+}
+
+// rpcSpliceEvent describes a splice step for the channel event stream.
+func rpcSpliceEvent(e channelnotifier.SpliceEvent) *lnrpc.ChannelEventUpdate {
+	txid := ""
+	if e.Txid != [32]byte{} {
+		txid = e.Txid.String()
+	}
+
+	return &lnrpc.ChannelEventUpdate{
+		Type: lnrpc.ChannelEventUpdate_SPLICE_EVENT,
+		Channel: &lnrpc.ChannelEventUpdate_SpliceEvent{
+			SpliceEvent: &lnrpc.SpliceEvent{
+				ChannelPoint:         e.ChannelPoint.String(),
+				OriginalChannelPoint: e.OriginalChannelPoint.String(),
+				Kind:                 e.Kind,
+				Txid:                 txid,
+				Reason:               e.Reason,
+				ReasonFromPeer:       e.ReasonFromPeer,
+			},
+		},
+	}
 }
