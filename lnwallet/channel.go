@@ -828,6 +828,11 @@ type LightningChannel struct {
 	// commitment is also signed on each of their funding outputs.
 	pendingFundings []*pendingFunding
 
+	// retiredFundings are the fundings locked splices replaced, while
+	// the peer's commitments on them that were unrevoked at the lock wait
+	// to be revoked and logged.
+	retiredFundings []*retiredFunding
+
 	// obsoleteFundings are the fundings a locked splice replaced: the
 	// peer may still sign for them in a batch it started before it learned
 	// of the lock.
@@ -2135,9 +2140,15 @@ func NewBreachRetribution(chanState *channeldb.OpenChannel, stateNum uint64,
 
 	// Query the on-disk revocation log for the snapshot which was recorded
 	// at this particular state num. Based on whether a legacy revocation
-	// log is returned or not, we will process them differently.
-	revokedLog, revokedLogLegacy, err := chanState.FindPreviousState(
-		stateNum,
+	// log is returned or not, we will process them differently. A spliced
+	// channel has had commitments on more than one funding at a height:
+	// the entry is the one on the funding the breach spends.
+	funding := chanState.CurrentFundingOutpoint()
+	if spendTx != nil && len(spendTx.TxIn) > 0 {
+		funding = spendTx.TxIn[0].PreviousOutPoint
+	}
+	revokedLog, revokedLogLegacy, err := chanState.FindPreviousStateFor(
+		funding, stateNum,
 	)
 	if err != nil {
 		return nil, err
@@ -4199,6 +4210,9 @@ func (lc *LightningChannel) SignNextCommitment(
 	if lc.spliceRestoreErr != nil {
 		return nil, lc.spliceRestoreErr
 	}
+	if err := lc.requireExchanged(); err != nil {
+		return nil, err
+	}
 
 	// Check for empty commit sig. This should never happen, but we don't
 	// dare to fail hard here. We assume peers can deal with the empty sig
@@ -5486,6 +5500,9 @@ func (lc *LightningChannel) ReceiveNewCommitmentBatch(commitSigs *CommitSigs,
 
 	if lc.spliceRestoreErr != nil {
 		return lc.spliceRestoreErr
+	}
+	if err := lc.requireExchanged(); err != nil {
+		return err
 	}
 	if err := lc.checkBatch(spliceSigs); err != nil {
 		return err

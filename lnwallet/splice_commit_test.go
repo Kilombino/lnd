@@ -14,6 +14,7 @@ import (
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightningnetwork/lnd/channeldb"
+	"github.com/lightningnetwork/lnd/fn/v2"
 	"github.com/lightningnetwork/lnd/input"
 	"github.com/lightningnetwork/lnd/keychain"
 	"github.com/lightningnetwork/lnd/lnwire"
@@ -954,4 +955,186 @@ func TestSpliceRestoreFailure(t *testing.T) {
 		aCommit.CommitSigs, aCommit.SpliceSigs,
 	))
 	require.Error(t, bob.AddPendingFunding(PendingFunding{}))
+}
+
+// TestSpliceNoUpdatesBeforeExchange checks that no commitment moves between
+// adding a splice and exchanging its own commitments, which are signed at
+// the current heights: signing and accepting are refused without changing
+// anything, and work once the exchange is done.
+func TestSpliceNoUpdatesBeforeExchange(t *testing.T) {
+	t.Parallel()
+
+	alice, bob, err := CreateTestChannels(t, spliceChanTypes["anchors"])
+	require.NoError(t, err)
+	keys := newSpliceKeys(t, alice, bob)
+	txid := chainhash.Hash{0x75}
+	addSplice(t, alice, bob, keys, txid, 10_000_000, 0)
+
+	htlc, _ := createHTLC(0, lnwire.NewMSatFromSatoshis(100_000))
+	addAndReceiveHTLC(t, alice, bob, htlc, nil)
+
+	_, err = alice.SignNextCommitment(ctxb)
+	require.ErrorIs(t, err, ErrSpliceNotExchanged)
+	require.ErrorIs(t, bob.ReceiveNewCommitmentBatch(
+		&CommitSigs{}, nil,
+	), ErrSpliceNotExchanged)
+
+	// A splice can't be added with updates in flight either.
+	keys2 := newSpliceKeys(t, alice, bob)
+	require.ErrorIs(t, alice.AddPendingFunding(PendingFunding{
+		OutPoint: wire.OutPoint{Hash: chainhash.Hash{0x76}},
+		Capacity: alice.channelState.Capacity + 1,
+		LocalKey: keychain.KeyDescriptor{
+			PubKey: keys2.alice.PubKey(),
+		},
+		RemoteKey: keys2.bob.PubKey(), LocalDelta: 1,
+	}), ErrNotQuiescent)
+}
+
+// TestSpliceRemove checks dropping a pending splice: its record goes, the
+// channel updates without it, and a batch member the peer still sends for it
+// counts as obsolete.
+func TestSpliceRemove(t *testing.T) {
+	t.Parallel()
+
+	alice, bob, txid := splicedPair(t, 0, -40_000_000)
+
+	require.NoError(t, alice.RemovePendingFunding(txid))
+	require.NoError(t, bob.RemovePendingFunding(txid))
+	require.ErrorIs(t, alice.RemovePendingFunding(txid), ErrUnknownFunding)
+	require.True(t, alice.IsObsoleteFunding(txid))
+	require.Empty(t, alice.PendingFundings())
+
+	records, err := alice.channelState.SpliceRecords()
+	require.NoError(t, err)
+	require.Empty(t, records)
+
+	// Bob's splice-out no longer limits what he can send (his HTLC id
+	// 0 is taken by withHTLCs).
+	htlc, _ := createHTLC(1, lnwire.NewMSatFromSatoshis(400_000))
+	addAndReceiveHTLC(t, bob, alice, htlc, nil)
+	require.NoError(t, ForceStateTransition(bob, alice))
+	require.NoError(t, ForceStateTransition(bob, alice))
+
+	// After a restart too.
+	alice, err = restartChannel(alice)
+	require.NoError(t, err)
+	require.Empty(t, alice.PendingFundings())
+	require.NoError(t, alice.SpliceRestoreError())
+}
+
+// TestSpliceRestartLockForceClose checks a quiet channel waiting for its
+// splice to confirm: both restart, the splice locks before any further
+// update, and each side can still force close from its commitment on the new
+// funding, HTLC signatures included.
+func TestSpliceRestartLockForceClose(t *testing.T) {
+	t.Parallel()
+
+	alice, bob, txid := splicedPair(t, 100_000_000, 0)
+
+	var err error
+	alice, err = restartChannel(alice)
+	require.NoError(t, err)
+	bob, err = restartChannel(bob)
+	require.NoError(t, err)
+
+	scid := lnwire.ShortChannelID{BlockHeight: 900_200}
+	require.NoError(t, alice.LockPendingFunding(txid, scid))
+	require.NoError(t, bob.LockPendingFunding(txid, scid))
+
+	for _, lc := range []*LightningChannel{alice, bob} {
+		var nonDust int
+		for _, h := range lc.channelState.LocalCommitment.Htlcs {
+			if h.OutputIndex >= 0 {
+				nonDust++
+				require.NotEmpty(t, h.Signature)
+			}
+		}
+		require.Positive(t, nonDust)
+
+		summary, err := lc.ForceClose()
+		require.NoError(t, err)
+		require.Equal(t, lc.channelState.CurrentFundingOutpoint(),
+			summary.CloseTx.TxIn[0].PreviousOutPoint)
+	}
+}
+
+// requireBreachFor checks that Alice's breach retribution for Bob's revoked
+// commitment tx at height names that transaction, and that the outputs it
+// sweeps are Bob's and Alice's balances on it.
+func requireBreachFor(t *testing.T, alice *LightningChannel, height uint64,
+	tx *wire.MsgTx, bobBalance, aliceBalance lnwire.MilliSatoshi) {
+
+	t.Helper()
+
+	br, err := NewBreachRetribution(
+		alice.channelState, height, 1, tx,
+		fn.None[AuxLeafStore](), fn.None[AuxContractResolver](),
+	)
+	require.NoError(t, err)
+	require.Equal(t, tx.TxHash(), br.BreachTxHash)
+	require.Equal(t, int64(aliceBalance.ToSatoshis()),
+		tx.TxOut[br.LocalOutpoint.Index].Value)
+	require.Equal(t, int64(bobBalance.ToSatoshis()),
+		tx.TxOut[br.RemoteOutpoint.Index].Value)
+}
+
+// TestSpliceBreachAfterLock checks that every revoked commitment of Bob's
+// can be punished after a splice locked: on the new funding from while the
+// splice was pending, on the old funding from before the lock (a reorg can
+// bring it back), including the ones still unrevoked at the lock, and on the
+// new funding after it.
+func TestSpliceBreachAfterLock(t *testing.T) {
+	t.Parallel()
+
+	alice, bob, txid := splicedPair(t, 100_000_000, 0)
+
+	type revoked struct {
+		height uint64
+		tx     *wire.MsgTx
+		bob    lnwire.MilliSatoshi
+		alice  lnwire.MilliSatoshi
+	}
+	capture := func(c *commitment) revoked {
+		return revoked{c.height, c.txn, c.ourBalance, c.theirBalance}
+	}
+
+	// Pending: Bob's commitment at his current height, on both fundings.
+	p, err := bob.pendingFunding(txid)
+	require.NoError(t, err)
+	h := bob.commitChains.Local.tail().height
+	pendingOld := capture(bob.commitChains.Local.tail())
+	pendingNew := capture(p.local[h])
+
+	htlc, _ := createHTLC(3, lnwire.NewMSatFromSatoshis(400_000))
+	addAndReceiveHTLC(t, alice, bob, htlc, nil)
+	forceBatchTransition(t, alice, bob)
+
+	// Bob's commitment on the old funding when the splice locks.
+	atLock := capture(bob.commitChains.Local.tail())
+	scid := lnwire.ShortChannelID{BlockHeight: 900_300}
+	require.NoError(t, alice.LockPendingFunding(txid, scid))
+	require.NoError(t, bob.LockPendingFunding(txid, scid))
+
+	// After the lock, on the new funding.
+	afterLock := capture(bob.commitChains.Local.tail())
+	require.NoError(t, ForceStateTransition(alice, bob))
+	require.NoError(t, ForceStateTransition(alice, bob))
+
+	for _, r := range []revoked{pendingOld, pendingNew, atLock, afterLock} {
+		requireBreachFor(t, alice, r.height, r.tx, r.bob, r.alice)
+	}
+
+	// The old funding's commitments at the lock are all logged: nothing
+	// left to wait for.
+	require.Empty(t, alice.retiredFundings)
+	records, err := alice.channelState.SpliceRecords()
+	require.NoError(t, err)
+	require.Empty(t, records)
+
+	// And after a restart.
+	alice, err = restartChannel(alice)
+	require.NoError(t, err)
+	requireBreachFor(t, alice, atLock.height, atLock.tx, atLock.bob,
+		atLock.alice)
 }

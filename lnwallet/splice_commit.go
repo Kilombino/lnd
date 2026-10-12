@@ -10,6 +10,7 @@ import (
 	"slices"
 
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
@@ -45,6 +46,11 @@ var (
 	// ErrUnknownFunding is returned for a funding txid that is neither
 	// the channel's nor a pending splice's.
 	ErrUnknownFunding = errors.New("unknown funding transaction")
+
+	// ErrSpliceNotExchanged is returned for a commitment step while a
+	// pending splice's own commitments haven't been exchanged both ways:
+	// the step would move the heights they are signed at.
+	ErrSpliceNotExchanged = errors.New("splice commitments not exchanged")
 )
 
 // commitFunding is the funding output a commitment spends.
@@ -142,6 +148,14 @@ type pendingFunding struct {
 	remote map[uint64]*commitment
 }
 
+// retiredFunding is the funding a locked splice replaced, with the peer's
+// commitments on it that were unrevoked at the lock: each is logged when the
+// peer revokes it, in case a reorg brings the funding back.
+type retiredFunding struct {
+	txid   chainhash.Hash
+	remote map[uint64]*channeldb.ChannelCommitment
+}
+
 // txid returns the splice transaction's id.
 func (p *pendingFunding) txid() chainhash.Hash {
 	return p.OutPoint.Hash
@@ -167,6 +181,11 @@ func (lc *LightningChannel) AddPendingFunding(f PendingFunding) error {
 	switch {
 	case lc.spliceRestoreErr != nil:
 		return lc.spliceRestoreErr
+
+	// The splice's own commitments are exchanged at the current
+	// heights, which must not move until they are.
+	case !lc.quiescent():
+		return ErrNotQuiescent
 
 	case lc.channelState.ChanType.IsTaproot():
 		return errors.New("taproot channels can't be spliced")
@@ -821,6 +840,24 @@ func (lc *LightningChannel) spliceRevocationWrites(preimage *chainhash.Hash,
 		}
 	}
 
+	for _, r := range lc.retiredFundings {
+		c, ok := r.remote[height]
+		if !ok {
+			continue
+		}
+		ours, theirs, err := findOutputIndexesIn(
+			preimage, lc.channelState, *c, lc.leafStore,
+		)
+		if err != nil {
+			return nil, err
+		}
+		writes = append(writes, channeldb.SpliceCommitWrite{
+			Txid:             r.txid,
+			OurOutputIndex:   ours,
+			TheirOutputIndex: theirs,
+		})
+	}
+
 	return writes, nil
 }
 
@@ -841,6 +878,19 @@ func (lc *LightningChannel) pruneFundingCommits() {
 			}
 		}
 	}
+
+	kept := lc.retiredFundings[:0]
+	for _, r := range lc.retiredFundings {
+		for h := range r.remote {
+			if h < remoteTail {
+				delete(r.remote, h)
+			}
+		}
+		if len(r.remote) > 0 {
+			kept = append(kept, r)
+		}
+	}
+	lc.retiredFundings = kept
 }
 
 // restorePendingFundings loads the channel's pending splices after a
@@ -856,6 +906,25 @@ func (lc *LightningChannel) restorePendingFundings() error {
 	}
 
 	for _, r := range records {
+		if r.Retired {
+			retired := &retiredFunding{
+				txid: r.Txid(),
+				remote: make(
+					map[uint64]*channeldb.ChannelCommitment,
+				),
+			}
+			for _, c := range []*channeldb.ChannelCommitment{
+				r.RemoteTail, r.RemoteTip,
+			} {
+				if c != nil {
+					retired.remote[c.CommitHeight] = c
+				}
+			}
+			lc.retiredFundings = append(lc.retiredFundings, retired)
+
+			continue
+		}
+
 		p, err := lc.newPendingFunding(PendingFunding{
 			OutPoint: r.OutPoint, Capacity: r.Capacity,
 			LocalKey: r.LocalKey, RemoteKey: r.RemoteKey,
@@ -889,6 +958,9 @@ func (lc *LightningChannel) restorePendingFundings() error {
 					base.height)
 			}
 			c.sig = stored.CommitSig
+			if err := attachHtlcSigs(c, stored); err != nil {
+				return err
+			}
 			into[c.height] = c
 
 			return nil
@@ -1090,9 +1162,20 @@ func (lc *LightningChannel) LockPendingFunding(txid chainhash.Hash,
 			toDiskCommit(lntypes.Remote)
 	}
 	previous := lc.channelState.CurrentFundingOutpoint().Hash
+	retired := &retiredFunding{
+		txid:   previous,
+		remote: make(map[uint64]*channeldb.ChannelCommitment),
+	}
+	for e := lc.commitChains.Remote.commitments.Front(); e != nil; e = e.Next() {
+		retired.remote[e.Value.height] = e.Value.toDiskCommit(
+			lntypes.Remote,
+		)
+	}
+
 	if err := lc.channelState.LockSplice(lock); err != nil {
 		return err
 	}
+	lc.retiredFundings = append(lc.retiredFundings, retired)
 
 	for e, c := range localSwap {
 		e.Value = c
@@ -1191,4 +1274,92 @@ func (lc *LightningChannel) retransmittedCommitSigs(
 	}
 
 	return append(msgs, members...), nil
+}
+
+// requireExchanged refuses a commitment step until every pending splice's
+// own commitments have been exchanged both ways at the current heights.
+func (lc *LightningChannel) requireExchanged() error {
+	localTail := lc.commitChains.Local.tail().height
+	remoteTail := lc.commitChains.Remote.tail().height
+	for _, p := range lc.pendingFundings {
+		local, ok := p.local[localTail]
+		if !ok || local.sig == nil {
+			return fmt.Errorf("%w: splice %v", ErrSpliceNotExchanged,
+				p.txid())
+		}
+		if _, ok := p.remote[remoteTail]; !ok {
+			return fmt.Errorf("%w: splice %v", ErrSpliceNotExchanged,
+				p.txid())
+		}
+	}
+
+	return nil
+}
+
+// RemovePendingFunding drops a pending splice that will never lock: one
+// aborted before our tx_signatures, or one that can no longer confirm. A
+// commitment_signed the peer still sends for it in a batch is ignored.
+func (lc *LightningChannel) RemovePendingFunding(txid chainhash.Hash) error {
+	lc.Lock()
+	defer lc.Unlock()
+
+	if _, err := lc.pendingFunding(txid); err != nil {
+		return err
+	}
+	if err := lc.channelState.DeleteSpliceRecord(txid); err != nil {
+		return err
+	}
+
+	kept := lc.pendingFundings[:0]
+	for _, p := range lc.pendingFundings {
+		if p.txid() != txid {
+			kept = append(kept, p)
+		}
+	}
+	lc.pendingFundings = kept
+
+	if lc.obsoleteFundings == nil {
+		lc.obsoleteFundings = make(map[chainhash.Hash]bool)
+	}
+	lc.obsoleteFundings[txid] = true
+
+	return nil
+}
+
+// attachHtlcSigs gives a rebuilt commitment of ours back the peer's HTLC
+// signatures from its stored copy: without them its second-level
+// transactions can't be signed, and a force close from it fails.
+func attachHtlcSigs(c *commitment, stored *channeldb.ChannelCommitment) error {
+	type key struct {
+		incoming bool
+		index    uint64
+	}
+	sigs := make(map[key][]byte)
+	for _, h := range stored.Htlcs {
+		if len(h.Signature) > 0 {
+			sigs[key{h.Incoming, h.HtlcIndex}] = h.Signature
+		}
+	}
+
+	attach := func(htlcs []paymentDescriptor, incoming bool) error {
+		for i := range htlcs {
+			b, ok := sigs[key{incoming, htlcs[i].HtlcIndex}]
+			if !ok {
+				continue
+			}
+			sig, err := ecdsa.ParseDERSignature(b)
+			if err != nil {
+				return fmt.Errorf("htlc %d signature: %w",
+					htlcs[i].HtlcIndex, err)
+			}
+			htlcs[i].sig = sig
+		}
+
+		return nil
+	}
+	if err := attach(c.outgoingHTLCs, false); err != nil {
+		return err
+	}
+
+	return attach(c.incomingHTLCs, true)
 }
