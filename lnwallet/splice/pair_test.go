@@ -868,3 +868,74 @@ func statusOf(m *Machine) string {
 
 	return <-code
 }
+
+// TestSpliceCancelNegotiating checks a cancel while the transaction is
+// being built: the peer gets a clean tx_abort, our coins are released and
+// nothing stays in the channel's funding set.
+func TestSpliceCancelNegotiating(t *testing.T) {
+	t.Parallel()
+
+	p := newSplicePair(t)
+	p.alice.fund(t, 1, 5_000_000)
+
+	// Bob's construction messages never reach Alice: she waits in the
+	// negotiation. Her tx_abort is seen on its way.
+	aborts := make(chan *lnwire.TxAbort, 1)
+	p.dropMu.Lock()
+	p.drop = func(from *node, msg lnwire.Message) bool {
+		if abort, ok := msg.(*lnwire.TxAbort); ok && from == p.alice {
+			aborts <- abort
+		}
+		switch msg.(type) {
+		case *lnwire.TxAddInput, *lnwire.TxAddOutput, *lnwire.TxComplete:
+			return from == p.bob
+		}
+
+		return false
+	}
+	p.dropMu.Unlock()
+
+	updates, err := p.alice.machine.Splice(Request{
+		Direction: DirectionIn, Amount: 1_000_000, FeeRate: 2_500,
+	})
+	require.NoError(t, err)
+	requireUpdates(t, updates, StatePreparing, StateNegotiating)
+
+	require.True(t, p.alice.machine.Cancel())
+	u := requireUpdates(t, updates, StateAborted)
+	require.Contains(t, u.Reason, "canceled")
+	select {
+	case <-aborts:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no tx_abort sent")
+	}
+	require.Zero(t, p.alice.wallet.leaseCount())
+	require.Empty(t, p.alice.ch.PendingFundings())
+}
+
+// TestSpliceOneAtATime checks that a second splice asked for while one is
+// in progress is refused, not run beside it.
+func TestSpliceOneAtATime(t *testing.T) {
+	t.Parallel()
+
+	p := newSplicePair(t)
+	p.alice.fund(t, 1, 5_000_000)
+	p.alice.fund(t, 2, 5_000_000)
+
+	updates, err := p.alice.machine.Splice(Request{
+		Direction: DirectionIn, Amount: 1_000_000, FeeRate: 2_500,
+	})
+	require.NoError(t, err)
+	_, err = p.alice.machine.Splice(Request{
+		Direction: DirectionIn, Amount: 1_000_000, FeeRate: 2_500,
+	})
+	require.ErrorIs(t, err, ErrRefused)
+	require.ErrorContains(t, err, codePending)
+
+	requireUpdates(t, updates, StatePreparing, StateNegotiating,
+		StateSigned, StateBroadcast)
+	_, err = p.alice.machine.Splice(Request{
+		Direction: DirectionIn, Amount: 1_000_000, FeeRate: 2_500,
+	})
+	require.ErrorContains(t, err, codePending)
+}
