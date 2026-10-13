@@ -17,6 +17,7 @@ import (
 	"github.com/lightningnetwork/lnd/fn/v2"
 	"github.com/lightningnetwork/lnd/input"
 	"github.com/lightningnetwork/lnd/keychain"
+	"github.com/lightningnetwork/lnd/lntypes"
 	"github.com/lightningnetwork/lnd/lnwallet/chainfee"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/stretchr/testify/require"
@@ -1412,6 +1413,42 @@ func TestSpliceReserveOnCandidateOnly(t *testing.T) {
 	require.NoError(t, err)
 
 	err = bob.ReceiveNewCommitmentBatch(commit.CommitSigs, commit.SpliceSigs)
+	require.ErrorIs(t, err, ErrSpliceReserve)
+	require.ErrorIs(t, err, ErrBelowChanReserve)
+}
+
+// TestSpliceFeeUnaffordableOnCandidateOnly checks a fee the opener can pay
+// on the current funding but not at all on a pending splice's, its balance
+// there below the commitment fee: refused with ErrSpliceReserve too, so the
+// link disconnects rather than force closing, the peer (the Core Lightning
+// port) having checked only the current funding.
+func TestSpliceFeeUnaffordableOnCandidateOnly(t *testing.T) {
+	t.Parallel()
+
+	alice, bob, err := CreateTestChannels(t, spliceChanTypes["anchors"])
+	require.NoError(t, err)
+
+	reserve := bob.channelState.RemoteChanCfg.ChanReserve
+	balance := alice.channelState.LocalCommitment.LocalBalance.ToSatoshis()
+	keys := newSpliceKeys(t, alice, bob)
+	txid := chainhash.Hash{0x78}
+	addSplice(t, alice, bob, keys, txid, -(balance - reserve - 2_000), 0)
+	exchangeSpliceCommitments(t, alice, bob, txid)
+
+	// Bob's check of Alice's next commitment at a fee her balance on the
+	// splice, reserve + 2,000 sat, can't pay, though hers on the current
+	// funding can.
+	theirs := bob.channelState.LocalCommitment.RemoteBalance
+	ours := bob.channelState.LocalCommitment.LocalBalance
+	const weight = lntypes.WeightUnit(1_124)
+	fee := chainfee.SatPerKWeight(
+		(reserve + 2_000 + 10_000) * 1_000 / 1_124,
+	)
+	require.Less(t, lnwire.NewMSatFromSatoshis(fee.FeeForWeight(weight)),
+		theirs)
+	err = bob.checkPendingFundingBalances(
+		ours, theirs, ours, theirs, weight, fee, NoBuffer,
+	)
 	require.ErrorIs(t, err, ErrSpliceReserve)
 	require.ErrorIs(t, err, ErrBelowChanReserve)
 }

@@ -2281,6 +2281,17 @@ func (l *channelLink) updateCommitTxOrFail(ctx context.Context) bool {
 			"temporary circuit error: %v", err)
 		return false
 
+	// The commitment can't be paid on a pending splice's funding though
+	// it can on the current one: nothing is wrong with the channel, the
+	// connection is dropped with a warning, as when the peer's is.
+	case errors.Is(err, lnwallet.ErrSpliceReserve):
+		l.failf(LinkFailureError{
+			code:          ErrInvalidCommitment,
+			FailureAction: LinkFailureDisconnect,
+			Warning:       true,
+		}, "commitment below the reserve on a pending splice: %v", err)
+		return false
+
 	// Any other error is treated results in an Error message being sent to
 	// the peer.
 	default:

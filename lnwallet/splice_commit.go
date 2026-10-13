@@ -1043,10 +1043,10 @@ func (lc *LightningChannel) restorePendingFundings() error {
 // by the splice's contributions. ours and theirs are the balances before the
 // commitment fee; the initial balances are the commitment chain tip's.
 // ErrSpliceReserve is ErrBelowChanReserve on a pending splice's funding
-// only: a peer checking what it can afford against the current funding,
-// as the Core Lightning port does for a fee update, can send a commitment
-// that keeps the reserve there and not on the splice's, where its balance
-// is lower. Refused all the same; the link disconnects rather than force
+// only, the reserve or the commitment fee: a peer checking what it can
+// afford against the current funding, as the Core Lightning port does for a
+// fee update, can send a commitment that keeps the reserve there and not on
+// the splice's, where its balance is lower. Refused all the same; the link disconnects rather than force
 // closing, as nothing invalid was accepted.
 var ErrSpliceReserve = fmt.Errorf("%w on a pending splice",
 	ErrBelowChanReserve)
@@ -1067,11 +1067,13 @@ func (lc *LightningChannel) checkPendingFundingBalances(ours,
 		f := p.commitFunding()
 		ob, tb, err := f.applyDeltas(ours, theirs)
 		if err != nil {
-			return fmt.Errorf("splice %v: %w", p.txid(), err)
+			return fmt.Errorf("%w: splice %v: %w", ErrSpliceReserve,
+				p.txid(), err)
 		}
 		oi, ti, err := f.applyDeltas(ourInitial, theirInitial)
 		if err != nil {
-			return fmt.Errorf("splice %v: %w", p.txid(), err)
+			return fmt.Errorf("%w: splice %v: %w", ErrSpliceReserve,
+				p.txid(), err)
 		}
 
 		// The opener pays the fee, with the buffer only when that is
@@ -1086,7 +1088,8 @@ func (lc *LightningChannel) checkPendingFundingBalances(ours,
 			)
 		}
 		if err != nil {
-			return fmt.Errorf("splice %v: %w", p.txid(), err)
+			return fmt.Errorf("%w: splice %v: %w", ErrSpliceReserve,
+				p.txid(), err)
 		}
 
 		switch {
