@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"
@@ -124,7 +125,11 @@ func (m *Machine) checkSpliceInit(msg *lnwire.SpliceInit) (string, string) {
 
 	feeRate := chainfee.SatPerKWeight(msg.FundingFeeRatePerKw)
 	if err := CheckAcceptorFeeRate(feeRate, m.cfg.Estimator); err != nil {
-		return codeFeeBelowFloor, err.Error()
+		// The reason without the code again, which the error starts
+		// with.
+		return codeFeeBelowFloor, strings.TrimPrefix(
+			err.Error(), ErrFeeBelowFloor.Error()+": ",
+		)
 	}
 
 	height, err := m.cfg.Chain.BestHeight()

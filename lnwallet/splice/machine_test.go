@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -861,7 +862,10 @@ func TestAcceptSpliceRefused(t *testing.T) {
 		h := newAcceptorHarness(t)
 		h.machine.cfg.Estimator = estimateOnly{rate: 10_000}
 		init(h, 1_000_000, 4_999)
-		require.Contains(t, abortReason(t, h), codeFeeBelowFloor)
+		reason := abortReason(t, h)
+		require.Contains(t, reason, codeFeeBelowFloor)
+		require.Equal(t, 1, strings.Count(reason, codeFeeBelowFloor),
+			reason)
 		requireResumed(t, h)
 		require.Empty(t, h.bob.PendingFundings())
 	})
