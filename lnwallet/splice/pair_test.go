@@ -456,6 +456,40 @@ func TestSpliceRequestRefused(t *testing.T) {
 		require.True(t, paid, "the close address isn't paid")
 	})
 
+	// Use maximum out: everything the channel lets go, the fee on top,
+	// whatever the amount.
+	t.Run("use maximum out", func(t *testing.T) {
+		t.Parallel()
+
+		p := newSplicePair(t)
+		avail := p.alice.ch.AvailableBalance().ToSatoshis()
+		updates, err := p.alice.machine.Splice(Request{
+			Direction: DirectionOut, UseMax: true, Amount: 1,
+			FeeRate: 2_500, Destination: p2tr(1),
+		})
+		require.NoError(t, err)
+		requireUpdates(t, updates, StatePreparing,
+			StateNegotiating, StateSigned, StateBroadcast)
+
+		p.alice.machine.mu.Lock()
+		tx, err := p.alice.machine.signedTx()
+		p.alice.machine.mu.Unlock()
+		require.NoError(t, err)
+		placeholder := make([]byte, input.P2WSHSize)
+		placeholder[0], placeholder[1] = 0x00, 0x20
+		fee, _ := MoveOutFee(Shape{
+			SharedWitnessWeight: input.MultiSigWitnessSize,
+			FundingScript:       placeholder,
+		}, p2tr(1), 2_500)
+		var paid btcutil.Amount
+		for _, out := range tx.TxOut {
+			if bytes.Equal(out.PkScript, p2tr(1)) {
+				paid = btcutil.Amount(out.Value)
+			}
+		}
+		require.Equal(t, avail, paid+fee)
+	})
+
 	t.Run("more than the balance", func(t *testing.T) {
 		t.Parallel()
 

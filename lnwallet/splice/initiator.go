@@ -25,10 +25,11 @@ type Request struct {
 	// Direction says which way the funds move.
 	Direction Direction
 
-	// Amount is what goes in or out; ignored with UseMax for funds in.
+	// Amount is what goes in or out; ignored with UseMax.
 	Amount btcutil.Amount
 
-	// UseMax adds everything the wallet can spend after the fee.
+	// UseMax adds everything the wallet can spend after the fee, or
+	// moves out everything the channel lets go after the fee.
 	UseMax bool
 
 	// FeeRate is the transaction's fee rate.
@@ -281,8 +282,12 @@ func (m *Machine) prepareFunds(a *active, req Request) error {
 		}
 
 	case DirectionOut:
+		amount := req.Amount
+		if req.UseMax {
+			amount = m.maxOut(shape, req.Destination, req.FeeRate)
+		}
 		out, err := NewMoveOut(
-			shape, req.Amount, req.Destination, req.FeeRate,
+			shape, amount, req.Destination, req.FeeRate,
 			m.cfg.DustLimit,
 		)
 		if err != nil {
@@ -301,6 +306,25 @@ func (m *Machine) prepareFunds(a *active, req Request) error {
 	}
 
 	return nil
+}
+
+// maxOut is the most a splice of ours can move out to destScript at
+// feeRate, the fee on top: what we can send, and what keeps the reserve on
+// the new capacity, as the estimate's most out.
+func (m *Machine) maxOut(shape Shape, destScript []byte,
+	feeRate chainfee.SatPerKWeight) btcutil.Amount {
+
+	fee, _ := MoveOutFee(shape, destScript, feeRate)
+	state := m.cfg.Channel.State()
+	most := min(
+		m.cfg.Channel.AvailableBalance().ToSatoshis(),
+		maxOutKeepingReserve(
+			state.LocalCommitment.LocalBalance.ToSatoshis(),
+			state.Capacity,
+		),
+	)
+
+	return max(0, most-fee)
 }
 
 // checkMoveOut checks a negative contribution against what we can send:
