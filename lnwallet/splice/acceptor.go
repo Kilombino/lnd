@@ -308,8 +308,10 @@ func (m *Machine) startSigningTimeout() {
 	})
 }
 
-// startTimeout ends a negotiation that doesn't finish in time.
+// startTimeout ends a negotiation that doesn't finish in time. A new
+// negotiation also ends the wait for the echo of an earlier tx_abort.
 func (m *Machine) startTimeout() {
+	m.abortSent = false
 	timeout := m.cfg.Policy.NegotiationTimeout
 	a := m.active
 	a.timeout = time.AfterFunc(timeout, func() {

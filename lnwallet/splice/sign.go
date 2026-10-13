@@ -445,6 +445,15 @@ func (m *Machine) handleTxAbort(msg *lnwire.TxAbort) {
 	a := m.active
 	reason := printable(msg.Data)
 
+	// The peer's answer to ours, as BOLT 2 asks of it.
+	if m.abortSent {
+		m.abortSent = false
+		log.Debugf("ChannelID(%v): tx_abort echoed: %v", m.cfg.ChanID,
+			reason)
+
+		return
+	}
+
 	switch {
 	case a == nil:
 		log.Debugf("ChannelID(%v): tx_abort without a splice: %v",

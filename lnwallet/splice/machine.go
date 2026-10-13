@@ -389,6 +389,10 @@ type Machine struct {
 	// goroutine changes it, under mu.
 	active *active
 
+	// abortSent is set when we send tx_abort, until the peer's echo of
+	// it or the next negotiation: the echo is not an abort of its own.
+	abortSent bool
+
 	// misbehaved is set when the peer aborted after we signed: its
 	// splices are refused from then on.
 	misbehaved bool
@@ -562,6 +566,7 @@ func (m *Machine) abort(code string, format string, args ...interface{}) {
 		}
 	})
 
+	m.abortSent = true
 	m.send(&lnwire.TxAbort{
 		ChannelID: m.cfg.ChanID, Data: []byte(reason),
 	})

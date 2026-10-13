@@ -590,3 +590,48 @@ func commitOnly(t *testing.T, h *acceptorHarness, s *aliceSplice,
 		h.bob.ReceiveSpliceCommitment(txid, aliceSigs))
 	require.Equal(t, txid, next[*lnwire.TxSignatures](t, h).TxID)
 }
+
+// TestRefusedReplacementEcho checks that the peer echoing our tx_abort to a
+// replacement we refused isn't taken for an abort of the signed splice: the
+// peer isn't marked as misbehaving. A tx_abort after that, with nothing of
+// ours to answer, still is.
+func TestRefusedReplacementEcho(t *testing.T) {
+	t.Parallel()
+
+	h := newAcceptorHarness(t)
+	first := startAliceSplice(t, h, 40_000_000, 2_500)
+	first.construct(t, h)
+	signSplice(t, h, first, nil)
+
+	// A lower fee rate: refused.
+	h.machine.HandleSpliceMessage(&lnwire.TxInitRbf{
+		ChannelID:                 h.machine.cfg.ChanID,
+		LockTime:                  h.chain.height,
+		FeeRatePerKw:              2_000,
+		FundingOutputContribution: fn.Some(btcutil.Amount(40_000_000)),
+	})
+	require.Contains(t, abortReason(t, h), "fee_below_floor")
+	requireResumed(t, h)
+
+	misbehaved := func() bool {
+		var mis bool
+		done := make(chan struct{})
+		h.machine.enqueue(func() {
+			mis = h.machine.misbehaved
+			close(done)
+		})
+		<-done
+
+		return mis
+	}
+
+	h.machine.HandleSpliceMessage(&lnwire.TxAbort{
+		ChannelID: h.machine.cfg.ChanID,
+	})
+	require.False(t, misbehaved(), "the echo marked the peer")
+
+	h.machine.HandleSpliceMessage(&lnwire.TxAbort{
+		ChannelID: h.machine.cfg.ChanID, Data: []byte("no"),
+	})
+	require.True(t, misbehaved())
+}

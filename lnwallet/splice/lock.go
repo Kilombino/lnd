@@ -299,6 +299,7 @@ func (m *Machine) handleReestablish(msg *lnwire.ChannelReestablish) {
 	msg.NextFunding.WhenSome(func(next lnwire.FundingTxidFlags) {
 		switch {
 		case a == nil || a.txid != next.Txid:
+			m.abortSent = true
 			m.send(&lnwire.TxAbort{
 				ChannelID: m.cfg.ChanID,
 				Data:      []byte("unknown funding transaction"),
