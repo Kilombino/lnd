@@ -404,6 +404,15 @@ func TestPeerInputRefusals(t *testing.T) {
 		},
 		contains: "relative lock",
 	}, {
+		name: "a relative lock of one block",
+		msgs: func(t *testing.T) []lnwire.Message {
+			m := walletAdd(t, 2, wallet, 0)
+			m.Sequence = 1
+
+			return []lnwire.Message{m}
+		},
+		contains: "relative lock",
+	}, {
 		name: "a relative lock in time on the shared input",
 		msgs: func(t *testing.T) []lnwire.Message {
 			m := sharedAdd(0)
@@ -455,6 +464,21 @@ func TestPeerInputRefusals(t *testing.T) {
 			requireAbort(t, exchange(acc, tc.msgs(t)...),
 				tc.contains)
 		})
+	}
+}
+
+// TestPeerInputSequencesAccepted checks the sequences that hold nothing
+// back: a relative lock of zero (the Core Lightning port's 0), and any with
+// BIP 68's disable bit.
+func TestPeerInputSequencesAccepted(t *testing.T) {
+	t.Parallel()
+
+	wallet := prevTx(4, p2wpkh(4), 100_000)
+	for _, seq := range []uint32{0, 0x00400000, 0x80000001, MaxSequence} {
+		acc := acceptorFor(t, defaultParams())
+		m := walletAdd(t, 2, wallet, 0)
+		m.Sequence = seq
+		require.NoError(t, acc.Receive(m), "sequence %#x", seq)
 	}
 }
 

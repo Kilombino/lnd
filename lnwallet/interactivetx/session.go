@@ -558,8 +558,11 @@ func (s *Session) receiveInput(m *lnwire.TxAddInput) error {
 
 	// A relative lock (BIP 68) would keep the transaction from
 	// confirming for up to 65,535 blocks or 388 days, the channel stuck
-	// with it pending.
-	if m.Sequence&wire.SequenceLockTimeDisabled == 0 {
+	// with it pending. One of zero holds nothing back: the Core Lightning
+	// port's sequence is 0.
+	if m.Sequence&wire.SequenceLockTimeDisabled == 0 &&
+		m.Sequence&wire.SequenceLockTimeMask != 0 {
+
 		return abortf("input sequence %#x is a relative lock",
 			m.Sequence)
 	}
