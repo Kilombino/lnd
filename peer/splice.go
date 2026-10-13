@@ -19,14 +19,21 @@ var errSpliceUnlocked = errors.New("a splice of this channel hasn't " +
 	"locked yet")
 
 // spliceUnlocked reports whether the channel has a splice that hasn't
-// locked.
+// locked, or one being built.
 func (p *Brontide) spliceUnlocked(chanID lnwire.ChannelID) bool {
 	channel, ok := p.activeChannels.Load(chanID)
 	if !ok || channel == nil {
 		return false
 	}
+	if len(channel.PendingFundings()) > 0 {
+		return true
+	}
 
-	return len(channel.PendingFundings()) > 0
+	// Being negotiated or signed, before its funding joins the channel:
+	// closing would race the splice, both transactions signed.
+	m, ok := p.SpliceMachine(chanID)
+
+	return ok && m.Constructing()
 }
 
 // spliceNegotiated reports whether splicing applies to this connection: we
