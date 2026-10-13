@@ -45,6 +45,22 @@ func TestPeerNoCloseDuringSplice(t *testing.T) {
 	}))
 	require.True(t, peer.spliceUnlocked(chanID))
 
+	// Dead, it can never confirm: no bar to closing, which nothing else
+	// would ever lift.
+	dead := &channeldb.SpliceRecord{
+		OutPoint:    wire.OutPoint{Hash: chainhash.Hash{1}},
+		Capacity:    ch.State().Capacity + 1_000,
+		LocalKey:    keychain.KeyDescriptor{PubKey: local.PubKey()},
+		RemoteKey:   remote.PubKey(),
+		LocalDelta:  1_000,
+		Negotiation: &channeldb.SpliceNegotiation{Dead: true},
+	}
+	require.NoError(t, ch.State().PutSpliceRecord(dead))
+	require.False(t, peer.spliceUnlocked(chanID))
+	dead.Negotiation.Dead = false
+	require.NoError(t, ch.State().PutSpliceRecord(dead))
+	require.True(t, peer.spliceUnlocked(chanID))
+
 	// Ours.
 	req := &htlcswitch.ChanClose{
 		CloseType: contractcourt.CloseRegular,

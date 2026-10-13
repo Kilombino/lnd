@@ -4773,8 +4773,9 @@ func (p *Brontide) handleLocalCloseReq(req *htlcswitch.ChanClose) {
 	// out this channel on-chain, so we execute the cooperative channel
 	// closure workflow.
 	case contractcourt.CloseRegular:
-		// Not while a splice hasn't locked.
-		if len(channel.PendingFundings()) > 0 {
+		// Not while a splice hasn't locked, or is being built: the
+		// peer refuses our shutdown then.
+		if p.spliceUnlocked(chanID) {
 			req.Err <- errSpliceUnlocked
 			return
 		}

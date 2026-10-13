@@ -20,14 +20,31 @@ var errSpliceUnlocked = errors.New("a splice of this channel hasn't " +
 	"locked yet")
 
 // spliceUnlocked reports whether the channel has a splice that hasn't
-// locked, or one being built.
+// locked, or one being built. A dead one doesn't count: it can never confirm,
+// and nothing else ever takes its funding out of the channel's set, so the
+// channel could never close cooperatively again.
 func (p *Brontide) spliceUnlocked(chanID lnwire.ChannelID) bool {
 	channel, ok := p.activeChannels.Load(chanID)
 	if !ok || channel == nil {
 		return false
 	}
-	if len(channel.PendingFundings()) > 0 {
-		return true
+	if pending := channel.PendingFundings(); len(pending) > 0 {
+		dead := make(map[chainhash.Hash]bool)
+		records, err := channel.State().SpliceRecords()
+		if err != nil {
+			// Unreadable: as unlocked.
+			return true
+		}
+		for _, r := range records {
+			if r.Negotiation != nil && r.Negotiation.Dead {
+				dead[r.Txid()] = true
+			}
+		}
+		for _, f := range pending {
+			if !dead[f.OutPoint.Hash] {
+				return true
+			}
+		}
 	}
 
 	// Being negotiated or signed, before its funding joins the channel:
