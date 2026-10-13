@@ -38,6 +38,12 @@ type spliceWatch struct {
 	// one a locked splice replaced when a dropped transaction of it
 	// confirmed after a reorganisation.
 	spent wire.OutPoint
+
+	// script and height are the output's script and the height the
+	// splice confirmed at: the watch on the output registered again, as
+	// after a spend of it reorged out.
+	script []byte
+	height uint32
 }
 
 // knownSplice returns the record of the pending splice whose transaction
@@ -156,7 +162,7 @@ func (c *chainWatcher) followSplice(r *channeldb.SpliceRecord,
 
 	return spendNtfn, &spliceWatch{
 		txid: txid, outpoint: r.OutPoint, confNtfn: confNtfn,
-		spent: spent,
+		spent: spent, script: script, height: height,
 	}, nil
 }
 
@@ -244,7 +250,7 @@ func (c *chainWatcher) maybeFollowSplice(spend *chainntnfs.SpendDetail,
 
 	r := c.knownSplice(spend)
 	if r == nil {
-		return nil, false
+		return c.maybeLockedAhead(spend, current)
 	}
 
 	// The watch already follows a splice: one that has locked since, the
@@ -304,6 +310,60 @@ func (c *chainWatcher) maybeFollowSplice(spend *chainntnfs.SpendDetail,
 
 		c.splicePublished = r.Txid()
 	}
+
+	return moved, true
+}
+
+// maybeLockedAhead moves the watch to the channel's current funding output
+// when spend is the splice the channel has locked to since: at a start, the
+// lock done at the peer's channel_reestablish while the notifier was still
+// looking for the spend of the output watched, the splice's record gone with
+// the lock. Taken for an unknown spend before, the channel was flagged for
+// good and the output holding it unwatched.
+func (c *chainWatcher) maybeLockedAhead(spend *chainntnfs.SpendDetail,
+	current *chainntnfs.SpendEvent) (*chainntnfs.SpendEvent, bool) {
+
+	if spend.SpenderTxHash == nil {
+		return nil, false
+	}
+	if err := c.cfg.chanState.Refresh(); err != nil {
+		log.Errorf("ChannelPoint(%v): unable to read channel: %v",
+			c.cfg.chanState.FundingOutpoint, err)
+
+		return nil, false
+	}
+	funding := c.cfg.chanState.CurrentFundingOutpoint()
+	if funding.Hash != *spend.SpenderTxHash ||
+		(spend.SpentOutPoint != nil && *spend.SpentOutPoint == funding) {
+
+		return nil, false
+	}
+	script, err := deriveFundingPkScript(c.cfg.chanState)
+	if err != nil {
+		log.Errorf("ChannelPoint(%v): unable to derive funding "+
+			"script: %v", c.cfg.chanState.FundingOutpoint, err)
+
+		return nil, false
+	}
+	moved, err := c.cfg.notifier.RegisterSpendNtfn(
+		&funding, script, uint32(spend.SpendingHeight),
+	)
+	if err != nil {
+		log.Errorf("ChannelPoint(%v): unable to watch funding %v: %v",
+			c.cfg.chanState.FundingOutpoint, funding, err)
+
+		return nil, false
+	}
+	current.Cancel()
+	c.fundingSpendNtfn = moved
+	if c.splice != nil {
+		c.splice.confNtfn.Cancel()
+		c.splice = nil
+	}
+	c.watchPreviousFundings()
+	log.Infof("ChannelPoint(%v): splice %v locked before its spend was "+
+		"seen, watching %v", c.cfg.chanState.FundingOutpoint,
+		spend.SpenderTxHash, funding)
 
 	return moved, true
 }

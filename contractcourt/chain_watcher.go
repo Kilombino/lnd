@@ -939,6 +939,15 @@ func (c *chainWatcher) closeObserver() {
 	defer c.wg.Done()
 
 	registerForSpend := func() (*chainntnfs.SpendEvent, error) {
+		// Following a splice: its output, which a spend reorged out
+		// left unspent, not the one the splice spent.
+		if c.splice != nil {
+			return c.cfg.notifier.RegisterSpendNtfn(
+				&c.splice.outpoint, c.splice.script,
+				c.splice.height,
+			)
+		}
+
 		fundingPkScript, err := deriveFundingPkScript(c.cfg.chanState)
 		if err != nil {
 			return nil, err

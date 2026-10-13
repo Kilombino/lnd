@@ -881,3 +881,61 @@ func TestChainWatcherDroppedSpliceReorgedOutAgain(t *testing.T) {
 		return registrations() > before
 	}, 5*time.Second, 10*time.Millisecond)
 }
+
+// TestChainWatcherLockBeforeSpendSeen checks a splice that locked before the
+// watch saw it spend the funding output, as at a start when the lock is done
+// at the peer's reestablish while the notifier still looks for the spend:
+// the watch moves to the splice's output, the link stays up and the channel
+// isn't flagged. It was taken for an unknown spend, the channel flagged for
+// good and the output holding it unwatched.
+func TestChainWatcherLockBeforeSpendSeen(t *testing.T) {
+	t.Parallel()
+
+	h := newChainWatcherTestHarness(t, withRequiredConfs(1))
+	splice := pendSplice(t, h)
+	lockSplice(t, h, splice)
+
+	h.sendSpend(splice)
+	require.Eventually(t, func() bool {
+		return h.notifier.hasSpend(wire.OutPoint{Hash: splice.TxHash()})
+	}, 5*time.Second, 10*time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
+	require.Zero(t, h.linkDownCalls.Load())
+	ch, err := h.aliceChannel.State().Db.FetchChannel(
+		h.aliceChannel.State().FundingOutpoint,
+	)
+	require.NoError(t, err)
+	require.False(t, ch.HasChanStatus(
+		channeldb.ChanStatusFundingSpentUnknown,
+	))
+}
+
+// TestChainWatcherSpliceCommitReorgedOut checks a commitment on a confirmed,
+// unlocked splice's output, reorged out while the splice stays: the watch
+// goes back to the splice's output, not to the funding output the splice
+// spent, whose spend by the splice was then taken for an unknown one.
+func TestChainWatcherSpliceCommitReorgedOut(t *testing.T) {
+	t.Parallel()
+
+	h := newChainWatcherTestHarness(t, withRequiredConfs(3))
+	splice := pendSplice(t, h)
+	followSplice(t, h, splice)
+
+	bobCommit, err := h.bobChannel.SignedSpliceCommitment(splice.TxHash())
+	require.NoError(t, err)
+	h.sendSpend(bobCommit)
+	require.Eventually(t, func() bool {
+		return h.notifier.confEventFor(bobCommit.TxHash()) != nil
+	}, 5*time.Second, 10*time.Millisecond)
+
+	h.triggerReorg(bobCommit, 1)
+	spliceOut := wire.OutPoint{Hash: splice.TxHash()}
+	require.Eventually(t, func() bool {
+		h.notifier.spendMu.Lock()
+		defer h.notifier.spendMu.Unlock()
+
+		n := len(h.notifier.spendOutpoints)
+		return n >= 3 && h.notifier.spendOutpoints[n-1] == spliceOut
+	}, 5*time.Second, 10*time.Millisecond)
+	require.Zero(t, h.linkDownCalls.Load())
+}
