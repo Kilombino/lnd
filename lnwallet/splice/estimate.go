@@ -59,6 +59,10 @@ type EstimateRequest struct {
 	// DustLimit is the dust limit of a script.
 	DustLimit func([]byte) btcutil.Amount
 
+	// Reserve is what the wallet keeps for fee-bumping the closes of
+	// its anchor channels.
+	Reserve btcutil.Amount
+
 	// Estimator gives the floor.
 	Estimator chainfee.Estimator
 
@@ -100,7 +104,7 @@ func EstimateSplice(req EstimateRequest) (*Estimate, error) {
 	// The most in: everything the wallet can spend.
 	if maxIn, err := SelectAddFunds(
 		shape, req.Coins, 0, true, est.FeeRate, req.ChangeScript,
-		req.DustLimit,
+		req.DustLimit, req.Reserve,
 	); err == nil {
 		est.MaxIn = maxIn.Contribution
 	}
@@ -120,7 +124,7 @@ func EstimateSplice(req EstimateRequest) (*Estimate, error) {
 	case DirectionIn:
 		sel, err := SelectAddFunds(
 			shape, req.Coins, req.Amount, req.UseMax, est.FeeRate,
-			req.ChangeScript, req.DustLimit,
+			req.ChangeScript, req.DustLimit, req.Reserve,
 		)
 		switch {
 		case errors.Is(err, ErrInsufficientFunds):

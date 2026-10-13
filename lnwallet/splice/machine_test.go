@@ -495,7 +495,7 @@ func startAliceSplice(t *testing.T, h *acceptorHarness,
 	s.sel, err = SelectAddFunds(Shape{
 		SharedWitnessWeight: input.MultiSigWitnessSize,
 		FundingScript:       newOut.PkScript,
-	}, []Coin{s.coin}, amount, false, feeRate, s.change, dustLimit)
+	}, []Coin{s.coin}, amount, false, feeRate, s.change, dustLimit, 0)
 	require.NoError(t, err)
 
 	s.session, err = interactivetx.NewSession(interactivetx.Config{

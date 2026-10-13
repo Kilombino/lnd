@@ -1,0 +1,41 @@
+# 2026/10/12 21:14:08.236528 [TestSelectAddFundsAgreesWithEngine] [rapid] draw coins: 2
+# 2026/10/12 21:14:08.236532 [TestSelectAddFundsAgreesWithEngine] [rapid] draw taproot: false
+# 2026/10/12 21:14:08.236534 [TestSelectAddFundsAgreesWithEngine] [rapid] draw value: 300
+# 2026/10/12 21:14:08.236538 [TestSelectAddFundsAgreesWithEngine] [rapid] draw taproot: false
+# 2026/10/12 21:14:08.236539 [TestSelectAddFundsAgreesWithEngine] [rapid] draw value: 990
+# 2026/10/12 21:14:08.236542 [TestSelectAddFundsAgreesWithEngine] [rapid] draw amount: 1000
+# 2026/10/12 21:14:08.236543 [TestSelectAddFundsAgreesWithEngine] [rapid] draw useMax: false
+# 2026/10/12 21:14:08.236544 [TestSelectAddFundsAgreesWithEngine] [rapid] draw feeRate: 253
+# 2026/10/12 21:14:08.236544 [TestSelectAddFundsAgreesWithEngine] [rapid] draw reserve: 1
+# 2026/10/12 21:14:08.236582 [TestSelectAddFundsAgreesWithEngine] 
+# 	Error Trace:	/tmp/lf-fix/lnwallet/splice/fund_test.go:222
+# 	            				/home/paul/go/pkg/mod/pgregory.net/rapid@v1.2.0/engine.go:371
+# 	            				/home/paul/go/pkg/mod/pgregory.net/rapid@v1.2.0/engine.go:380
+# 	            				/home/paul/go/pkg/mod/pgregory.net/rapid@v1.2.0/engine.go:205
+# 	            				/home/paul/go/pkg/mod/pgregory.net/rapid@v1.2.0/engine.go:120
+# 	            				/tmp/lf-fix/lnwallet/splice/fund_test.go:176
+# 	Error:      	"0 BTC" is not greater than or equal to "0.00000001 BTC"
+# 	Test:       	TestSelectAddFundsAgreesWithEngine
+# 
+v0.4.8#10314983190071450101
+0x0
+0x38e38e38e38e4
+0x2
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x126dcad4d8eb05
+0x2b2
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x1

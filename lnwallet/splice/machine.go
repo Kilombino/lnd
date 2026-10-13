@@ -170,6 +170,10 @@ type Config struct {
 	// skips the test.
 	CheckMempool func(tx *wire.MsgTx) error
 
+	// Reserve, if set, returns what the wallet keeps for fee-bumping the
+	// closes of its anchor channels: our splices don't spend it.
+	Reserve func() (btcutil.Amount, error)
+
 	// IsOurOutpoint reports whether an outpoint is one of this node's own:
 	// a wallet coin, locked or not, or any channel's funding output. The
 	// peer may not add one as its input.

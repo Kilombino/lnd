@@ -211,6 +211,14 @@ func (s *server) newSpliceMachine(base splice.Config,
 		return txscript.PayToAddrScript(addr)
 	}
 	cfg.CheckMempool = wallet.WalletController.CheckMempoolAcceptance
+	cfg.Reserve = func() (btcutil.Amount, error) {
+		n, err := wallet.CurrentNumAnchorChans()
+		if err != nil {
+			return 0, err
+		}
+
+		return wallet.RequiredReserve(uint32(n)), nil
+	}
 	cfg.IsOurOutpoint = func(op wire.OutPoint) bool {
 		if _, err := wallet.FetchOutpointInfo(&op); err == nil {
 			return true

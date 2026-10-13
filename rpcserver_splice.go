@@ -343,6 +343,14 @@ func (r *rpcServer) EstimateSplice(_ context.Context,
 		available = link.Bandwidth().ToSatoshis()
 	}
 
+	// What the wallet keeps for fee-bumping its anchor channels' closes:
+	// the most going in leaves it.
+	numAnchors, err := wallet.CurrentNumAnchorChans()
+	if err != nil {
+		return nil, err
+	}
+	reserve := wallet.RequiredReserve(uint32(numAnchors))
+
 	est, err := splice.EstimateSplice(splice.EstimateRequest{
 		Request:      req,
 		Capacity:     ch.Capacity,
@@ -353,14 +361,10 @@ func (r *rpcServer) EstimateSplice(_ context.Context,
 		DustLimit: func(script []byte) btcutil.Amount {
 			return lnwallet.DustLimitForSize(len(script))
 		},
+		Reserve:   reserve,
 		Estimator: r.server.cc.FeeEstimator,
 		Refusal:   refusal,
 	})
-	if err != nil {
-		return nil, err
-	}
-
-	numAnchors, err := wallet.CurrentNumAnchorChans()
 	if err != nil {
 		return nil, err
 	}
@@ -375,11 +379,9 @@ func (r *rpcServer) EstimateSplice(_ context.Context,
 		MaxOutSat:         int64(est.MaxOut),
 		MinSatPerVbyte:    uint64(est.Floor.Rate.FeePerVByte()),
 		FeeEstimateSource: string(est.Floor.Source),
-		AnchorReserveSat: int64(wallet.RequiredReserve(
-			uint32(numAnchors),
-		)),
-		NewCapacitySat: int64(est.NewCapacity),
-		NewLocalSat:    int64(est.NewLocal),
+		AnchorReserveSat:  int64(reserve),
+		NewCapacitySat:    int64(est.NewCapacity),
+		NewLocalSat:       int64(est.NewLocal),
 		LockDepth: spliceLockDepth(
 			ch.NumConfsRequired, 0,
 			r.cfg.ProtocolOptions.SplicePeerInputConfs,

@@ -154,10 +154,13 @@ type AddFunds struct {
 // feeRate, largest first, with a change output to changeScript when what is
 // left over is worth one. With useMax, every usable coin is spent and
 // everything after the fee goes in, without change. dustLimit returns the
-// dust limit of an output with the given script.
+// dust limit of an output with the given script. The wallet keeps reserve
+// for fee-bumping its anchor channels' closes, as lnd's other spends do:
+// with useMax as change, otherwise in the coins not picked and the change.
 func SelectAddFunds(shape Shape, coins []Coin, amount btcutil.Amount,
 	useMax bool, feeRate chainfee.SatPerKWeight, changeScript []byte,
-	dustLimit func([]byte) btcutil.Amount) (*AddFunds, error) {
+	dustLimit func([]byte) btcutil.Amount,
+	reserve btcutil.Amount) (*AddFunds, error) {
 
 	var usable []Coin
 	for _, c := range coins {
@@ -193,21 +196,44 @@ func SelectAddFunds(shape Shape, coins []Coin, amount btcutil.Amount,
 		if len(usable) == 0 {
 			return nil, ErrInsufficientFunds
 		}
-		w := shape.weight(witnesses(usable), nil)
+		if reserve <= 0 {
+			w := shape.weight(witnesses(usable), nil)
+			f := fee(feeRate, w)
+			contribution := sum(usable) - f
+			if contribution <= 0 {
+				return nil, ErrInsufficientFunds
+			}
+
+			return &AddFunds{
+				Inputs: usable, Contribution: contribution,
+				Fee: f, Weight: w,
+			}, nil
+		}
+
+		// Everything but the reserve, which comes back as change.
+		w := shape.weight(witnesses(usable), [][]byte{changeScript})
 		f := fee(feeRate, w)
-		contribution := sum(usable) - f
+		change := max(reserve, dustLimit(changeScript))
+		contribution := sum(usable) - f - change
 		if contribution <= 0 {
-			return nil, ErrInsufficientFunds
+			return nil, fmt.Errorf("%w: %v kept for fee bumps",
+				ErrInsufficientFunds, reserve)
 		}
 
 		return &AddFunds{
-			Inputs: usable, Contribution: contribution, Fee: f,
-			Weight: w,
+			Inputs: usable, Change: change,
+			Contribution: contribution, Fee: f, Weight: w,
 		}, nil
 	}
 
 	if amount <= 0 {
 		return nil, ErrBelowDust
+	}
+
+	// What the wallet keeps after the splice: the coins not picked and
+	// the change.
+	keeps := func(picked []Coin, change btcutil.Amount) bool {
+		return sum(usable)-sum(picked)+change >= reserve
 	}
 
 	for n := 1; n <= len(usable); n++ {
@@ -231,17 +257,30 @@ func SelectAddFunds(shape Shape, coins []Coin, amount btcutil.Amount,
 		feeChange := fee(feeRate, wChange)
 		change := total - amount - feeChange
 		if change >= dustLimit(changeScript) {
+			if !keeps(picked, change) {
+				break
+			}
+
 			return &AddFunds{
 				Inputs: picked, Change: change,
 				Contribution: amount, Fee: feeChange,
 				Weight: wChange,
 			}, nil
 		}
+		if !keeps(picked, 0) {
+			break
+		}
 
 		return &AddFunds{
 			Inputs: picked, Contribution: amount,
 			Fee: total - amount, Weight: wNoChange,
 		}, nil
+	}
+
+	if reserve > 0 {
+		return nil, fmt.Errorf("%w: %v available in usable coins, %v "+
+			"kept for fee bumps", ErrInsufficientFunds, sum(usable),
+			reserve)
 	}
 
 	return nil, fmt.Errorf("%w: %v available in usable coins",

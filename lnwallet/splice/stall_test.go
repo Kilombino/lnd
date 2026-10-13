@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/lntypes"
@@ -173,4 +174,37 @@ func TestSpliceUnsignedAtRestart(t *testing.T) {
 	}, 2*time.Second, 10*time.Millisecond)
 	require.Empty(t, p.alice.ch.PendingFundings())
 	require.Zero(t, p.alice.wallet.leaseCount())
+}
+
+// TestSpliceUseMaxKeepsReserve checks that adding everything keeps the
+// wallet's reserve for fee-bumping its anchor channels' closes: it comes
+// back as change.
+func TestSpliceUseMaxKeepsReserve(t *testing.T) {
+	t.Parallel()
+
+	p := newSplicePair(t)
+	const reserve = btcutil.Amount(30_000)
+	p.alice.machine.cfg.Reserve = func() (btcutil.Amount, error) {
+		return reserve, nil
+	}
+	p.alice.fund(t, 1, 1_000_000)
+
+	updates, err := p.alice.machine.Splice(Request{
+		Direction: DirectionIn, UseMax: true, FeeRate: 2_500,
+	})
+	require.NoError(t, err)
+	requireUpdates(t, updates, StatePreparing, StateNegotiating,
+		StateSigned, StateBroadcast)
+
+	p.alice.machine.mu.Lock()
+	tx, err := p.alice.machine.signedTx()
+	p.alice.machine.mu.Unlock()
+	require.NoError(t, err)
+	var kept bool
+	for _, out := range tx.TxOut {
+		if btcutil.Amount(out.Value) == reserve {
+			kept = true
+		}
+	}
+	require.True(t, kept, "no change of the reserve")
 }

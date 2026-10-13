@@ -215,6 +215,14 @@ func (m *Machine) prepareFunds(a *active, req Request) error {
 			return refused(codeInternal, "%v", err)
 		}
 
+		var reserve btcutil.Amount
+		if m.cfg.Reserve != nil {
+			reserve, err = m.cfg.Reserve()
+			if err != nil {
+				return refused(codeInternal, "%v", err)
+			}
+		}
+
 		var sel *AddFunds
 		selectAndLease := func() error {
 			coins, err := ListCoins(m.cfg.CoinSource)
@@ -224,6 +232,7 @@ func (m *Machine) prepareFunds(a *active, req Request) error {
 			sel, err = SelectAddFunds(
 				shape, coins, req.Amount, req.UseMax,
 				req.FeeRate, changeScript, m.cfg.DustLimit,
+				reserve,
 			)
 			if err != nil {
 				return err

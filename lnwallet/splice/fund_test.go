@@ -194,15 +194,32 @@ func TestSelectAddFundsAgreesWithEngine(t *testing.T) {
 			rapid.Int64Range(253, 100_000).Draw(rt, "feeRate"),
 		)
 
+		reserve := btcutil.Amount(
+			rapid.Int64Range(0, 200_000).Draw(rt, "reserve"),
+		)
+
 		sel, err := SelectAddFunds(
 			testShape, coins, amount, useMax, feeRate, p2tr(0xee),
-			dustLimit,
+			dustLimit, reserve,
 		)
 		if err != nil {
 			require.ErrorIs(rt, err, ErrInsufficientFunds)
 
 			return
 		}
+
+		// The wallet keeps the reserve: the usable coins not spent,
+		// and the change.
+		var usable, spent btcutil.Amount
+		for _, c := range coins {
+			if c.Usable() {
+				usable += c.Value
+			}
+		}
+		for _, c := range sel.Inputs {
+			spent += c.Value
+		}
+		require.GreaterOrEqual(rt, usable-spent+sel.Change, reserve)
 
 		if !useMax {
 			require.Equal(rt, amount, sel.Contribution)
@@ -258,7 +275,7 @@ func TestSelectAddFunds(t *testing.T) {
 
 	// Largest first; one coin is enough.
 	sel, err := SelectAddFunds(
-		testShape, all, 300_000, false, feeRate, change, dustLimit,
+		testShape, all, 300_000, false, feeRate, change, dustLimit, 0,
 	)
 	require.NoError(t, err)
 	require.Equal(t, []Coin{big}, sel.Inputs)
@@ -266,20 +283,20 @@ func TestSelectAddFunds(t *testing.T) {
 
 	// Two needed; the unusable coins, worth more, are never picked.
 	sel, err = SelectAddFunds(
-		testShape, all, 550_000, false, feeRate, change, dustLimit,
+		testShape, all, 550_000, false, feeRate, change, dustLimit, 0,
 	)
 	require.NoError(t, err)
 	require.Equal(t, []Coin{big, small}, sel.Inputs)
 
 	// More than the usable coins.
 	_, err = SelectAddFunds(
-		testShape, all, 650_000, false, feeRate, change, dustLimit,
+		testShape, all, 650_000, false, feeRate, change, dustLimit, 0,
 	)
 	require.ErrorIs(t, err, ErrInsufficientFunds)
 
 	// Use maximum: every usable coin, no change, all after the fee.
 	sel, err = SelectAddFunds(
-		testShape, all, 0, true, feeRate, change, dustLimit,
+		testShape, all, 0, true, feeRate, change, dustLimit, 0,
 	)
 	require.NoError(t, err)
 	require.ElementsMatch(t, []Coin{big, small}, sel.Inputs)
@@ -295,7 +312,7 @@ func TestSelectAddFunds(t *testing.T) {
 	amount := big.Value - feeNoChange - 200
 	sel, err = SelectAddFunds(
 		testShape, []Coin{big}, amount, false, feeRate, change,
-		dustLimit,
+		dustLimit, 0,
 	)
 	require.NoError(t, err)
 	require.Zero(t, sel.Change)
@@ -309,7 +326,7 @@ func TestSelectAddFunds(t *testing.T) {
 	amount = big.Value - feeNoChange - changeFee - 100
 	sel, err = SelectAddFunds(
 		testShape, []Coin{big}, amount, false, feeRate, change,
-		dustLimit,
+		dustLimit, 0,
 	)
 	require.NoError(t, err)
 	require.Zero(t, sel.Change)
@@ -319,18 +336,43 @@ func TestSelectAddFunds(t *testing.T) {
 	amount = big.Value - feeNoChange - changeFee - dustLimit(change)
 	sel, err = SelectAddFunds(
 		testShape, []Coin{big}, amount, false, feeRate, change,
-		dustLimit,
+		dustLimit, 0,
 	)
 	require.NoError(t, err)
 	require.Equal(t, dustLimit(change), sel.Change)
 
+	// The reserve kept: Use maximum leaves it as change, and an amount
+	// that would leave the wallet below it is refused.
+	const reserve = btcutil.Amount(50_000)
+	sel, err = SelectAddFunds(
+		testShape, all, 0, true, feeRate, change, dustLimit, reserve,
+	)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []Coin{big, small}, sel.Inputs)
+	require.Equal(t, reserve, sel.Change)
+	require.Equal(t, big.Value+small.Value-sel.Fee-reserve,
+		sel.Contribution)
+	_, err = SelectAddFunds(
+		testShape, all, 600_000, false, feeRate, change, dustLimit,
+		reserve,
+	)
+	require.ErrorIs(t, err, ErrInsufficientFunds)
+	require.ErrorContains(t, err, "kept for fee bumps")
+	sel, err = SelectAddFunds(
+		testShape, all, 500_000, false, feeRate, change, dustLimit,
+		reserve,
+	)
+	require.NoError(t, err)
+	require.Equal(t, []Coin{big, small}, sel.Inputs)
+	require.GreaterOrEqual(t, sel.Change, reserve)
+
 	// Nothing to add.
 	_, err = SelectAddFunds(
-		testShape, all, 0, false, feeRate, change, dustLimit,
+		testShape, all, 0, false, feeRate, change, dustLimit, 0,
 	)
 	require.ErrorIs(t, err, ErrBelowDust)
 	_, err = SelectAddFunds(
-		testShape, []Coin{cb}, 0, true, feeRate, change, dustLimit,
+		testShape, []Coin{cb}, 0, true, feeRate, change, dustLimit, 0,
 	)
 	require.ErrorIs(t, err, ErrInsufficientFunds)
 }

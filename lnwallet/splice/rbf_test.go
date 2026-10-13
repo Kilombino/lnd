@@ -117,7 +117,7 @@ func replaceAliceSpliceWith(t *testing.T, h *acceptorHarness,
 	s.sel, err = SelectAddFunds(Shape{
 		SharedWitnessWeight: input.MultiSigWitnessSize,
 		FundingScript:       newOut.PkScript,
-	}, []Coin{s.coin}, amount, false, feeRate, s.change, dustLimit)
+	}, []Coin{s.coin}, amount, false, feeRate, s.change, dustLimit, 0)
 	require.NoError(t, err)
 	if len(extra) > 0 {
 		// Every coin in, a fee within the session's bounds out of
