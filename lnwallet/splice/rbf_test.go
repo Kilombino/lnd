@@ -861,3 +861,28 @@ func TestReestablishNamesEarlierOrLocked(t *testing.T) {
 	require.Nil(t, h.peer.disconnected)
 	h.peer.mu.Unlock()
 }
+
+// TestPeerSpliceInitWhilePreparing checks the peer's splice_init reaching
+// us while our own splice still waits for quiescence, which the peer won:
+// ours fails and the peer's goes ahead, rather than a disconnection for a
+// splice_init with a splice in progress.
+func TestPeerSpliceInitWhilePreparing(t *testing.T) {
+	t.Parallel()
+
+	h := newAcceptorHarness(t)
+	h.link.stfuGate = make(chan struct{})
+	t.Cleanup(func() { close(h.link.stfuGate) })
+	updates, err := h.machine.Splice(Request{
+		Direction: DirectionOut, Amount: 100_000, FeeRate: 2_500,
+		Destination: p2tr(1),
+	})
+	require.NoError(t, err)
+	requireUpdates(t, updates, StatePreparing)
+
+	startAliceSplice(t, h, 40_000_000, 2_500)
+	u := requireUpdates(t, updates, StateAborted)
+	require.Contains(t, u.Reason, codeNotQuiescent)
+	h.peer.mu.Lock()
+	require.Nil(t, h.peer.disconnected)
+	h.peer.mu.Unlock()
+}

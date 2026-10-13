@@ -27,6 +27,18 @@ import (
 // handleSpliceInit answers the peer's splice_init: refused with tx_abort, or
 // accepted with splice_ack and the construction started.
 func (m *Machine) handleSpliceInit(msg *lnwire.SpliceInit) {
+	// Ours, still waiting for the quiescence the peer won: the peer's
+	// splice goes first, as when we learn it from the link.
+	if a := m.active; a != nil && a.role == interactivetx.Initiator &&
+		a.phase == phasePreparing {
+
+		initiator, err := m.cfg.Link.QuiescenceInitiator().Unpack()
+		if err == nil && initiator == lntypes.Remote {
+			m.failOurs(codeNotQuiescent, "the peer started "+
+				"quiescence")
+		}
+	}
+
 	// A splice_init while another splice is negotiating or unlocked, or
 	// from the side that didn't start quiescence, breaks the protocol.
 	if m.active != nil {
