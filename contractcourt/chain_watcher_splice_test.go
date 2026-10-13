@@ -649,3 +649,70 @@ func TestChainWatcherDroppedSpliceRemoteClose(t *testing.T) {
 	closeInfo := h.waitForRemoteUnilateralClose(5 * time.Second)
 	h.assertRemoteUnilateralCloseTx(closeInfo, latest)
 }
+
+// TestChainWatcherPreviousFundingRemoteClose checks the peer's commitment on
+// the funding output a lock replaced, unrevoked since no update followed the
+// lock, published once a reorganisation took the splice out: it is the
+// peer's close, its outputs resolved, not a spend nobody recognises.
+func TestChainWatcherPreviousFundingRemoteClose(t *testing.T) {
+	t.Parallel()
+
+	h := newChainWatcherTestHarness(t, withRequiredConfs(1))
+	splice := pendSplice(t, h)
+	txid := splice.TxHash()
+	oldFunding := h.aliceChannel.State().FundingOutpoint
+	bobOld := h.bobChannel.State().LocalCommitment.CommitTx
+
+	scid := lnwire.ShortChannelID{BlockHeight: 900_000}
+	require.NoError(t, h.aliceChannel.LockPendingFunding(txid, scid))
+	require.NoError(t, h.bobChannel.LockPendingFunding(txid, scid))
+
+	require.NoError(t, h.chainWatcher.Stop())
+	h.notifier.perOutpoint = true
+	cfg := h.chainWatcher.cfg
+	cfg.chanState = h.aliceChannel.State()
+	w, err := newChainWatcher(cfg)
+	require.NoError(t, err)
+	require.NoError(t, w.Start())
+	t.Cleanup(func() { _ = w.Stop() })
+	events := w.SubscribeChannelEvents()
+
+	spendOf := func(op wire.OutPoint, tx *wire.MsgTx) {
+		t.Helper()
+
+		var ch chan *chainntnfs.SpendDetail
+		require.Eventually(t, func() bool {
+			var ok bool
+			ch, ok = h.notifier.spendChanFor(op)
+			return ok
+		}, 5*time.Second, 10*time.Millisecond)
+		hash := tx.TxHash()
+		ch <- &chainntnfs.SpendDetail{
+			SpenderTxHash: &hash, SpendingTx: tx,
+			SpendingHeight: 900_010,
+		}
+	}
+
+	spendOf(oldFunding, splice)
+	require.Eventually(t, func() bool {
+		return h.notifier.confRegisteredFor(txid, reorgSafeDepth)
+	}, 5*time.Second, 10*time.Millisecond)
+	h.triggerReorg(splice, 3)
+
+	require.Eventually(t, func() bool {
+		ch, ok := h.notifier.spendChanFor(oldFunding)
+		return ok && len(ch) == 0
+	}, 5*time.Second, 10*time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
+	spendOf(oldFunding, bobOld)
+
+	select {
+	case closeInfo := <-events.RemoteUnilateralClosure:
+		require.Equal(t, bobOld.TxHash(), *closeInfo.SpenderTxHash)
+	case <-time.After(5 * time.Second):
+		t.Fatal("no remote close")
+	}
+	require.False(t, h.aliceChannel.State().HasChanStatus(
+		channeldb.ChanStatusFundingSpentUnknown,
+	))
+}
