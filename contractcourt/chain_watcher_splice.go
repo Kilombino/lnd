@@ -248,6 +248,71 @@ func (c *chainWatcher) maybeFollowSplice(spend *chainntnfs.SpendDetail,
 	return moved, true
 }
 
+// maybeSpliceLocked stops following the splice the watch is on once it has
+// locked: the channel is on its funding now, and the output it replaced is
+// watched until the splice is reorg-safe, as at a start after the lock.
+// Before, nothing watched that output until a restart, so a revoked
+// commitment confirmed there after a reorganisation went unpunished. The
+// channel is read again, as the lock is written by the link. Reports
+// whether the splice had locked.
+func (c *chainWatcher) maybeSpliceLocked() bool {
+	if c.splice == nil {
+		return false
+	}
+
+	chanState := c.cfg.chanState
+	if err := chanState.Refresh(); err != nil {
+		log.Errorf("ChannelPoint(%v): unable to read channel: %v",
+			chanState.FundingOutpoint, err)
+
+		return false
+	}
+	if chanState.CurrentFundingOutpoint() != c.splice.outpoint {
+		return false
+	}
+
+	log.Infof("ChannelPoint(%v): splice %v locked, watching the funding "+
+		"output it replaced", chanState.FundingOutpoint, c.splice.txid)
+	c.splice.confNtfn.Cancel()
+	c.splice = nil
+	c.watchPreviousFundings()
+
+	return true
+}
+
+// republishOnReorg publishes our force close commitment again once a reorg
+// took out the splice we had published our commitment on: the commitment
+// on the funding output that is unspent again is the one that can confirm,
+// and the arbitrator, its first broadcast refused, doesn't send it again.
+func (c *chainWatcher) republishOnReorg() {
+	c.splicePublished = chainhash.Hash{}
+
+	chanState := c.cfg.chanState
+	if c.cfg.publishTx == nil ||
+		!chanState.HasChanStatus(channeldb.ChanStatusCommitBroadcasted) {
+
+		return
+	}
+	tx, err := chanState.BroadcastedCommitment()
+	if err != nil {
+		log.Errorf("ChannelPoint(%v): no commitment to publish again: "+
+			"%v", chanState.FundingOutpoint, err)
+
+		return
+	}
+
+	log.Infof("ChannelPoint(%v): publishing our commitment %v again "+
+		"after the splice was reorged out", chanState.FundingOutpoint,
+		tx.TxHash())
+	err = c.cfg.publishTx(tx, labels.MakeLabel(
+		labels.LabelTypeChannelClose, &chanState.ShortChannelID,
+	))
+	if err != nil {
+		log.Errorf("ChannelPoint(%v): unable to publish commitment: "+
+			"%v", chanState.FundingOutpoint, err)
+	}
+}
+
 // maybePublishSpliceCommitment publishes our commitment on the confirmed
 // splice the watch follows once we have force closed. A force close after
 // the splice confirmed, while it waits to lock, broadcasts our commitment on

@@ -498,3 +498,101 @@ func TestChainWatcherSecondSplice(t *testing.T) {
 		channeldb.ChanStatusFundingSpentUnknown,
 	))
 }
+
+// lockSplice locks the harness's pending splice on both channels, as the
+// links do, and moves the channel on with an update.
+func lockSplice(t *testing.T, h *chainWatcherTestHarness, splice *wire.MsgTx) {
+	t.Helper()
+
+	scid := lnwire.ShortChannelID{BlockHeight: 900_000}
+	txid := splice.TxHash()
+	require.NoError(t, h.aliceChannel.LockPendingFunding(txid, scid))
+	require.NoError(t, h.bobChannel.LockPendingFunding(txid, scid))
+	addFakeHTLC(t, 10_000_000, 0, h.aliceChannel, h.bobChannel)
+	require.NoError(t, lnwallet.ForceStateTransition(
+		h.aliceChannel, h.bobChannel,
+	))
+}
+
+// TestChainWatcherSpliceLockWatchesPrevious checks that once a splice the
+// watch follows has locked, the next block starts the watch on the funding
+// output it replaced, without a restart: a revoked commitment confirmed
+// there after a reorganisation is found.
+func TestChainWatcherSpliceLockWatchesPrevious(t *testing.T) {
+	t.Parallel()
+
+	h := newChainWatcherTestHarness(t, withRequiredConfs(1))
+	splice := pendSplice(t, h)
+	oldFunding := h.aliceChannel.State().FundingOutpoint
+	h.notifier.perOutpoint = true
+	followSplice(t, h, splice)
+	lockSplice(t, h, splice)
+
+	b := &chainio.MockBlockbeat{}
+	b.On("logger").Return(log)
+	b.On("Height").Return(int32(1)).Maybe()
+	require.NoError(t, h.chainWatcher.ProcessBlock(b))
+
+	require.Eventually(t, func() bool {
+		_, watched := h.notifier.spendChanFor(oldFunding)
+		return watched
+	}, 5*time.Second, 10*time.Millisecond)
+}
+
+// TestChainWatcherLockedSpliceReorg checks a reorganisation taking out a
+// splice that locked while the watcher ran, reported before any block: the
+// funding output it replaced is watched, rather than the watch staying on
+// the splice's output, which no longer exists.
+func TestChainWatcherLockedSpliceReorg(t *testing.T) {
+	t.Parallel()
+
+	h := newChainWatcherTestHarness(t, withRequiredConfs(1))
+	splice := pendSplice(t, h)
+	oldFunding := h.aliceChannel.State().FundingOutpoint
+	h.notifier.perOutpoint = true
+	followSplice(t, h, splice)
+	lockSplice(t, h, splice)
+
+	h.triggerReorg(splice, 7)
+	require.Eventually(t, func() bool {
+		_, watched := h.notifier.spendChanFor(oldFunding)
+		return watched
+	}, 5*time.Second, 10*time.Millisecond)
+}
+
+// TestChainWatcherForceCloseSpliceReorg checks a force close whose
+// commitment we published on a confirmed splice, the splice then taken out
+// by a reorganisation: our commitment on the funding output unspent again is
+// published again.
+func TestChainWatcherForceCloseSpliceReorg(t *testing.T) {
+	t.Parallel()
+
+	h := newChainWatcherTestHarness(t, withRequiredConfs(1))
+	splice := pendSplice(t, h)
+
+	published := make(chan *wire.MsgTx, 4)
+	h.chainWatcher.cfg.publishTx = func(tx *wire.MsgTx, _ string) error {
+		published <- tx
+		return nil
+	}
+	oldCommit := h.aliceChannel.State().LocalCommitment.CommitTx
+	require.NoError(t, h.aliceChannel.State().MarkCommitmentBroadcasted(
+		oldCommit, lntypes.Local,
+	))
+	followSplice(t, h, splice)
+	select {
+	case tx := <-published:
+		require.Equal(t, splice.TxHash(),
+			tx.TxIn[0].PreviousOutPoint.Hash)
+	case <-time.After(5 * time.Second):
+		t.Fatal("nothing published on the splice")
+	}
+
+	h.triggerReorg(splice, 1)
+	select {
+	case tx := <-published:
+		require.Equal(t, oldCommit.TxHash(), tx.TxHash())
+	case <-time.After(5 * time.Second):
+		t.Fatal("our commitment not published again")
+	}
+}

@@ -996,7 +996,9 @@ func (c *chainWatcher) closeObserver() {
 
 			spend := c.handleBlockbeat(beat)
 			if spend == nil {
-				c.maybePublishSpliceCommitment()
+				if !c.maybeSpliceLocked() {
+					c.maybePublishSpliceCommitment()
+				}
 				continue
 			}
 			if moved, ok := c.maybeFollowSplice(spend, spendNtfn); ok {
@@ -1122,6 +1124,12 @@ func (c *chainWatcher) closeObserver() {
 				spliceReorgChan = nil
 				continue
 			}
+			// Locked since: the watch on the output it replaced
+			// takes the reorganisation.
+			if c.maybeSpliceLocked() {
+				continue
+			}
+
 			log.Warnf("ChannelPoint(%v): splice %v reorged out at "+
 				"depth %d, watching the previous funding output",
 				c.cfg.chanState.FundingOutpoint, c.splice.txid,
@@ -1144,6 +1152,7 @@ func (c *chainWatcher) closeObserver() {
 				return
 			}
 			c.fundingSpendNtfn = spendNtfn
+			c.republishOnReorg()
 
 		// The chainWatcher has been signalled to exit, so we'll do so
 		// now.
