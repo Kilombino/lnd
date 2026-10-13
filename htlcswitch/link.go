@@ -4733,6 +4733,18 @@ func (l *channelLink) processRemoteCommitSig(ctx context.Context,
 
 		return err
 	}
+
+	// A batch for another set of pending splices: refused before
+	// anything was accepted, the connection dropped with a warning.
+	if errors.Is(err, lnwallet.ErrSpliceBatchMismatch) {
+		l.failf(LinkFailureError{
+			code:          ErrInvalidCommitment,
+			FailureAction: LinkFailureDisconnect,
+			Warning:       true,
+		}, "%v", err)
+
+		return err
+	}
 	if err != nil {
 		// If we were unable to reconstruct their proposed commitment,
 		// then we'll examine the type of error. If it's an

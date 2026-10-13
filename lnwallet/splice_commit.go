@@ -750,10 +750,20 @@ func (lc *LightningChannel) spliceRemoteWrites(sigs []SpliceCommitSigs,
 
 // checkBatch checks that a batch's splice members name exactly the pending
 // splices, each once. Anything else is refused before any state changes.
+// ErrSpliceBatchMismatch is a commitment batch with a signature for more or
+// fewer pending splices than the channel has: the two sides disagree on the
+// set, as when one dropped a splice before the other. Checked before
+// anything is accepted, so the link drops the connection rather than force
+// closing; the retransmission after the reconnection agrees once both sides
+// have done the same.
+var ErrSpliceBatchMismatch = errors.New("commitment batch doesn't match " +
+	"the pending splices")
+
 func (lc *LightningChannel) checkBatch(sigs []SpliceCommitSigs) error {
 	if len(sigs) != len(lc.pendingFundings) {
-		return fmt.Errorf("batch has %d splice signatures for %d "+
-			"pending splices", len(sigs), len(lc.pendingFundings))
+		return fmt.Errorf("%w: %d splice signatures for %d pending "+
+			"splices", ErrSpliceBatchMismatch, len(sigs),
+			len(lc.pendingFundings))
 	}
 
 	seen := make(map[chainhash.Hash]bool, len(sigs))

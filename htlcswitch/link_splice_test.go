@@ -497,8 +497,11 @@ func sendBatch(s *spliceLinkHarness, sigs ...*lnwire.CommitSig) {
 	}
 }
 
-// TestLinkBatchRefused checks batches that don't cover every funding: the
-// channel is failed, as for any invalid commitment.
+// TestLinkBatchRefused checks batches that don't cover every funding. One
+// for fewer splices than ours, the two sides disagreeing on the set (one
+// dropped a splice before the other), drops the connection with a warning,
+// nothing having been accepted; the others fail the channel, as any invalid
+// commitment does.
 func TestLinkBatchRefused(t *testing.T) {
 	t.Parallel()
 
@@ -509,7 +512,7 @@ func TestLinkBatchRefused(t *testing.T) {
 		pendSplice(t, s.link.channel, s.bob, 50_000_000)
 		main, _ := bobBatch(t, s)
 		s.link.HandleChannelUpdate(main)
-		s.requireFailure(t, LinkFailureForceClose)
+		s.requireFailure(t, LinkFailureDisconnect)
 	})
 
 	t.Run("splice member twice", func(t *testing.T) {
