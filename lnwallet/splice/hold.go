@@ -14,6 +14,20 @@ import (
 // confirmations, the peer's spliced-in amount is held: the link fails back
 // incoming HTLCs that would draw on it.
 
+// Constructing reports whether a splice's transaction is being negotiated,
+// or agreed and not yet added to the channel's fundings: a commitment_signed
+// naming a funding the channel doesn't have may be its own. Safe from any
+// goroutine.
+func (m *Machine) Constructing() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	a := m.active
+
+	return a != nil && (a.phase == phaseNegotiating ||
+		a.phase == phaseSigning)
+}
+
 // PeerInputHold returns what of the peer's balance is held: the sum of its
 // contributions to splices that locked and haven't reached PeerInputConfs.
 // Safe to call from any goroutine.

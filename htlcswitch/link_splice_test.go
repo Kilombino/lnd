@@ -27,6 +27,14 @@ type recordingSpliceHandler struct {
 	nextFunding   fn.Option[lnwire.FundingTxidFlags]
 	fundingLocked fn.Option[lnwire.FundingTxidFlags]
 	held          btcutil.Amount
+	constructing  bool
+}
+
+func (h *recordingSpliceHandler) Constructing() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	return h.constructing
 }
 
 func (h *recordingSpliceHandler) ReestablishTLVs() (
@@ -881,6 +889,177 @@ func TestLinkBatchAcrossLock(t *testing.T) {
 		s.link.channel.State().CurrentFundingOutpoint().Hash)
 
 	sendBatch(s, main, members[0])
+	nextSent[*lnwire.RevokeAndAck](t, s)
+	s.requireNoFailure(t)
+}
+
+// quiesce makes the harness's link quiescent, Alice asking.
+func quiesce(t *testing.T, s *spliceLinkHarness) {
+	t.Helper()
+
+	res := s.link.InitStfu()
+	nextSent[*lnwire.Stfu](t, s)
+	s.link.HandleChannelUpdate(&lnwire.Stfu{
+		ChanID: s.link.ChanID(), Initiator: false,
+	})
+	select {
+	case r := <-res:
+		require.NoError(t, r.Err())
+	case <-time.After(5 * time.Second):
+		t.Fatal("no quiescence")
+	}
+}
+
+// TestLinkSpliceCommitSigEarly checks the peer's commitment_signed for a
+// splice reaching the link before our machine has added the splice to the
+// channel's fundings: it waits for that, then is the splice's own, rather
+// than taken for a commitment on the current funding, which failed its
+// check and force closed the channel. With no splice being built, one
+// naming an unknown funding is ignored.
+func TestLinkSpliceCommitSigEarly(t *testing.T) {
+	t.Parallel()
+
+	for _, building := range []bool{true, false} {
+		s := newSpliceLinkHarness(t)
+		quiesce(t, s)
+		s.handler.mu.Lock()
+		s.handler.constructing = building
+		s.handler.mu.Unlock()
+
+		aliceKey, err := btcec.NewPrivateKey()
+		require.NoError(t, err)
+		bobKey, err := btcec.NewPrivateKey()
+		require.NoError(t, err)
+		s.link.channel.Signer.(*input.MockSigner).Privkeys = append(
+			s.link.channel.Signer.(*input.MockSigner).Privkeys,
+			aliceKey,
+		)
+		s.bob.Signer.(*input.MockSigner).Privkeys = append(
+			s.bob.Signer.(*input.MockSigner).Privkeys, bobKey,
+		)
+		txid := chainhash.Hash{0x5e, 0x44}
+		op := wire.OutPoint{Hash: txid}
+		capacity := s.bob.State().Capacity + 20_000_000
+		require.NoError(t, s.bob.AddPendingFunding(
+			lnwallet.PendingFunding{
+				OutPoint: op, Capacity: capacity,
+				LocalKey: keychain.KeyDescriptor{
+					PubKey: bobKey.PubKey(),
+				},
+				RemoteKey:   aliceKey.PubKey(),
+				RemoteDelta: 20_000_000,
+			},
+		))
+
+		// Bob's, ahead of our machine.
+		sigs, err := s.bob.SignSpliceCommitment(t.Context(), txid)
+		require.NoError(t, err)
+		s.link.HandleChannelUpdate(&lnwire.CommitSig{
+			ChanID: s.link.ChanID(), CommitSig: sigs.CommitSig,
+			HtlcSigs: sigs.HtlcSigs, FundingTxid: fn.Some(txid),
+		})
+		time.Sleep(100 * time.Millisecond)
+		s.requireNoFailure(t)
+
+		reported := func() int {
+			s.handler.mu.Lock()
+			defer s.handler.mu.Unlock()
+
+			return len(s.handler.commits)
+		}
+		require.Zero(t, reported(), "building %v", building)
+		if !building {
+			continue
+		}
+
+		// The machine adds it: the commitment_signed is taken up.
+		require.NoError(t, <-s.link.AddSpliceFunding(
+			lnwallet.PendingFunding{
+				OutPoint: op, Capacity: capacity,
+				LocalKey: keychain.KeyDescriptor{
+					PubKey: aliceKey.PubKey(),
+				},
+				RemoteKey:  bobKey.PubKey(),
+				LocalDelta: 20_000_000,
+			},
+		))
+		require.Eventually(t, func() bool {
+			return reported() == 1
+		}, 5*time.Second, 20*time.Millisecond)
+		s.handler.mu.Lock()
+		require.NoError(t, s.handler.commits[0])
+		s.handler.mu.Unlock()
+		s.requireNoFailure(t)
+	}
+}
+
+// TestLinkUpdateAfterTxSignatures checks an update the peer sends once it
+// ended quiescence on the exchange of tx_signatures, before our splice
+// machine has: it waits for the end of quiescence, rather than failing the
+// link, and is then taken up.
+func TestLinkUpdateAfterTxSignatures(t *testing.T) {
+	t.Parallel()
+
+	s := newSpliceLinkHarness(t)
+	quiesce(t, s)
+	s.link.HandleChannelUpdate(&lnwire.TxSignatures{
+		ChannelID: s.link.ChanID(),
+	})
+
+	amt := lnwire.NewMSatFromSatoshis(100_000)
+	var blob [lnwire.OnionPacketSize]byte
+	_, htlc, _, err := generatePayment(amt, amt, 5, blob)
+	require.NoError(t, err)
+	_, err = s.bob.AddHTLC(htlc, nil)
+	require.NoError(t, err)
+	s.link.HandleChannelUpdate(htlc)
+	commit, err := s.bob.SignNextCommitment(t.Context())
+	require.NoError(t, err)
+	s.link.HandleChannelUpdate(&lnwire.CommitSig{
+		ChanID: s.link.ChanID(), CommitSig: commit.CommitSig,
+		HtlcSigs: commit.HtlcSigs,
+	})
+	time.Sleep(100 * time.Millisecond)
+	s.requireNoFailure(t)
+
+	require.NoError(t, <-s.link.ResumeQuiescence())
+	nextSent[*lnwire.RevokeAndAck](t, s)
+	s.requireNoFailure(t)
+}
+
+// TestLinkCommitSigAfterPeerLock checks the peer's first commitment after a
+// splice locked on its side, naming the splice's funding alone, reaching the
+// link before our own lock has: it waits for our lock, rather than being
+// taken for the splice's own commitment_signed and left unanswered.
+func TestLinkCommitSigAfterPeerLock(t *testing.T) {
+	t.Parallel()
+
+	s := newSpliceLinkHarness(t)
+	txid := pendSplice(t, s.link.channel, s.bob, 50_000_000)
+	scid := lnwire.ShortChannelID{BlockHeight: 900_000, TxIndex: 1}
+	require.NoError(t, s.bob.LockPendingFunding(txid, scid))
+
+	s.link.HandleChannelUpdate(&lnwire.SpliceLocked{
+		ChannelID: s.link.ChanID(), SpliceTxid: txid,
+	})
+	amt := lnwire.NewMSatFromSatoshis(100_000)
+	var blob [lnwire.OnionPacketSize]byte
+	_, htlc, _, err := generatePayment(amt, amt, 5, blob)
+	require.NoError(t, err)
+	_, err = s.bob.AddHTLC(htlc, nil)
+	require.NoError(t, err)
+	s.link.HandleChannelUpdate(htlc)
+	commit, err := s.bob.SignNextCommitment(t.Context())
+	require.NoError(t, err)
+	require.Empty(t, commit.SpliceSigs)
+	s.link.HandleChannelUpdate(&lnwire.CommitSig{
+		ChanID: s.link.ChanID(), CommitSig: commit.CommitSig,
+		HtlcSigs: commit.HtlcSigs, FundingTxid: fn.Some(txid),
+	})
+	time.Sleep(100 * time.Millisecond)
+	s.requireNoFailure(t)
+
+	require.NoError(t, <-s.link.LockSplice(txid, scid))
 	nextSent[*lnwire.RevokeAndAck](t, s)
 	s.requireNoFailure(t)
 }

@@ -1299,6 +1299,23 @@ func (lc *LightningChannel) retransmittedCommitSigs(
 	return append(msgs, members...), nil
 }
 
+// SpliceCommitReceived reports whether the peer's commitment_signed for a
+// pending splice's own commitment has been received: our commitment on its
+// funding at the current height is signed. Any later commitment_signed
+// naming that funding belongs to a batch, or follows the splice's lock.
+func (lc *LightningChannel) SpliceCommitReceived(txid chainhash.Hash) bool {
+	lc.RLock()
+	defer lc.RUnlock()
+
+	p, err := lc.pendingFunding(txid)
+	if err != nil {
+		return false
+	}
+	local, ok := p.local[lc.commitChains.Local.tail().height]
+
+	return ok && local.sig != nil
+}
+
 // requireExchanged refuses a commitment step until every pending splice's
 // own commitments have been exchanged both ways at the current heights.
 func (lc *LightningChannel) requireExchanged() error {

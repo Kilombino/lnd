@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btclog/v2"
 	"github.com/lightningnetwork/lnd/channeldb"
@@ -454,6 +455,26 @@ type channelLink struct {
 	// start_batch, nil outside one.
 	batch *commitBatch
 
+	// held is what the peer sent from a message the link can't take up
+	// yet: a commitment_signed naming a funding a splice step is still
+	// adding or locking, or an update sent once the peer ended
+	// quiescence on the exchange of tx_signatures, before our splice
+	// machine has. Everything after it waits too, in order. heldTimer
+	// ends the wait.
+	held      []lnwire.Message
+	heldTimer *time.Timer
+
+	// peerTxSigs is set once the peer's tx_signatures has been handed to
+	// the splice machine while quiescent, until quiescence ends.
+	peerTxSigs bool
+
+	// peerLocked holds the splices the peer has said it locked
+	// (splice_locked, or my_current_funding_locked on reconnecting), as
+	// the link handed them to the splice machine: the peer's next
+	// commitment_signed names the splice's funding alone, before our
+	// lock may have reached the link.
+	peerLocked map[chainhash.Hash]struct{}
+
 	// cg is a helper that encapsulates a wait group and quit channel and
 	// allows contexts that either block or cancel on those depending on
 	// the use case.
@@ -867,6 +888,7 @@ func (l *channelLink) resumeQuiescence(ctx context.Context) error {
 	}
 
 	l.quiescer.Resume()
+	l.peerTxSigs = false
 
 	if err := l.mailBox.ResetPackets(); err != nil {
 		l.log.Errorf("failed to reset packets after quiescence: %v",
@@ -1155,6 +1177,11 @@ func (l *channelLink) syncChanStates(ctx context.Context) error {
 		// for, then the machine's.
 		if l.cfg.SpliceHandler != nil {
 			l.resendSpliceCommitSig(remoteChanSyncMsg)
+			remoteChanSyncMsg.MyCurrentFundingLocked.WhenSome(
+				func(f lnwire.FundingTxidFlags) {
+					l.notePeerLocked(f.Txid)
+				},
+			)
 			l.cfg.SpliceHandler.HandleReestablish(remoteChanSyncMsg)
 		}
 
@@ -1534,10 +1561,25 @@ func (l *channelLink) htlcManager(ctx context.Context) {
 		// The protocol that paused the channel is done with it.
 		case rReq := <-l.resumeReqs:
 			rReq.Resolve(l.resumeQuiescence(ctx))
+			l.replayHeld(ctx)
 
 		// A step of a splice.
 		case sReq := <-l.spliceReqs:
 			sReq.Resolve(sReq.Request(ctx))
+			l.replayHeld(ctx)
+
+		// Messages held for a splice step that hasn't come.
+		case <-l.heldTimeout():
+			l.replayHeld(ctx)
+			if len(l.held) > 0 {
+				l.failf(LinkFailureError{
+					code:          ErrRemoteUnresponsive,
+					FailureAction: LinkFailureDisconnect,
+				}, "%T held over %v", l.held[0],
+					heldMessageTimeout)
+
+				return
+			}
 
 		case <-l.cg.Done():
 			return
@@ -1899,14 +1941,79 @@ func (l *channelLink) cleanupSpuriousResponse(pkt *htlcPacket) {
 func (l *channelLink) handleUpstreamMsg(ctx context.Context,
 	msg lnwire.Message) {
 
+	// Behind a held message: in order, after it.
+	if len(l.held) > 0 {
+		if len(l.held) >= maxHeldMessages {
+			l.failf(LinkFailureError{
+				code:          ErrInvalidUpdate,
+				FailureAction: LinkFailureDisconnect,
+			}, "over %d messages held", maxHeldMessages)
+
+			return
+		}
+		l.held = append(l.held, msg)
+
+		return
+	}
+
+	if l.processUpstreamMsg(ctx, msg) {
+		l.held = []lnwire.Message{msg}
+		l.heldTimer = time.NewTimer(heldMessageTimeout)
+	}
+}
+
+// maxHeldMessages and heldMessageTimeout bound the messages held behind one
+// the link can't take up yet, and how long they wait.
+const (
+	maxHeldMessages    = 1000
+	heldMessageTimeout = time.Minute
+)
+
+// heldTimeout returns the channel the wait for held messages ends on, nil
+// while nothing is held.
+func (l *channelLink) heldTimeout() <-chan time.Time {
+	if l.heldTimer == nil {
+		return nil
+	}
+
+	return l.heldTimer.C
+}
+
+// replayHeld takes up the held messages in order, until one must wait
+// again.
+func (l *channelLink) replayHeld(ctx context.Context) {
+	for len(l.held) > 0 && !l.failed {
+		if l.processUpstreamMsg(ctx, l.held[0]) {
+			return
+		}
+		l.held = l.held[1:]
+	}
+	l.held = nil
+	if l.heldTimer != nil {
+		l.heldTimer.Stop()
+		l.heldTimer = nil
+	}
+}
+
+// processUpstreamMsg processes a message from the peer, or reports that it
+// must wait, untouched, for a splice step.
+func (l *channelLink) processUpstreamMsg(ctx context.Context,
+	msg lnwire.Message) bool {
+
 	l.log.Tracef("receive upstream msg %v, handling now... ", msg.MsgType())
 	defer l.log.Tracef("handled upstream msg %v", msg.MsgType())
 
 	// First check if the message is an update and we are capable of
-	// receiving updates right now.
+	// receiving updates right now. A peer that ended quiescence on the
+	// exchange of tx_signatures may send one before our splice machine
+	// has ended it: it waits for that.
 	if msg.MsgType().IsChannelUpdate() && !l.quiescer.CanRecvUpdates() {
+		if l.peerTxSigs {
+			return true
+		}
 		l.stfuFailf("update received after stfu: %T", msg)
-		return
+
+		return false
 	}
 
 	// Nothing but the announced commitment_signed messages may come
@@ -1918,7 +2025,7 @@ func (l *channelLink) handleUpstreamMsg(ctx context.Context,
 			Warning:       true,
 		}, "%T inside a batch", msg)
 
-		return
+		return false
 	}
 
 	var err error
@@ -1942,13 +2049,29 @@ func (l *channelLink) handleUpstreamMsg(ctx context.Context,
 		case l.batch != nil:
 			err = l.handleBatchedCommitSig(ctx, msg)
 
-		// A splice's own commitment_signed: checked and handed to
-		// the splice machine, not answered with a revocation.
-		case l.isSpliceCommitSig(msg):
-			l.handleSpliceCommitSig(msg)
-
 		default:
-			err = l.processRemoteCommitSig(ctx, msg, nil)
+			switch l.placeCommitSig(msg) {
+			// A splice's own commitment_signed: checked and
+			// handed to the splice machine, not answered with a
+			// revocation.
+			case commitSigSplice:
+				l.handleSpliceCommitSig(msg)
+
+			// Naming a funding a splice step is still adding
+			// or locking: after it.
+			case commitSigWait:
+				return true
+
+			// Naming a funding no splice will add: one the
+			// peer signed before learning it was given up.
+			case commitSigStale:
+				l.log.Infof("commitment_signed for funding "+
+					"%v, not ours: ignored",
+					msg.FundingTxid.UnsafeFromSome())
+
+			default:
+				err = l.processRemoteCommitSig(ctx, msg, nil)
+			}
 		}
 
 		// At this point our local commitment state has been irrevocably
@@ -1995,6 +2118,14 @@ func (l *channelLink) handleUpstreamMsg(ctx context.Context,
 
 	default:
 		if isSpliceMessage(msg) {
+			if _, ok := msg.(*lnwire.TxSignatures); ok &&
+				l.quiescer.IsQuiescent() {
+
+				l.peerTxSigs = true
+			}
+			if locked, ok := msg.(*lnwire.SpliceLocked); ok {
+				l.notePeerLocked(locked.SpliceTxid)
+			}
 			l.handleSpliceMessage(msg)
 			break
 		}
@@ -2009,6 +2140,8 @@ func (l *channelLink) handleUpstreamMsg(ctx context.Context,
 		l.log.Errorf("failed to process remote %v: %v", msg.MsgType(),
 			err)
 	}
+
+	return false
 }
 
 // handleStfu implements the top-level logic for handling the Stfu message from

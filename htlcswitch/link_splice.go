@@ -51,6 +51,11 @@ type SpliceHandler interface {
 	// yet: its coins in splices that locked and aren't deep enough to
 	// rule out a reorganisation. Safe from any goroutine.
 	PeerInputHold() btcutil.Amount
+
+	// Constructing reports whether a splice's transaction is being
+	// negotiated, or agreed and not yet among the channel's fundings.
+	// Safe from any goroutine.
+	Constructing() bool
 }
 
 // peerInputHeld reports whether the peer's balance is below what the splice
@@ -228,23 +233,62 @@ func (l *channelLink) handleBatchedCommitSig(ctx context.Context,
 	return nil
 }
 
-// isSpliceCommitSig reports whether msg is the commitment_signed for a
-// splice's own transaction: outside a batch and naming a pending splice.
-// Every other commitment_signed while a splice is pending comes in a batch,
-// and one outside names the current funding. It can come after a
-// reconnection too, when the peer resends it for next_funding.
-func (l *channelLink) isSpliceCommitSig(msg *lnwire.CommitSig) bool {
+// commitSigPlace says what a commitment_signed outside a batch is.
+type commitSigPlace uint8
+
+const (
+	// commitSigCurrent is a commitment on the current funding.
+	commitSigCurrent commitSigPlace = iota
+
+	// commitSigSplice is a pending splice's own commitment_signed.
+	commitSigSplice
+
+	// commitSigWait names a funding a splice step on the link's queue
+	// is still adding or locking: it waits for the step.
+	commitSigWait
+
+	// commitSigStale names a funding no splice will add.
+	commitSigStale
+)
+
+// placeCommitSig says what a commitment_signed outside a batch is, by the
+// funding it names:
+//   - none, or the current funding: a commitment on it;
+//   - a pending splice the peer said it locked, whose own commitment_signed
+//     has come: the peer's first commitment after the lock, which waits
+//     for our lock to reach the link;
+//   - any other pending splice: its own commitment_signed, also when the
+//     peer resends it for next_funding;
+//   - a funding we don't have while a splice's transaction is being
+//     negotiated or added: the splice's own, which waits for it;
+//   - any other: one for a splice given up, ignored.
+//
+// Taken for a commitment on the current funding, either of the waiting ones
+// failed its signature check and the channel was force closed.
+func (l *channelLink) placeCommitSig(msg *lnwire.CommitSig) commitSigPlace {
 	txid, err := msg.FundingTxid.UnwrapOrErr(errors.New("none"))
-	if err != nil || l.batch != nil {
-		return false
+	if err != nil {
+		return commitSigCurrent
+	}
+	if txid == l.channel.ChannelState().CurrentFundingOutpoint().Hash {
+		return commitSigCurrent
 	}
 	for _, f := range l.channel.PendingFundings() {
-		if f.OutPoint.Hash == txid {
-			return true
+		if f.OutPoint.Hash != txid {
+			continue
 		}
+		_, locked := l.peerLocked[txid]
+		if locked && l.channel.SpliceCommitReceived(txid) {
+			return commitSigWait
+		}
+
+		return commitSigSplice
+	}
+	if l.cfg.SpliceHandler != nil && l.cfg.SpliceHandler.Constructing() {
+		return commitSigWait
 	}
 
-	return false
+	return commitSigStale
 }
 
 // handleSpliceCommitSig checks the peer's commitment_signed for a splice and
@@ -456,3 +500,11 @@ type SpliceLink interface {
 
 // A compile time check that the link can splice.
 var _ SpliceLink = (*channelLink)(nil)
+
+// notePeerLocked records that the peer said it locked a splice.
+func (l *channelLink) notePeerLocked(txid chainhash.Hash) {
+	if l.peerLocked == nil {
+		l.peerLocked = make(map[chainhash.Hash]struct{})
+	}
+	l.peerLocked[txid] = struct{}{}
+}
