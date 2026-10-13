@@ -395,6 +395,44 @@ func TestPeerInputRefusals(t *testing.T) {
 		},
 		contains: "final",
 	}, {
+		name: "a relative lock in blocks",
+		msgs: func(t *testing.T) []lnwire.Message {
+			m := walletAdd(t, 2, wallet, 0)
+			m.Sequence = 0x0000ffff
+
+			return []lnwire.Message{m}
+		},
+		contains: "relative lock",
+	}, {
+		name: "a relative lock in time on the shared input",
+		msgs: func(t *testing.T) []lnwire.Message {
+			m := sharedAdd(0)
+			m.Sequence = 0x0040ffff
+
+			return []lnwire.Message{m}
+		},
+		contains: "relative lock",
+	}, {
+		name: "a prevtx counting four million witness items",
+		msgs: func(t *testing.T) []lnwire.Message {
+			// Version, marker and flag; one input of an empty
+			// script; one output of an empty script; a witness
+			// count of 4,000,000 and nothing after it.
+			b := []byte{2, 0, 0, 0, 0x00, 0x01, 0x01}
+			b = append(b, make([]byte, 36)...)
+			b = append(b, 0x00, 0xff, 0xff, 0xff, 0xff)
+			b = append(b, 0x01)
+			b = append(b, make([]byte, 8)...)
+			b = append(b, 0x00)
+			b = append(b, 0xfe, 0x00, 0x09, 0x3d, 0x00)
+
+			return []lnwire.Message{&lnwire.TxAddInput{
+				SerialID: 2, PrevTx: b,
+				Sequence: MaxSequence,
+			}}
+		},
+		contains: "count larger than the transaction",
+	}, {
 		name: "prevtx_vout out of range",
 		msgs: func(t *testing.T) []lnwire.Message {
 			return []lnwire.Message{walletAdd(t, 2, wallet, 3)}

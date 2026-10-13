@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 
 	"github.com/btcsuite/btcd/btcutil"
@@ -555,6 +556,14 @@ func (s *Session) receiveInput(m *lnwire.TxAddInput) error {
 		return abortf("input sequence %#x is final", m.Sequence)
 	}
 
+	// A relative lock (BIP 68) would keep the transaction from
+	// confirming for up to 65,535 blocks or 388 days, the channel stuck
+	// with it pending.
+	if m.Sequence&wire.SequenceLockTimeDisabled == 0 {
+		return abortf("input sequence %#x is a relative lock",
+			m.Sequence)
+	}
+
 	in := &Input{
 		SerialID: m.SerialID,
 		Sequence: m.Sequence,
@@ -581,6 +590,9 @@ func (s *Session) receiveInput(m *lnwire.TxAddInput) error {
 		in.PkScript = s.cfg.Shared.PkScript
 		in.MaxWitnessWeight = s.cfg.Shared.WitnessWeight
 	} else {
+		if err := checkTxCounts(m.PrevTx); err != nil {
+			return abortf("prevtx doesn't parse: %v", err)
+		}
 		prevTx := wire.NewMsgTx(2)
 		if err := prevTx.Deserialize(bytes.NewReader(m.PrevTx)); err != nil {
 			return abortf("prevtx doesn't parse: %v", err)
@@ -1050,4 +1062,102 @@ func blockchainIsCoinBase(tx *wire.MsgTx) bool {
 	prev := tx.TxIn[0].PreviousOutPoint
 
 	return prev.Index == wire.MaxPrevOutIndex && prev.Hash == (chainhash.Hash{})
+}
+
+// errTxCount is a serialized transaction's count of inputs, outputs,
+// witness items or bytes larger than what is left of it.
+var errTxCount = errors.New("count larger than the transaction")
+
+// checkTxCounts walks a serialized transaction and refuses it when a count
+// is larger than the bytes left could hold. btcd's decoder allocates for a
+// count before reading what it counts: a witness count of four million in a
+// prevtx of a hundred bytes cost about 95 MB.
+func checkTxCounts(b []byte) error {
+	r := bytes.NewReader(b)
+	skip := func(n uint64) error {
+		if n > uint64(r.Len()) {
+			return errTxCount
+		}
+		_, err := r.Seek(int64(n), io.SeekCurrent)
+
+		return err
+	}
+	// count reads a count of things each at least size bytes long.
+	count := func(size uint64) (uint64, error) {
+		n, err := wire.ReadVarInt(r, 0)
+		if err != nil {
+			return 0, err
+		}
+		if n > uint64(r.Len())/size {
+			return 0, errTxCount
+		}
+
+		return n, nil
+	}
+	// script skips a length-prefixed field.
+	script := func() error {
+		n, err := wire.ReadVarInt(r, 0)
+		if err != nil {
+			return err
+		}
+
+		return skip(n)
+	}
+
+	if err := skip(4); err != nil {
+		return err
+	}
+	witness := len(b) > 5 && b[4] == 0x00 && b[5] != 0x00
+	if witness {
+		if err := skip(2); err != nil {
+			return err
+		}
+	}
+
+	// An input: outpoint 36, script length 1, sequence 4.
+	inputs, err := count(41)
+	if err != nil {
+		return err
+	}
+	for i := uint64(0); i < inputs; i++ {
+		if err := skip(36); err != nil {
+			return err
+		}
+		if err := script(); err != nil {
+			return err
+		}
+		if err := skip(4); err != nil {
+			return err
+		}
+	}
+
+	// An output: value 8, script length 1.
+	outputs, err := count(9)
+	if err != nil {
+		return err
+	}
+	for i := uint64(0); i < outputs; i++ {
+		if err := skip(8); err != nil {
+			return err
+		}
+		if err := script(); err != nil {
+			return err
+		}
+	}
+
+	if witness {
+		for i := uint64(0); i < inputs; i++ {
+			items, err := count(1)
+			if err != nil {
+				return err
+			}
+			for j := uint64(0); j < items; j++ {
+				if err := script(); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	return skip(4)
 }
