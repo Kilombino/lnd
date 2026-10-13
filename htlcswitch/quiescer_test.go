@@ -372,3 +372,32 @@ func TestQuiescerTimeoutAborts(t *testing.T) {
 	case <-time.After(2 * harness.quiescer.cfg.timeoutDuration):
 	}
 }
+
+// TestQuiescenceLateLocalRequest checks a local request for quiescence made
+// once our stfu went out answering the peer's: answered at once with the
+// peer as initiator, rather than taken for a tie (which, as the channel's
+// opener, we would have won without the peer knowing) and left waiting.
+func TestQuiescenceLateLocalRequest(t *testing.T) {
+	t.Parallel()
+
+	harness := initQuiescerTestHarness(lntypes.Local)
+	require.NoError(t, harness.quiescer.RecvStfu(lnwire.Stfu{
+		ChanID: cid, Initiator: true,
+	}))
+	require.NoError(t, harness.quiescer.SendOwedStfu())
+	require.Equal(t, fn.Ok(lntypes.Remote),
+		harness.quiescer.QuiescenceInitiator())
+
+	req, res := fn.NewReq[fn.Unit, fn.Result[lntypes.ChannelParty]](
+		fn.Unit{},
+	)
+	harness.quiescer.InitStfu(req)
+	select {
+	case initiator := <-res:
+		require.Equal(t, fn.Ok(lntypes.Remote), initiator)
+	default:
+		t.Fatal("quiescence request not resolved")
+	}
+	require.Equal(t, fn.Ok(lntypes.Remote),
+		harness.quiescer.QuiescenceInitiator())
+}

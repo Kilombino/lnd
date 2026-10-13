@@ -480,6 +480,21 @@ func (q *QuiescerLive) initStfu(req StfuReq) {
 		return
 	}
 
+	// Our stfu is out already, answering the peer's: too late to be the
+	// initiator. Answered at once with who is, rather than taken for a
+	// tie the peer never saw, with the request left waiting.
+	if q.sent {
+		if q.isQuiescent() {
+			req.Resolve(q.quiescenceInitiator())
+		} else {
+			req.Resolve(fn.Errf[lntypes.ChannelParty](
+				"quiescence under way, started by the peer",
+			))
+		}
+
+		return
+	}
+
 	q.localInit = true
 	q.activeQuiescenceReq = fn.Some(req)
 }

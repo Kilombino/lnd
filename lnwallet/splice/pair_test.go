@@ -483,6 +483,14 @@ func TestSpliceRequestRefused(t *testing.T) {
 		require.Contains(t, u.Reason, codeNotQuiescent)
 		require.Zero(t, p.alice.wallet.leaseCount())
 
+		// Quiescence is the peer's to end, its splice_init coming:
+		// not resumed under it.
+		select {
+		case <-p.alice.link.resumed:
+			t.Fatal("quiescence ended under the peer")
+		case <-time.After(200 * time.Millisecond):
+		}
+
 		// The machine takes a new splice afterwards.
 		p.alice.link.stfuResult = lntypes.Local
 		updates, err = p.alice.machine.Splice(Request{

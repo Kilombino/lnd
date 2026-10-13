@@ -314,9 +314,11 @@ func (m *Machine) quiesced(a *active,
 		return
 
 	case initiator != lntypes.Local:
-		// The peer quiesced first: its splice, if any, goes first.
+		// The peer quiesced first, or won the tie as the channel's
+		// opener: its splice goes first, and ends quiescence. Not
+		// resumed here, which would end it under the peer's
+		// splice_init.
 		m.failOurs(codeNotQuiescent, "the peer started quiescence")
-		m.resume()
 
 		return
 	}
