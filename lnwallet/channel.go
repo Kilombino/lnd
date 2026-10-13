@@ -6001,6 +6001,12 @@ func (lc *LightningChannel) RevokeCurrentCommitment() (*lnwire.RevokeAndAck,
 	lc.Lock()
 	defer lc.Unlock()
 
+	// The pending splices unrestored, no state moves: see
+	// spliceRestoreErr.
+	if lc.spliceRestoreErr != nil {
+		return nil, nil, nil, lc.spliceRestoreErr
+	}
+
 	// Never revoke without the next commitment signed on every funding.
 	if err := lc.requireAllSigned(lc.currentHeight + 1); err != nil {
 		return nil, nil, nil, err
@@ -6109,6 +6115,14 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 
 	lc.Lock()
 	defer lc.Unlock()
+
+	// Nor the peer's revocation: its splices' logs would miss the height
+	// and their records fall behind the chain, the channel frozen for
+	// good, and a revoked commitment on a splice's funding judged by the
+	// current funding's log.
+	if lc.spliceRestoreErr != nil {
+		return nil, nil, lc.spliceRestoreErr
+	}
 
 	// Ensure that the new pre-image can be placed in preimage store.
 	store := lc.channelState.RevocationStore

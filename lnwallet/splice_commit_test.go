@@ -1452,3 +1452,43 @@ func TestSpliceFeeUnaffordableOnCandidateOnly(t *testing.T) {
 	require.ErrorIs(t, err, ErrSpliceReserve)
 	require.ErrorIs(t, err, ErrBelowChanReserve)
 }
+
+// TestSpliceRestoreFailureRevocation checks a channel whose pending splices
+// couldn't be restored after it signed a commitment: the peer's revocation
+// is refused too, and so is revoking our own, so no state moves. Accepted,
+// the splices' logs missed the height and their records fell behind the
+// chain, frozen for good.
+func TestSpliceRestoreFailureRevocation(t *testing.T) {
+	t.Parallel()
+
+	alice, bob, txid := splicedPair(t, 100_000_000, 0)
+
+	htlc, _ := createHTLC(0, lnwire.NewMSatFromSatoshis(100_000))
+	index, err := bob.AddHTLC(htlc, nil)
+	require.NoError(t, err)
+	htlc.ID = index
+	_, err = alice.ReceiveHTLC(htlc)
+	require.NoError(t, err)
+	bCommit, err := bob.SignNextCommitment(ctxb)
+	require.NoError(t, err)
+	require.NoError(t, alice.ReceiveNewCommitmentBatch(
+		bCommit.CommitSigs, bCommit.SpliceSigs,
+	))
+	rev, _, _, err := alice.RevokeCurrentCommitment()
+	require.NoError(t, err)
+
+	err = bob.channelState.UpdateSpliceRecord(txid,
+		func(r *channeldb.SpliceRecord) error {
+			r.LocalCommit.CommitTx.TxOut[0].Value++
+			return nil
+		})
+	require.NoError(t, err)
+	bob, err = restartChannel(bob)
+	require.NoError(t, err)
+	require.Error(t, bob.SpliceRestoreError())
+
+	_, _, err = bob.ReceiveRevocation(rev)
+	require.ErrorIs(t, err, bob.SpliceRestoreError())
+	_, _, _, err = bob.RevokeCurrentCommitment()
+	require.Error(t, err)
+}
