@@ -407,6 +407,12 @@ func (m *Machine) startTimeout() {
 func (m *Machine) handleConstruction(msg lnwire.Message) {
 	a := m.active
 	if a == nil || a.phase != phaseNegotiating || a.session == nil {
+		// Sent before our tx_abort reached the peer: nothing wrong.
+		if m.abortSent {
+			log.Debugf("ChannelID(%v): %T crossed our tx_abort",
+				m.cfg.ChanID, msg)
+			return
+		}
 		m.warnAndDisconnect("%T outside a negotiation", msg)
 		return
 	}

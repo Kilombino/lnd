@@ -601,8 +601,8 @@ func TestAcceptSpliceReplacedEdges(t *testing.T) {
 	})
 
 	// A replacement whose construction breaks (a tx_complete before the
-	// shared input, then a message outside any negotiation): the peer is
-	// dropped, the original stays the splice.
+	// shared input): aborted, the original stays the splice; the peer's
+	// next message, which may have crossed our tx_abort, is ignored.
 	t.Run("a broken construction", func(t *testing.T) {
 		t.Parallel()
 
@@ -613,13 +613,16 @@ func TestAcceptSpliceReplacedEdges(t *testing.T) {
 		replaceAliceSplice(t, h, first, bobKey, 2_600)
 
 		// Alice's construction never starts properly.
-		h.machine.HandleSpliceMessage(&lnwire.TxComplete{
-			ChannelID: h.machine.cfg.ChanID,
-		})
-		h.machine.HandleSpliceMessage(&lnwire.TxComplete{
-			ChannelID: h.machine.cfg.ChanID,
-		})
-		requireDisconnected(t, h)
+		complete := &lnwire.TxComplete{ChannelID: h.machine.cfg.ChanID}
+		h.machine.HandleSpliceMessage(complete)
+		next[*lnwire.TxComplete](t, h)
+		h.machine.HandleSpliceMessage(complete)
+		next[*lnwire.TxAbort](t, h)
+		h.machine.HandleSpliceMessage(complete)
+		time.Sleep(100 * time.Millisecond)
+		h.peer.mu.Lock()
+		require.Nil(t, h.peer.disconnected)
+		h.peer.mu.Unlock()
 		require.Len(t, h.bob.PendingFundings(), 1)
 		h.machine.mu.Lock()
 		a := h.machine.active
@@ -792,4 +795,35 @@ func TestTxAbortWithoutSplice(t *testing.T) {
 	})
 	time.Sleep(500 * time.Millisecond)
 	require.Equal(t, int32(2), aborts.Load())
+}
+
+// TestMessagesCrossingOurAbort checks a construction message or splice_ack
+// the peer sent before our tx_abort reached it: ignored until its echo,
+// rather than taken for a protocol breach and the connection dropped. One
+// with no tx_abort of ours out still is.
+func TestMessagesCrossingOurAbort(t *testing.T) {
+	t.Parallel()
+
+	for _, aborted := range []bool{true, false} {
+		h := newAcceptorHarness(t)
+		if aborted {
+			h.machine.HandleSpliceMessage(&lnwire.TxAbort{
+				ChannelID: h.machine.cfg.ChanID,
+			})
+			next[*lnwire.TxAbort](t, h)
+		}
+		h.machine.HandleSpliceMessage(&lnwire.TxAddOutput{
+			ChannelID: h.machine.cfg.ChanID, SerialID: 2,
+			Amount: 1_000, Script: p2tr(1),
+		})
+		h.machine.HandleSpliceMessage(&lnwire.SpliceAck{
+			ChannelID: h.machine.cfg.ChanID,
+		})
+		time.Sleep(100 * time.Millisecond)
+
+		h.peer.mu.Lock()
+		dropped := h.peer.disconnected != nil
+		h.peer.mu.Unlock()
+		require.Equal(t, !aborted, dropped, "aborted %v", aborted)
+	}
 }

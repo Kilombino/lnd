@@ -459,6 +459,11 @@ func (m *Machine) handleSpliceAck(msg *lnwire.SpliceAck) {
 	if a == nil || a.role != interactivetx.Initiator ||
 		a.phase != phaseNegotiating || a.session != nil {
 
+		if m.abortSent {
+			log.Debugf("ChannelID(%v): splice_ack crossed our "+
+				"tx_abort", m.cfg.ChanID)
+			return
+		}
 		m.warnAndDisconnect("splice_ack without our splice_init")
 		return
 	}
