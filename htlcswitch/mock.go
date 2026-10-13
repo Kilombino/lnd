@@ -162,6 +162,7 @@ type mockServer struct {
 
 	registry         *mockInvoiceRegistry
 	pCache           *mockPreimageCache
+	interceptorMtx   sync.Mutex
 	interceptorFuncs []messageInterceptor
 }
 
@@ -293,7 +294,10 @@ func (s *mockServer) Start() error {
 
 				var shouldSkip bool
 
-				for _, interceptor := range s.interceptorFuncs {
+				s.interceptorMtx.Lock()
+				interceptors := s.interceptorFuncs
+				s.interceptorMtx.Unlock()
+				for _, interceptor := range interceptors {
 					skip, err := interceptor(msg)
 					if err != nil {
 						s.t.Fatalf("%v: error in the "+
@@ -597,6 +601,9 @@ type messageInterceptor func(m lnwire.Message) (bool, error)
 // Record is used to set the function which will be triggered when new
 // lnwire message was received.
 func (s *mockServer) intersect(f messageInterceptor) {
+	s.interceptorMtx.Lock()
+	defer s.interceptorMtx.Unlock()
+
 	s.interceptorFuncs = append(s.interceptorFuncs, f)
 }
 
