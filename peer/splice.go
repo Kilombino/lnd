@@ -3,6 +3,7 @@ package peer
 import (
 	"errors"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/lightningnetwork/lnd/fn/v2"
@@ -94,6 +95,13 @@ type spliceLinkProxy struct {
 
 // link returns the channel's link with its splice methods.
 func (s *spliceLinkProxy) link() (htlcswitch.SpliceLink, error) {
+	// The link is found by the peer's key, so a machine of an ended
+	// connection, still finishing an event, would find the next
+	// connection's link and act on a channel its machine doesn't know.
+	if atomic.LoadInt32(&s.p.disconnect) == 1 {
+		return nil, splice.ErrConnectionGone
+	}
+
 	links, err := s.p.cfg.Switch.GetLinksByInterface(s.p.PubKey())
 	if err != nil {
 		return nil, err

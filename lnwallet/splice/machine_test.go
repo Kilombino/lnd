@@ -55,6 +55,9 @@ type testLink struct {
 	// commitment and never answer.
 	commitAnswerLost bool
 
+	// commitErr, set, is SendSpliceCommitment's answer, nothing sent.
+	commitErr error
+
 	// lockFail, set, has LockSplice fail without locking.
 	lockFail atomic.Bool
 	stfuGate chan struct{}
@@ -106,6 +109,9 @@ func (l *testLink) AddSpliceFunding(f lnwallet.PendingFunding) <-chan error {
 }
 
 func (l *testLink) SendSpliceCommitment(txid chainhash.Hash) <-chan error {
+	if l.commitErr != nil {
+		return done(l.commitErr)
+	}
 	sigs, err := l.ch.SignSpliceCommitment(l.t.Context(), txid)
 	if err != nil {
 		return done(err)

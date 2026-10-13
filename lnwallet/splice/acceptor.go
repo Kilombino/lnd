@@ -594,11 +594,20 @@ func (m *Machine) forgetRecord(txid [32]byte) {
 func (m *Machine) wait(result <-chan error) error {
 	select {
 	case err := <-result:
+		if errors.Is(err, ErrConnectionGone) {
+			return errStopping
+		}
+
 		return err
 	case <-m.quit:
 		return errStopping
 	}
 }
+
+// ErrConnectionGone is what a link step returns when the connection its
+// machine belongs to has ended: the next connection's machine carries on,
+// so, as when stopping, nothing is undone.
+var ErrConnectionGone = errors.New("the connection has ended")
 
 // errStopping is what a link step waited for returns when the machine stops
 // first: the step may well have been done, so nothing is undone; the next

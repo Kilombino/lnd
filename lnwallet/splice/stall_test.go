@@ -592,3 +592,30 @@ func TestSpliceCanceledWhileQuiescing(t *testing.T) {
 		t.Fatal("quiescence never ended after the cancel")
 	}
 }
+
+// TestSpliceConnectionGone checks a link step answering that the machine's
+// connection has ended, as the link of the next connection is refused to an
+// old machine: nothing is undone, the record and our coins left for the
+// next machine.
+func TestSpliceConnectionGone(t *testing.T) {
+	t.Parallel()
+
+	p := newSplicePair(t)
+	p.alice.link.commitErr = ErrConnectionGone
+	p.alice.fund(t, 1, 5_000_000)
+
+	_, err := p.alice.machine.Splice(Request{
+		Direction: DirectionIn, Amount: 1_000_000, FeeRate: 2_500,
+	})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		recs, err := p.alice.ch.State().SpliceRecords()
+		return err == nil && len(recs) == 1
+	}, 5*time.Second, 10*time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
+
+	recs, err := p.alice.ch.State().SpliceRecords()
+	require.NoError(t, err)
+	require.Len(t, recs, 1)
+	require.NotZero(t, p.alice.wallet.leaseCount())
+}
