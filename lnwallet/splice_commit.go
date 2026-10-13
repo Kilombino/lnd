@@ -1234,9 +1234,15 @@ func (lc *LightningChannel) LockPendingFunding(txid chainhash.Hash,
 	lc.obsoleteFundings[previous] = true
 	// The other transactions of the splice the lock retired, as their
 	// records were: their commitments are logged as they are revoked.
+	// The lock is written: unable to read them, the switch in memory is
+	// finished all the same (left half done, the next commitments named
+	// the new funding twice and were signed with the old one's key), and
+	// they are logged from the next start, which reads them again.
 	records, err := lc.channelState.SpliceRecords()
 	if err != nil {
-		return err
+		lc.log.Errorf("Unable to read splices after locking %v, their "+
+			"commitments logged from the next start: %v", txid,
+			err)
 	}
 	retiredRecords := make(map[chainhash.Hash]bool)
 	for _, r := range records {
