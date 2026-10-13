@@ -466,6 +466,29 @@ func (r *SpliceRecord) Txid() chainhash.Hash {
 	return r.OutPoint.Hash
 }
 
+// PeerAtRisk is what of the splice the peer could undo by double-spending
+// its inputs in a reorganisation: the value of the inputs it added, or what
+// it put in if more. A splice that loses its inputs never existed, so a
+// peer adding a large input and taking most of it back as an output risks
+// the channel as much as one putting it all in.
+func (r *SpliceRecord) PeerAtRisk() btcutil.Amount {
+	risk := max(r.RemoteDelta, 0)
+	n := r.Negotiation
+	if n == nil {
+		return risk
+	}
+	var inputs btcutil.Amount
+	for _, in := range n.Inputs {
+		// The initiator's serial ids are even.
+		if in.Shared || (in.SerialID%2 == 0) == n.WeInitiated {
+			continue
+		}
+		inputs += in.Value
+	}
+
+	return max(risk, inputs)
+}
+
 // SpliceCommitWrite is what a commitment chain step writes for one pending
 // splice, in the same transaction as the step.
 type SpliceCommitWrite struct {

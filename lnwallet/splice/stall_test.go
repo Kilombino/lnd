@@ -14,6 +14,7 @@ import (
 	"github.com/lightningnetwork/lnd/fn/v2"
 	"github.com/lightningnetwork/lnd/lntypes"
 	"github.com/lightningnetwork/lnd/lnwallet"
+	"github.com/lightningnetwork/lnd/lnwallet/interactivetx"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/stretchr/testify/require"
 )
@@ -833,4 +834,34 @@ func TestDisownedSpliceDeadDroppedAtReestablish(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return len(h.bob.PendingFundings()) == 0
 	}, 5*time.Second, 10*time.Millisecond)
+}
+
+// TestPeerAtRisk checks the amount the lock depth grows with: the value of
+// the peer's inputs, or what it put in if more, by the negotiation's serial
+// ids from either side.
+func TestPeerAtRisk(t *testing.T) {
+	t.Parallel()
+
+	res := &interactivetx.Result{Inputs: []*interactivetx.Input{
+		{SerialID: 0, Value: 2_000_000, Shared: true},
+		{SerialID: 2, Value: 300_000},
+		{SerialID: 1, Value: 5_000_000},
+	}}
+
+	// Ours: the peer added 5,000,000 and took back all but 10,000.
+	a := &active{
+		role: interactivetx.Initiator, res: res,
+		theirContribution: 10_000,
+	}
+	require.Equal(t, btcutil.Amount(5_000_000), peerAtRisk(a))
+
+	// The peer's: its input is the even one.
+	a.role = interactivetx.Acceptor
+	require.Equal(t, btcutil.Amount(300_000), peerAtRisk(a))
+
+	// Its contribution when more, and never below zero.
+	a.theirContribution = 400_000
+	require.Equal(t, btcutil.Amount(400_000), peerAtRisk(a))
+	a = &active{theirContribution: -1}
+	require.Zero(t, peerAtRisk(a))
 }

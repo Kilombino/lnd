@@ -532,7 +532,7 @@ func (r *rpcServer) addSpliceFields(ch *channeldb.OpenChannel,
 			channel.PendingSplice, r.spliceConfirmations(latest),
 			spliceLockDepth(
 				ch.NumConfsRequired,
-				btcutil.Amount(max(0, int64(latest.RemoteDelta))),
+				latest.PeerAtRisk(),
 				r.cfg.ProtocolOptions.SplicePeerInputConfs,
 			),
 		)
@@ -600,7 +600,7 @@ func (r *rpcServer) peerNotLocked(ch *channeldb.OpenChannel) bool {
 		}
 		depth := spliceLockDepth(
 			ch.NumConfsRequired,
-			btcutil.Amount(max(0, int64(rec.RemoteDelta))),
+			rec.PeerAtRisk(),
 			r.cfg.ProtocolOptions.SplicePeerInputConfs,
 		)
 		if spliceOverdue(r.spliceConfirmations(rec), depth,

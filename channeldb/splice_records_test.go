@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightningnetwork/lnd/keychain"
@@ -490,4 +491,36 @@ func TestRestoreShellMarksSplicing(t *testing.T) {
 		shell,
 	))
 	require.Equal(t, uint32(splicingDBVersion), version(splicedDB))
+}
+
+// TestSplicePeerAtRisk checks what of a splice the peer could undo: its
+// inputs' value, or what it put in if more; never our inputs or the shared
+// one.
+func TestSplicePeerAtRisk(t *testing.T) {
+	t.Parallel()
+
+	inputs := []SpliceInput{
+		{SerialID: 0, Value: 2_000_000, Shared: true},
+		{SerialID: 2, Value: 300_000},
+		{SerialID: 1, Value: 5_000_000},
+		{SerialID: 3, Value: 1_000_000},
+	}
+
+	// The peer started it: its serial ids are even.
+	r := &SpliceRecord{RemoteDelta: 100_000, Negotiation: &SpliceNegotiation{
+		WeInitiated: false, Inputs: inputs,
+	}}
+	require.Equal(t, btcutil.Amount(300_000), r.PeerAtRisk())
+
+	// We started it: the peer's are odd. It took most of them back.
+	r.Negotiation.WeInitiated = true
+	require.Equal(t, btcutil.Amount(6_000_000), r.PeerAtRisk())
+
+	// No inputs of its own: what it put in, never below zero.
+	r.Negotiation.Inputs = inputs[:2]
+	require.Equal(t, btcutil.Amount(100_000), r.PeerAtRisk())
+	r.RemoteDelta = -50_000
+	require.Zero(t, r.PeerAtRisk())
+	r.Negotiation = nil
+	require.Zero(t, r.PeerAtRisk())
 }

@@ -23,6 +23,25 @@ import (
 // the new funding output. Everything here survives restarts: the machine
 // rebuilds the splice in progress from its record.
 
+// peerAtRisk is what of a splice transaction the peer could undo by
+// double-spending its inputs in a reorganisation: the value of the inputs
+// it added, or what it put in if more. The lock depth grows with it.
+func peerAtRisk(a *active) btcutil.Amount {
+	risk := max(a.theirContribution, 0)
+	if a.res == nil {
+		return risk
+	}
+	var inputs btcutil.Amount
+	for _, in := range a.res.Inputs {
+		if in.Shared || ourSerial(a.role, in.SerialID) {
+			continue
+		}
+		inputs += in.Value
+	}
+
+	return max(risk, inputs)
+}
+
 // watchConfirmation waits for the splice to reach our lock depth. Once per
 // splice.
 func (m *Machine) watchConfirmation(heightHint uint32) {
@@ -38,11 +57,7 @@ func (m *Machine) watchConfirmationOf(a *active, heightHint uint32) {
 	heightHint = m.heightHint(heightHint)
 	depth := uint32(6)
 	if m.cfg.Policy.LockDepth != nil {
-		peer := a.theirContribution
-		if peer < 0 {
-			peer = 0
-		}
-		depth = m.cfg.Policy.LockDepth(peer)
+		depth = m.cfg.Policy.LockDepth(peerAtRisk(a))
 	}
 
 	txid := a.txid
