@@ -412,11 +412,12 @@ type Machine struct {
 
 	// reestablished is set once the peer's channel_reestablish has been
 	// handled on this connection: splice_locked may be sent from then on.
-	// lockedTLV is the splice our channel_reestablish named as locked, so
-	// it isn't sent again as a message (a peer takes the TLV for it and
-	// refuses a duplicate). Both under mu.
+	// lockedTold is the splice whose splice_locked the peer has had on
+	// this connection, named by our channel_reestablish or sent, so it
+	// isn't sent again (a peer takes the TLV for it and refuses a
+	// duplicate). Both under mu.
 	reestablished bool
-	lockedTLV     chainhash.Hash
+	lockedTold    chainhash.Hash
 
 	// dead are splices given up on, waiting to leave the wallet.
 	dead map[chainhash.Hash]deadSplice

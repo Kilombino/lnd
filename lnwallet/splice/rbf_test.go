@@ -336,6 +336,31 @@ func TestAcceptSpliceReplaced(t *testing.T) {
 		// The original confirms: the restarted machine follows it.
 		lockOn(t, h, first)
 	})
+
+	// The original confirmed and adopted over its replacement before a
+	// restart, our splice_locked recorded as sent: the restarted machine,
+	// the replacement its splice again, sends it once the original is
+	// deep enough, the peer not having it on this connection.
+	t.Run("after a restart, the one we locked", func(t *testing.T) {
+		t.Parallel()
+
+		h := newAcceptorHarness(t)
+		first, _ := rbfPair(t, h)
+		require.NoError(t, h.bob.State().UpdateSpliceRecord(
+			first.res.Tx.TxHash(),
+			func(r *channeldb.SpliceRecord) error {
+				r.Negotiation.LockedSent = true
+				return nil
+			}))
+
+		restarted := NewMachine(h.machine.cfg)
+		startReestablished(t, restarted)
+		t.Cleanup(restarted.Stop)
+		h.machine.Stop()
+		h.machine = restarted
+
+		lockOn(t, h, first)
+	})
 }
 
 // TestAcceptSpliceReplacementRefused checks the replacements refused: one
