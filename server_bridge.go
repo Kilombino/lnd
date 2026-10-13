@@ -509,16 +509,55 @@ func spendableOutbound(channels []*channeldb.OpenChannel,
 		reserve := lnwire.NewMSatFromSatoshis(
 			channel.LocalChanCfg.ChanReserve,
 		)
-		if channel.LocalCommitment.LocalBalance <= reserve {
+		balance := spliceSafeLocalBalance(channel)
+		if balance <= reserve {
 			continue
 		}
 
-		outbound += uint64(
-			channel.LocalCommitment.LocalBalance - reserve,
-		)
+		outbound += uint64(balance - reserve)
 	}
 
 	return outbound
+}
+
+// spliceSafeLocalBalance is the channel's local balance, or less while a
+// splice that moves funds out of it is pending: until it locks, a payment
+// must fit on every funding, so the least of them is what can be spent. A
+// channel whose splices can't be read counts as empty.
+func spliceSafeLocalBalance(channel *channeldb.OpenChannel) lnwire.MilliSatoshi {
+	balance := channel.LocalCommitment.LocalBalance
+
+	records, err := channel.SpliceRecords()
+	if err != nil {
+		srvrLog.Errorf("ChannelPoint(%v): unable to read pending "+
+			"splices: %v", channel.FundingOutpoint, err)
+
+		return 0
+	}
+
+	return leastLocalBalance(balance, records)
+}
+
+// leastLocalBalance is balance after the largest outflow of any pending
+// splice.
+func leastLocalBalance(balance lnwire.MilliSatoshi,
+	records []*channeldb.SpliceRecord) lnwire.MilliSatoshi {
+
+	least := balance
+	for _, r := range records {
+		if r.LocalDelta >= 0 {
+			continue
+		}
+		out := lnwire.NewMSatFromSatoshis(-r.LocalDelta)
+		if out >= balance {
+			return 0
+		}
+		if balance-out < least {
+			least = balance - out
+		}
+	}
+
+	return least
 }
 
 // deriveSha256Seed is the supervised SHA256 node's seed entropy: HKDF over the

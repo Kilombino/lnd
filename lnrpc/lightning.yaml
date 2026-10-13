@@ -73,6 +73,12 @@ http:
       body: "*"
     - selector: lnrpc.Lightning.CloseChannel
       delete: "/v1/channels/{channel_point.funding_txid_str}/{channel_point.output_index}"
+    - selector: lnrpc.Lightning.EstimateSplice
+      post: "/v1/channels/splice/estimate"
+      body: "*"
+    - selector: lnrpc.Lightning.SpliceChannel
+      post: "/v1/channels/splice"
+      body: "*"
     - selector: lnrpc.Lightning.AbandonChannel
       delete: "/v1/channels/abandon/{channel_point.funding_txid_str}/{channel_point.output_index}"
     - selector: lnrpc.Lightning.AddInvoice

@@ -596,6 +596,81 @@
         ]
       }
     },
+    "/v1/channels/splice": {
+      "post": {
+        "summary": "lncli: `splice in`, `splice out`\nSpliceChannel adds funds from the wallet to an open channel, or moves funds\nout of it to an address, without closing it. The stream reports progress\nuntil the splice locks or ends. Once the transaction is agreed with the\npeer, the splice carries on whether or not the stream is still open.",
+        "operationId": "Lightning_SpliceChannel",
+        "responses": {
+          "200": {
+            "description": "A successful response.(streaming responses)",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "result": {
+                  "$ref": "#/definitions/lnrpcSpliceUpdate"
+                },
+                "error": {
+                  "$ref": "#/definitions/rpcStatus"
+                }
+              },
+              "title": "Stream result of lnrpcSpliceUpdate"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/lnrpcSpliceChannelRequest"
+            }
+          }
+        ],
+        "tags": [
+          "Lightning"
+        ]
+      }
+    },
+    "/v1/channels/splice/estimate": {
+      "post": {
+        "summary": "lncli: `splice estimate`\nEstimateSplice reports what adding funds to, or moving funds out of, an\nopen channel would cost and allow, for a splice this node would start. It\nis purely local: the peer is not contacted and no coins are leased.",
+        "operationId": "Lightning_EstimateSplice",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/lnrpcEstimateSpliceResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/lnrpcEstimateSpliceRequest"
+            }
+          }
+        ],
+        "tags": [
+          "Lightning"
+        ]
+      }
+    },
     "/v1/channels/stream": {
       "post": {
         "summary": "lncli: `openchannel`\nOpenChannel attempts to open a singly funded channel specified in the\nrequest to a remote peer. Users are able to specify a target number of\nblocks that the funding transaction should be confirmed in, or a manual fee\nrate to us for the funding transaction. If neither are specified, then a\nlax block confirmation target is used. Each OpenStatusUpdate will return\nthe pending channel ID of the in-progress channel. Depending on the\narguments specified in the OpenChannelRequest, this pending channel ID can\nthen be used to manually progress the channel funding flow.",
@@ -3020,7 +3095,8 @@
         "PENDING_OPEN_CHANNEL",
         "FULLY_RESOLVED_CHANNEL",
         "CHANNEL_FUNDING_TIMEOUT",
-        "CHANNEL_UPDATE"
+        "CHANNEL_UPDATE",
+        "SPLICE_EVENT"
       ],
       "default": "OPEN_CHANNEL"
     },
@@ -3272,6 +3348,10 @@
         "unified_sigs": {
           "type": "boolean",
           "description": "Whether the channel's bilateral signatures bind to the Bitcoin\nBLAKE2b chain under option_unified_sigs. A build without the\noption cannot sign for such a channel, so a node holding one\nmust not be downgraded to it. False for a closing channel whose\ntype is not known, which commitment_type then reports as\nUNKNOWN_COMMITMENT_TYPE."
+        },
+        "original_channel_point": {
+          "type": "string",
+          "description": "The outpoint the channel was opened with, when a splice moved it:\nchannel_point is then the current funding output."
         }
       }
     },
@@ -4042,6 +4122,27 @@
         "unified_sigs": {
           "type": "boolean",
           "description": "Whether the channel's bilateral signatures bind to the Bitcoin BLAKE2b\nchain under option_unified_sigs. A build without the option cannot\nsign for such a channel, so a node holding one must not be downgraded\nto it."
+        },
+        "splice_status": {
+          "type": "string",
+          "description": "Whether this node can start a splice of the channel now: \"ok\", or why\nnot: \"disabled\" (splicing is off on this node), \"peer_offline\",\n\"peer_unsupported\", \"no_unified_sigs\", \"taproot\", \"zero_conf\", \"pending\"\n(a splice is already in progress), \"closing\", \"funding_spent_unknown\",\n\"peer_not_locked\", \"peer_misbehaved\"; or \"peer_not_announcing\", which\ndoesn't stop a splice (the peer never sent its half of the last one's\nannouncement). New values may be added; treat an unknown one as \"not\nnow\"."
+        },
+        "pending_splice": {
+          "$ref": "#/definitions/lnrpcPendingSplice",
+          "description": "The splice in progress, if any."
+        },
+        "last_splice": {
+          "$ref": "#/definitions/lnrpcLastSplice",
+          "description": "The most recent splice that ended, if any."
+        },
+        "original_channel_point": {
+          "type": "string",
+          "description": "The outpoint the channel was opened with. channel_point is the funding\noutput on chain now, which a splice moves; this one stays, and lookups by\nchannel point accept either."
+        },
+        "original_chan_id": {
+          "type": "string",
+          "format": "uint64",
+          "description": "The short channel id the channel was opened with. chan_id is the one the\nchannel goes by now, which a splice changes; forwarding records keep this\none. Payments naming either reach the channel."
         }
       }
     },
@@ -4277,6 +4378,16 @@
           "type": "string",
           "format": "byte",
           "description": "Custom channel data that might be populated if there are custom channels\npresent."
+        },
+        "pending_splice_in_sat": {
+          "type": "string",
+          "format": "int64",
+          "description": "This node's contributions to splices whose transaction went out and that\nhave not locked: in the channel once they do, counted in no other\nbalance here until then. Before the transaction goes out the wallet\nstill counts the coins it spends."
+        },
+        "pending_splice_to_wallet_sat": {
+          "type": "string",
+          "format": "int64",
+          "description": "Outputs to this node's wallet in splice transactions that went out and\nare not yet confirmed: part of the wallet's unconfirmed balance."
         }
       }
     },
@@ -4360,6 +4471,10 @@
           "type": "string",
           "format": "byte",
           "description": "The TLV encoded custom channel data records for this output, which might\nbe set for custom channels."
+        },
+        "original_channel_point": {
+          "type": "string",
+          "description": "The outpoint the channel was opened with, when a splice moved it:\nchannel_point is then the funding output that was closed."
         }
       }
     },
@@ -4532,6 +4647,9 @@
         },
         "updated_channel": {
           "$ref": "#/definitions/lnrpcChannelCommitUpdate"
+        },
+        "splice_event": {
+          "$ref": "#/definitions/lnrpcSpliceEvent"
         },
         "type": {
           "$ref": "#/definitions/ChannelEventUpdateUpdateType"
@@ -4972,6 +5090,119 @@
             "$ref": "#/definitions/lnrpcOutPoint"
           },
           "description": "A list of selected inputs for the transaction the estimate is for."
+        }
+      }
+    },
+    "lnrpcEstimateSpliceRequest": {
+      "type": "object",
+      "properties": {
+        "channel_point": {
+          "$ref": "#/definitions/lnrpcChannelPoint",
+          "description": "The channel, by its current or original channel point."
+        },
+        "direction": {
+          "$ref": "#/definitions/lnrpcSpliceDirection",
+          "description": "Which way the funds move."
+        },
+        "amount_sat": {
+          "type": "string",
+          "format": "int64",
+          "description": "The amount to add or move out. Ignored with use_max."
+        },
+        "use_max": {
+          "type": "boolean",
+          "description": "Add everything the wallet can spend after the fee, or move out everything\nthis node's balance allows after the fee and reserves."
+        },
+        "sat_per_vbyte": {
+          "type": "string",
+          "format": "uint64",
+          "description": "The fee rate. Zero: from target_conf."
+        },
+        "target_conf": {
+          "type": "integer",
+          "format": "int32",
+          "description": "The confirmation target for the fee rate. Zero with no rate: 6."
+        },
+        "addr": {
+          "type": "string",
+          "description": "For SPLICE_OUT, the address the funds go to. Empty: a new address of this\nnode's wallet."
+        }
+      }
+    },
+    "lnrpcEstimateSpliceResponse": {
+      "type": "object",
+      "properties": {
+        "fee_sat": {
+          "type": "string",
+          "format": "int64",
+          "description": "The splice transaction's fee, all of it paid by this node."
+        },
+        "vbytes": {
+          "type": "string",
+          "format": "int64",
+          "description": "The splice transaction's size, for working out fees at other rates."
+        },
+        "sat_per_vbyte": {
+          "type": "string",
+          "format": "uint64",
+          "description": "The fee rate used."
+        },
+        "amount_sat": {
+          "type": "string",
+          "format": "int64",
+          "description": "The amount used: the one asked for, or the maximum."
+        },
+        "min_sat": {
+          "type": "string",
+          "format": "int64",
+          "description": "The smallest amount accepted."
+        },
+        "max_in_sat": {
+          "type": "string",
+          "format": "int64",
+          "description": "The most that can be added from the wallet at this fee rate."
+        },
+        "max_out_sat": {
+          "type": "string",
+          "format": "int64",
+          "description": "The most that can be moved out at this fee rate."
+        },
+        "min_sat_per_vbyte": {
+          "type": "string",
+          "format": "uint64",
+          "description": "The lowest fee rate accepted without forcing it."
+        },
+        "fee_estimate_source": {
+          "type": "string",
+          "description": "What min_sat_per_vbyte is based on: \"estimate\", or \"relay_minimum\" when\nthe backend has no fee estimate."
+        },
+        "anchor_reserve_sat": {
+          "type": "string",
+          "format": "int64",
+          "description": "The wallet balance kept back for fee bumping of anchor channels."
+        },
+        "new_capacity_sat": {
+          "type": "string",
+          "format": "int64",
+          "description": "The channel's capacity after the splice."
+        },
+        "new_local_sat": {
+          "type": "string",
+          "format": "int64",
+          "description": "This node's balance in the channel after the splice."
+        },
+        "lock_depth": {
+          "type": "integer",
+          "format": "int64",
+          "description": "The confirmations at which the splice would lock."
+        },
+        "destination_is_ours": {
+          "type": "boolean",
+          "description": "Whether the destination belongs to this node's default wallet account."
+        },
+        "refusal_code": {
+          "type": "string",
+          "description": "Empty when the splice is possible; otherwise why not: \"insufficient_funds\",\n\"immature_inputs\", \"below_min\", \"above_max_out\", \"fee_below_floor\",\n\"reserve_on_change\", \"close_address_set\", \"node_cap\", or one of\nChannel.splice_status's values."
         }
       }
     },
@@ -6041,6 +6272,47 @@
         }
       }
     },
+    "lnrpcLastSplice": {
+      "type": "object",
+      "properties": {
+        "initiator": {
+          "$ref": "#/definitions/lnrpcInitiator",
+          "description": "Which side started the splice."
+        },
+        "local_delta_sat": {
+          "type": "string",
+          "format": "int64",
+          "description": "The change to this node's balance in the channel, in satoshis."
+        },
+        "remote_delta_sat": {
+          "type": "string",
+          "format": "int64",
+          "description": "The change to the peer's balance in the channel, in satoshis."
+        },
+        "txid": {
+          "type": "string",
+          "description": "The splice transaction's id, if one was agreed."
+        },
+        "time": {
+          "type": "string",
+          "format": "int64",
+          "description": "When the splice locked or ended, in Unix seconds."
+        },
+        "outcome": {
+          "type": "string",
+          "description": "How it ended: \"locked\", \"aborted\", \"dead\"."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Why it did not lock: one of this node's refusal codes, or the peer's\nreason (printable ASCII, at most 160 bytes, from the peer: show it as\nthe peer's words)."
+        },
+        "reason_from_peer": {
+          "type": "boolean",
+          "description": "Whether reason is the peer's text rather than a refusal code."
+        }
+      },
+      "description": "The most recent splice of a channel that ended."
+    },
     "lnrpcLightningAddress": {
       "type": "object",
       "properties": {
@@ -7081,6 +7353,93 @@
         }
       }
     },
+    "lnrpcPendingSplice": {
+      "type": "object",
+      "properties": {
+        "initiator": {
+          "$ref": "#/definitions/lnrpcInitiator",
+          "description": "Which side started the splice."
+        },
+        "state": {
+          "type": "string",
+          "description": "The splice's state: \"preparing\", \"negotiating\", \"signed\", \"broadcast\",\n\"confirmed\" (at least one confirmation, waiting for the lock depth)."
+        },
+        "local_delta_sat": {
+          "type": "string",
+          "format": "int64",
+          "description": "The change to this node's balance in the channel, in satoshis."
+        },
+        "remote_delta_sat": {
+          "type": "string",
+          "format": "int64",
+          "description": "The change to the peer's balance in the channel, in satoshis."
+        },
+        "fee_sat": {
+          "type": "string",
+          "format": "int64",
+          "description": "The splice transaction's fee."
+        },
+        "our_fee_sat": {
+          "type": "string",
+          "format": "int64",
+          "description": "The part of the fee this node pays."
+        },
+        "sat_per_vbyte": {
+          "type": "string",
+          "format": "uint64",
+          "description": "The splice transaction's fee rate."
+        },
+        "txid": {
+          "type": "string",
+          "description": "The splice transaction's id, once known."
+        },
+        "broadcast_height": {
+          "type": "integer",
+          "format": "int64",
+          "description": "The height at which this node first broadcast it."
+        },
+        "confirmations": {
+          "type": "integer",
+          "format": "int64",
+          "description": "The splice transaction's confirmations."
+        },
+        "lock_depth": {
+          "type": "integer",
+          "format": "int64",
+          "description": "The confirmations at which the splice locks."
+        },
+        "we_locked": {
+          "type": "boolean",
+          "description": "Whether this node has sent splice_locked."
+        },
+        "peer_locked": {
+          "type": "boolean",
+          "description": "Whether the peer has sent splice_locked."
+        },
+        "dead": {
+          "type": "boolean",
+          "description": "Whether the splice can no longer confirm: one of its inputs was spent by\nanother transaction, now buried. The channel keeps working on its\nprevious funding output."
+        },
+        "relay_status": {
+          "type": "string",
+          "description": "What is known of the transaction's relay: \"in_mempool\", \"rejected\" (see\nrelay_reason), \"unknown\"."
+        },
+        "relay_reason": {
+          "type": "string",
+          "description": "The backend's reason when relay_status is \"rejected\"."
+        },
+        "new_channel_point": {
+          "type": "string",
+          "description": "The funding outpoint the splice moves the channel to."
+        },
+        "new_capacity_sat": {
+          "type": "string",
+          "format": "int64",
+          "description": "The channel's capacity once the splice locks."
+        }
+      },
+      "description": "A splice that has started and not yet locked or ended."
+    },
     "lnrpcPendingUpdate": {
       "type": "object",
       "properties": {
@@ -7695,6 +8054,115 @@
         "signature": {
           "type": "string",
           "title": "The signature for the given message"
+        }
+      }
+    },
+    "lnrpcSpliceChannelRequest": {
+      "type": "object",
+      "properties": {
+        "channel_point": {
+          "$ref": "#/definitions/lnrpcChannelPoint",
+          "description": "The channel, by its current or original channel point."
+        },
+        "direction": {
+          "$ref": "#/definitions/lnrpcSpliceDirection",
+          "description": "Which way the funds move."
+        },
+        "amount_sat": {
+          "type": "string",
+          "format": "int64",
+          "description": "The amount to add or move out. Ignored with use_max."
+        },
+        "use_max": {
+          "type": "boolean",
+          "description": "As in EstimateSpliceRequest."
+        },
+        "sat_per_vbyte": {
+          "type": "string",
+          "format": "uint64",
+          "description": "The fee rate. Zero: from target_conf."
+        },
+        "target_conf": {
+          "type": "integer",
+          "format": "int32",
+          "description": "The confirmation target for the fee rate. Zero with no rate: 6."
+        },
+        "addr": {
+          "type": "string",
+          "description": "For SPLICE_OUT, the address the funds go to. Empty: a new address of this\nnode's wallet."
+        },
+        "force_low_fee": {
+          "type": "boolean",
+          "description": "Accept a fee rate below min_sat_per_vbyte. Never below the minimum relay\nfee."
+        }
+      }
+    },
+    "lnrpcSpliceDirection": {
+      "type": "string",
+      "enum": [
+        "SPLICE_IN",
+        "SPLICE_OUT"
+      ],
+      "default": "SPLICE_IN",
+      "description": " - SPLICE_IN: Add funds from this node's wallet to the channel.\n - SPLICE_OUT: Move funds out of the channel to an address."
+    },
+    "lnrpcSpliceEvent": {
+      "type": "object",
+      "properties": {
+        "channel_point": {
+          "type": "string",
+          "description": "The channel's current funding outpoint."
+        },
+        "original_channel_point": {
+          "type": "string",
+          "description": "The outpoint the channel was opened with."
+        },
+        "kind": {
+          "type": "string",
+          "description": "What happened: \"started\", \"signed\", \"locked\", \"aborted\", \"dead\",\n\"funding_spent_unknown\"."
+        },
+        "txid": {
+          "type": "string",
+          "description": "The splice transaction's id, when there is one."
+        },
+        "reason": {
+          "type": "string",
+          "description": "For \"aborted\": a refusal code, or the peer's reason."
+        },
+        "reason_from_peer": {
+          "type": "boolean",
+          "description": "Whether reason is the peer's text rather than a refusal code."
+        }
+      },
+      "description": "A splice of a channel moved on, or a channel's funding output was spent by a\ntransaction this node doesn't recognise."
+    },
+    "lnrpcSpliceUpdate": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "type": "string",
+          "description": "The splice's state: \"preparing\", \"negotiating\", \"signed\", \"broadcast\",\n\"confirmed\", \"locked\", \"aborted\"."
+        },
+        "txid": {
+          "type": "string",
+          "description": "The splice transaction's id, from \"signed\" on."
+        },
+        "new_channel_point": {
+          "type": "string",
+          "description": "The funding outpoint the splice moves the channel to, from \"signed\" on."
+        },
+        "confirmations": {
+          "type": "integer",
+          "format": "int64",
+          "description": "Confirmations, from \"confirmed\" on."
+        },
+        "reason": {
+          "type": "string",
+          "description": "For \"aborted\": a refusal code, or the peer's reason."
+        },
+        "reason_from_peer": {
+          "type": "boolean",
+          "description": "Whether reason is the peer's text rather than a refusal code."
         }
       }
     },

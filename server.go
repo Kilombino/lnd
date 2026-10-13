@@ -68,6 +68,7 @@ import (
 	chcl "github.com/lightningnetwork/lnd/lnwallet/chancloser"
 	"github.com/lightningnetwork/lnd/lnwallet/chanfunding"
 	"github.com/lightningnetwork/lnd/lnwallet/rpcwallet"
+	"github.com/lightningnetwork/lnd/lnwallet/splice"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/nat"
 	"github.com/lightningnetwork/lnd/netann"
@@ -436,6 +437,16 @@ type server struct {
 	// channelNotifier to be notified of newly opened and closed channels.
 	chanSubSwapper *chanbackup.SubSwapper
 
+	// spliceGraph keeps what the graph and the switch need of the
+	// channels' splices.
+	spliceGraph *spliceGraph
+
+	// spliceLimits bounds the splices peers start, across the node.
+	spliceLimits *splice.Limits
+
+	// spliceEdgeMu serialises moving spliced channels' graph edges.
+	spliceEdgeMu sync.Mutex
+
 	// chanEventStore tracks the behaviour of channels and their remote peers to
 	// provide insights into their health and performance.
 	chanEventStore *chanfitness.ChannelEventStore
@@ -778,7 +789,9 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 		NoExperimentalAccountability: cfg.ProtocolOptions.NoExpAccountability(),
 		NoQuiescence:                 cfg.ProtocolOptions.NoQuiescence(),
 		NoRbfCoopClose:               !cfg.ProtocolOptions.RbfCoopClose,
-		NoUnifiedSigs:                !input.UnifiedSigHash(),
+		Splice: cfg.ProtocolOptions.Splice() ||
+			pendingSplices(dbs.ChanStateDB.ChannelStateDB()),
+		NoUnifiedSigs: !input.UnifiedSigHash(),
 	})
 	if err != nil {
 		return nil, err
@@ -809,6 +822,8 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 		graphDB:        dbs.GraphDB,
 		v1Graph:        v1Graph,
 		chanStateDB:    dbs.ChanStateDB.ChannelStateDB(),
+		spliceGraph:    newSpliceGraph(dbs.ChanStateDB.ChannelStateDB()),
+		spliceLimits:   splice.NewLimits(),
 		addrSource:     addrSource,
 		miscDB:         dbs.ChanStateDB,
 		invoicesDB:     dbs.InvoiceDB,
@@ -1107,7 +1122,10 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 		IsChannelActive:          s.htlcSwitch.HasActiveLink,
 		ApplyChannelUpdate:       s.applyChannelUpdate,
 		DB:                       s.chanStateDB,
-		Graph:                    dbs.GraphDB,
+		Graph: &spliceAwareGraph{
+			ChannelGraph: dbs.GraphDB,
+			db:           s.chanStateDB,
+		},
 	}
 
 	chanStatusMgr, err := netann.NewChanStatusManager(chanStatusMgrCfg)
@@ -1285,6 +1303,7 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 		AssumeChannelValid:  cfg.Routing.AssumeChannelValid,
 		StrictZombiePruning: strictPruning,
 		IsAlias:             aliasmgr.IsAlias,
+		OwnSplice:           s.spliceGraph.ownSplice,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("can't create graph builder: %w", err)
@@ -1367,7 +1386,7 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 		ChannelUpdateInterval:   cfg.Gossip.ChannelUpdateInterval,
 		IsAlias:                 aliasmgr.IsAlias,
 		SignAliasUpdate:         s.signAliasUpdate,
-		FindBaseByAlias:         s.aliasMgr.FindBaseSCID,
+		FindBaseByAlias:         s.findBaseByAlias,
 		GetAlias:                s.aliasMgr.GetPeerAlias,
 		FindChannel:             s.findChannel,
 		IsStillZombieChannel:    s.graphBuilder.IsZombieChannel,
@@ -1423,7 +1442,7 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 			)
 		},
 		PropagateChanPolicyUpdate: s.authGossiper.PropagateChanPolicyUpdate,
-		UpdateForwardingPolicies:  s.htlcSwitch.UpdateForwardingPolicies,
+		UpdateForwardingPolicies:  s.updateForwardingPolicies,
 		FetchChannel:              s.chanStateDB.FetchChannel,
 		AddEdge: func(ctx context.Context,
 			edge *models.ChannelEdgeInfo) error {
@@ -1581,7 +1600,8 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 			s.htlcSwitch.RemoveLink(chanID)
 			return nil
 		},
-		IsOurAddress: cc.Wallet.IsOurAddress,
+		NotifyFundingSpentUnknown: s.notifyFundingSpentUnknown,
+		IsOurAddress:              cc.Wallet.IsOurAddress,
 		ContractBreach: func(chanPoint wire.OutPoint,
 			breachRet *lnwallet.BreachRetribution) error {
 
@@ -1917,6 +1937,7 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 	chanNotifier := &channelNotifier{
 		chanNotifier: s.channelNotifier,
 		addrs:        s.addrSource,
+		chanDB:       s.chanStateDB,
 	}
 	backupFile := chanbackup.NewMultiFile(
 		cfg.BackupFilePath, cfg.NoBackupArchive,
@@ -1983,9 +2004,12 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 		// buildBreachRetribution is a call-back that can be used to
 		// query the BreachRetribution info and channel type given a
 		// channel ID and commitment height.
-		buildBreachRetribution := func(chanID lnwire.ChannelID,
-			commitHeight uint64) (*lnwallet.BreachRetribution,
-			channeldb.ChannelType, error) {
+		// With a splice txid, the commitment on that splice's funding
+		// output; without, the one in the channel's own log.
+		buildSpliceBreachRetribution := func(chanID lnwire.ChannelID,
+			commitHeight uint64, spliceTxid chainhash.Hash) (
+			*lnwallet.BreachRetribution, channeldb.ChannelType,
+			error) {
 
 			channel, err := s.chanStateDB.FetchChannelByID(
 				nil, chanID,
@@ -1994,8 +2018,8 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 				return nil, 0, err
 			}
 
-			br, err := lnwallet.NewBreachRetribution(
-				channel, commitHeight, 0, nil,
+			br, err := lnwallet.NewTowerBreachRetribution(
+				channel, commitHeight, spliceTxid,
 				implCfg.AuxLeafStore,
 				implCfg.AuxContractResolver,
 			)
@@ -2004,6 +2028,26 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 			}
 
 			return br, channel.ChanType, nil
+		}
+		buildBreachRetribution := func(chanID lnwire.ChannelID,
+			commitHeight uint64) (*lnwallet.BreachRetribution,
+			channeldb.ChannelType, error) {
+
+			return buildSpliceBreachRetribution(
+				chanID, commitHeight, chainhash.Hash{},
+			)
+		}
+		fetchSpliceRevocations := func(chanID lnwire.ChannelID,
+			commitHeight uint64) ([]chainhash.Hash, error) {
+
+			channel, err := s.chanStateDB.FetchChannelByID(
+				nil, chanID,
+			)
+			if err != nil {
+				return nil, err
+			}
+
+			return channel.SpliceRevocationsAt(commitHeight)
 		}
 
 		fetchClosedChannel := s.chanStateDB.FetchClosedChannelForID
@@ -2028,10 +2072,12 @@ func newServer(ctx context.Context, cfg *Config, listenAddrs []net.Addr,
 		)
 
 		s.towerClientMgr, err = wtclient.NewManager(&wtclient.Config{
-			FetchClosedChannel:     fetchClosedChannel,
-			BuildBreachRetribution: buildBreachRetribution,
-			SessionCloseRange:      cfg.WtClient.SessionCloseRange,
-			ChainNotifier:          s.cc.ChainNotifier,
+			FetchClosedChannel:           fetchClosedChannel,
+			BuildBreachRetribution:       buildBreachRetribution,
+			BuildSpliceBreachRetribution: buildSpliceBreachRetribution,
+			FetchSpliceRevocations:       fetchSpliceRevocations,
+			SessionCloseRange:            cfg.WtClient.SessionCloseRange,
+			ChainNotifier:                s.cc.ChainNotifier,
 			SubscribeChannelEvents: func() (subscribe.Subscription,
 				error) {
 
@@ -2591,6 +2637,13 @@ func (s *server) Start(ctx context.Context) error {
 			return
 		}
 
+		// Coins a forgotten splice leased go back to the wallet before
+		// any peer connects.
+		if err := s.releaseForgottenSpliceLeases(); err != nil {
+			srvrLog.Errorf("Unable to release splice leases: %v",
+				err)
+		}
+
 		// htlcSwitch must be started before chainArb since the latter
 		// relies on htlcSwitch to deliver resolution message upon
 		// start.
@@ -2642,6 +2695,14 @@ func (s *server) Start(ctx context.Context) error {
 			startErr = err
 			return
 		}
+
+		// Graph edges of channels whose splice locked as the node
+		// stopped, moved now the gossiper runs.
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			s.reconcileSpliceEdges()
+		}()
 
 		cleanup = cleanup.add(s.invoices.Stop)
 		if err := s.invoices.Start(); err != nil {
@@ -4821,15 +4882,19 @@ func (s *server) peerConnected(conn net.Conn, connReq *connmgr.ConnReq,
 		DisallowRouteBlinding:  s.cfg.ProtocolOptions.NoRouteBlinding(),
 		DisallowQuiescence:     s.cfg.ProtocolOptions.NoQuiescence(),
 		QuiescenceTimeout:      s.cfg.Htlcswitch.QuiescenceTimeout,
-		MaxFeeExposure:         thresholdMSats,
-		Quit:                   s.quit,
-		AuxLeafStore:           s.implCfg.AuxLeafStore,
-		AuxSigner:              s.implCfg.AuxSigner,
-		MsgRouter:              s.implCfg.MsgRouter,
-		AuxChanCloser:          s.implCfg.AuxChanCloser,
-		AuxResolver:            s.implCfg.AuxContractResolver,
-		AuxTrafficShaper:       s.implCfg.TrafficShaper,
-		AuxChannelNegotiator:   s.implCfg.AuxChannelNegotiator,
+		SpliceEnabled: s.featureMgr.Get(feature.SetInit).HasFeature(
+			lnwire.SpliceOptional,
+		),
+		SpliceMachine:        s.newSpliceMachine,
+		MaxFeeExposure:       thresholdMSats,
+		Quit:                 s.quit,
+		AuxLeafStore:         s.implCfg.AuxLeafStore,
+		AuxSigner:            s.implCfg.AuxSigner,
+		MsgRouter:            s.implCfg.MsgRouter,
+		AuxChanCloser:        s.implCfg.AuxChanCloser,
+		AuxResolver:          s.implCfg.AuxContractResolver,
+		AuxTrafficShaper:     s.implCfg.TrafficShaper,
+		AuxChannelNegotiator: s.implCfg.AuxChannelNegotiator,
 		ShouldFwdExpAccountability: func() bool {
 			return !s.cfg.ProtocolOptions.NoExpAccountability()
 		},
@@ -5626,6 +5691,14 @@ func (s *server) fetchLastChanUpdate() func(lnwire.ShortChannelID) (
 	ourPubKey := s.identityECDH.PubKey().SerializeCompressed()
 	return func(cid lnwire.ShortChannelID) (*lnwire.ChannelUpdate1, error) {
 		info, edge1, edge2, err := s.graphBuilder.GetChannelByID(cid)
+
+		// A splice moved the channel's edge to its own scid.
+		if errors.Is(err, graphdb.ErrEdgeNotFound) {
+			if latest, ok := s.spliceGraph.latestScid(cid); ok {
+				info, edge1, edge2, err = s.graphBuilder.
+					GetChannelByID(latest)
+			}
+		}
 		if err != nil {
 			return nil, err
 		}

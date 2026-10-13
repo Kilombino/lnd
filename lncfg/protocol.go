@@ -39,6 +39,16 @@ type ProtocolOptions struct {
 	// the new experimental RBF coop close feature.
 	RbfCoopClose bool `long:"rbf-coop-close" description:"if set, then lnd will signal that it supports the new RBF based coop close protocol"`
 
+	// SpliceOption should be set to allow splicing: adding funds to or
+	// taking them out of a channel without closing it, started by this
+	// node or by its peers.
+	SpliceOption bool `long:"splice" description:"if set, then lnd will allow channels to be spliced (funds added or taken out without closing), by this node or its peers; needs quiescence; once set, releases without splicing can no longer open the channel database"`
+
+	// SplicePeerInputConfs is how many confirmations a splice the peer put
+	// coins into must have before the peer may spend them through us: a
+	// reorganisation could take them back after we paid out.
+	SplicePeerInputConfs uint32 `long:"splice-peer-input-confs" description:"the confirmations a splice the peer put coins into needs before HTLCs from the peer may spend them, failed back until then; the splice also locks deeper, up to this, the more the peer put in (0: neither)"`
+
 	// NoAnchors should be set if we don't want to support opening or accepting
 	// channels having the anchor commitment type.
 	NoAnchors bool `long:"no-anchors" description:"disable support for anchor commitments"`
@@ -226,4 +236,9 @@ func (p ProtocolOptions) CustomFeatures() map[feature.Set][]lnwire.FeatureBit {
 	setFeatures(feature.SetInvoice, p.CustomInvoice)
 
 	return customFeatures
+}
+
+// Splice returns true if splicing is allowed.
+func (l *ProtocolOptions) Splice() bool {
+	return l.SpliceOption
 }

@@ -184,6 +184,13 @@ type ChannelUpdateHandler interface {
 	// quiescence is a holdover until we have downstream protocols that use
 	// it.
 	InitStfu() <-chan fn.Result[lntypes.ChannelParty]
+
+	// ResumeQuiescence ends quiescence on this link: the protocol that
+	// needed the channel paused (a splice, once tx_signatures have been
+	// exchanged or the negotiation aborted) is done with it. Updates held
+	// back while quiescent are processed and owed commitments are signed.
+	// The returned channel receives once that has happened.
+	ResumeQuiescence() <-chan error
 }
 
 // CommitHookID is a value that is used to uniquely identify hooks in the

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightningnetwork/lnd/batch"
 	"github.com/lightningnetwork/lnd/chainntnfs"
@@ -108,6 +109,12 @@ type Config struct {
 	// IsAlias returns whether a passed ShortChannelID is an alias. This is
 	// only used for our local channels.
 	IsAlias func(scid lnwire.ShortChannelID) bool
+
+	// OwnSplice returns, for a splice of one of our channels, the
+	// channel's funding output it spends: that spend moves the channel,
+	// whose edge is moved when the splice locks, rather than closing it.
+	// The splice's other inputs are spent as usual. Nil for none.
+	OwnSplice func(txid chainhash.Hash) (wire.OutPoint, bool)
 }
 
 // Builder builds and maintains a view of the Lightning Network graph.
@@ -445,6 +452,9 @@ func (b *Builder) syncGraphWithChain() error {
 		// outpoints within each tx and input.
 		for _, tx := range filterBlock.Transactions {
 			for _, txIn := range tx.TxIn {
+				if b.keepsSpent(tx, txIn.PreviousOutPoint) {
+					continue
+				}
 				spentOutputs = append(spentOutputs,
 					&txIn.PreviousOutPoint)
 			}
@@ -900,6 +910,9 @@ func (b *Builder) updateGraphWithClosedChannels(
 	var spentOutputs []*wire.OutPoint
 	for _, tx := range chainUpdate.Transactions {
 		for _, txIn := range tx.TxIn {
+			if b.keepsSpent(tx, txIn.PreviousOutPoint) {
+				continue
+			}
 			spentOutputs = append(spentOutputs,
 				&txIn.PreviousOutPoint)
 		}
@@ -1480,4 +1493,21 @@ func (b *Builder) MarkEdgeLive(v lnwire.GossipVersion,
 	return b.cfg.Graph.MarkEdgeLive(
 		context.TODO(), v, chanID.ToUint64(),
 	)
+}
+
+// keepsSpent reports whether tx's spend of op leaves op's channel in the
+// graph: tx is a splice of one of our channels and op its funding output.
+func (b *Builder) keepsSpent(tx *wire.MsgTx, op wire.OutPoint) bool {
+	if b.cfg.OwnSplice == nil {
+		return false
+	}
+	funding, ok := b.cfg.OwnSplice(tx.TxHash())
+	if !ok || funding != op {
+		return false
+	}
+
+	log.Infof("Keeping channel %v, spent by our splice %v", op,
+		tx.TxHash())
+
+	return true
 }

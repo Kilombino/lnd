@@ -642,6 +642,11 @@ func (s *mockServer) readHandler(message lnwire.Message) error {
 		targetChan = msg.ChanID
 	case *lnwire.Stfu:
 		targetChan = msg.ChanID
+
+	// The splice messages, routed by channel as the peer does.
+	case lnwire.LinkUpdater:
+		targetChan = msg.TargetChanID()
+
 	default:
 		return fmt.Errorf("unknown message type: %T", msg)
 	}
@@ -965,6 +970,13 @@ func (f *mockChannelLink) OnFlushedOnce(func()) {
 func (f *mockChannelLink) OnCommitOnce(LinkDirection, func()) {
 	// TODO(proofofkeags): Implement
 }
+func (f *mockChannelLink) ResumeQuiescence() <-chan error {
+	c := make(chan error, 1)
+	c <- nil
+
+	return c
+}
+
 func (f *mockChannelLink) InitStfu() <-chan fn.Result[lntypes.ChannelParty] {
 	// TODO(proofofkeags): Implement
 	c := make(chan fn.Result[lntypes.ChannelParty], 1)

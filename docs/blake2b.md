@@ -354,6 +354,14 @@ for what the watch-only node asks: its own `FundPsbt`, `SignPsbt` and
 chain. Keep a remote signer for signing only, and spend from the watch-only
 node, whose sends opt in before they reach the signer.
 
+A splice works with a remote signer the same way: the watch-only node asks for
+the shared input's signature with the `0x21` hash type, compares the hash type
+it gets back, and checks the signature against that digest before its
+`tx_signatures` leave, since after that the splice can't be dropped. A
+signer that applies a policy to what it signs (rather than signing what the
+watch-only node asks) has no rules for splices, and would need them before
+it can take part in one.
+
 Two things stay as they were. Bare and P2SH inputs, which the wallet never
 hands out addresses for, are signed with `SIGHASH_ALL`: the legacy signer
 has no way to opt in, and a legacy digest with the bit appended is what
@@ -441,6 +449,95 @@ spendable at the relay depth, when it counts in the wallet's balances again.
 Releases up to `0.21.3-beta-blake2b.12` offered such a coin after 100
 confirmations. A send or channel open built from it was refused by the first
 node it reached; nothing was lost, the operation failed.
+
+## Resizing channels (splicing)
+
+A channel can take more funds from the wallet, or give some of its balance
+back, without closing: the funding output is spent by a splice transaction
+that creates the channel's new one, and the channel keeps working while it
+confirms. This follows BOLT 2's splicing (feature bits 62/63), the same
+protocol the Core Lightning port speaks.
+
+It is off by default. `protocol.splice=true` turns it on; the dashboard's
+**Resize Channels** setting and StartOS's **Channel Settings** write it.
+Turning it on raises the channel database to a version that releases
+without splicing refuse to open, at the first start with it, so a node
+that has run with splicing can't go back to an older version. Turning it
+off again stops new splices; one already in progress finishes first.
+
+What a splice needs:
+
+- The peer supports splicing too, and is online.
+- The channel has chain-bound signatures (`option_unified_sigs`). Taproot
+  channels, and channels usable before their first confirmation, can't be
+  spliced.
+- The node is caught up with the chain.
+
+From the command line:
+
+```sh
+lncli splice estimate in --chan_point=<txid:index> --amt=<sats>
+lncli splice in  --chan_point=<txid:index> --amt=<sats> [--sat_per_vbyte=N]
+lncli splice out --chan_point=<txid:index> --amt=<sats> [--addr=<address>]
+```
+
+`--max` takes what the wallet can spend, or what the channel lets go,
+after the fee. Without `--addr` funds moved out go to a new address of
+the wallet; a channel opened with a close address only moves funds there.
+The amount moved out is what arrives; the fee comes from this node's side
+of the channel. `lncli listchannels` shows a splice in progress as
+`pending_splice` (its state, confirmations and lock depth, the relay
+status), and the last one that ended as `last_splice`.
+
+**When it counts.** Both nodes send `splice_locked` at their lock depth:
+six confirmations here, or the channel's own if larger; for coins the
+peer put in, deeper, up to the depth of the hold on them below (36 by
+default), the more the peer put in. From then on the
+channel is on the new funding output. The old one stays watched for 144
+blocks in case of a reorganisation.
+
+**Coins the peer put in.** A peer that adds its own coins could spend
+them through this node once the splice locks and then reorganise the
+chain to double-spend its inputs. Until such a splice has 36
+confirmations (`protocol.splice-peer-input-confs`), HTLCs from the peer
+that would draw on those coins are failed back with
+`temporary_channel_failure`. Payments to the peer, and the peer's other
+funds, are unaffected.
+
+**Replacements.** The peer may replace a pending splice, its own or one
+this node started, with a transaction paying at least as much in fees
+(`tx_init_rbf`); the Core Lightning port does so when its user splices
+while one is pending. This node takes part: adding nothing to the peer's
+splice, and to its own the same coins, or the same amount to the same
+destination, paying for them at the new rate. Every transaction stays a
+candidate until one confirms, which is then the splice. This node doesn't
+start replacements itself yet.
+
+**Not supported.** Funding a splice from a PSBT.
+More than one splice of a channel at a time. Splices of the peer's that
+take the channel above `maxchansize`.
+
+**Limits.** Splices peers start are limited across the node: one per
+peer, five in all, and a channel whose peer ended three without locking
+within a day refuses more until the next day. A peer that breaks a splice
+after this node signed it (an abort or bad signatures after ours, or
+publishing it without sending its own) is refused further splices on that
+channel until a restart.
+
+**A stuck splice.** A splice transaction is offered to the backend again
+at every block until it confirms. If its fee rate is too low to confirm,
+and it pays this node an output (change from adding funds, or funds moved
+to this wallet), that output can pay for a child with a higher fee:
+`lncli wallet bumpfee --sat_per_vbyte=N <splice txid>:<output index>`.
+The channel keeps working at its old size meanwhile.
+
+**Backups and towers.** A channel backup made after a splice carries the
+channel's funding outputs in a trailer older versions skip, so a restore
+on this version finds the channel on its current output; restored from a
+backup older than a splice, the channel is flagged and the peer's
+commitment found by the output it pays this node. Watchtower backups
+cover the commitments on every funding output of a channel while a splice
+is pending.
 
 ## A funding output spent by an unrecognised transaction
 

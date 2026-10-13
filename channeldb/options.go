@@ -81,6 +81,11 @@ type Options struct {
 	// seconds on long-lived channels. bbolt and etcd leave this off; the
 	// synchronous delete is already cheap there.
 	tombstoneClosedChannels bool
+
+	// splicing applies the migration that marks a node that has run with
+	// splicing on. Without it the database stays at the version before,
+	// so an older release can still open it.
+	splicing bool
 }
 
 // DefaultOptions returns an Options populated with default values.
@@ -170,5 +175,13 @@ func OptionGcDecayedLog(noGc bool) OptionModifier {
 func OptionTombstoneClosedChannels(enabled bool) OptionModifier {
 	return func(o *Options) {
 		o.tombstoneClosedChannels = enabled
+	}
+}
+
+// OptionSplicing applies the migration that marks a node that has run with
+// splicing on, which an older binary refuses.
+func OptionSplicing(splicing bool) OptionModifier {
+	return func(o *Options) {
+		o.splicing = splicing
 	}
 }

@@ -88,6 +88,13 @@ func (m Multi) PackToWriter(w io.Writer, keyRing keychain.KeyRing) error {
 		}
 	}
 
+	// Where splices moved channels follows the backups, where a version
+	// that doesn't know it stops reading.
+	err = writeSpliceTrailer(&multiBackupBuffer, m.StaticBackups)
+	if err != nil {
+		return err
+	}
+
 	// With the plaintext multi backup assembled, we'll now encrypt it
 	// directly to the passed writer.
 	e, err := lnencrypt.KeyRingEncrypter(keyRing)
@@ -158,6 +165,8 @@ func (m *Multi) UnpackFromReader(r io.Reader, keyRing keychain.KeyRing) error {
 			// multi backup slice.
 			m.StaticBackups = append(m.StaticBackups, chanBackup)
 		}
+
+		readSpliceTrailer(backupReader, m.StaticBackups)
 
 	default:
 		return fmt.Errorf("unable to unpack unknown multi-version "+

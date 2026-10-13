@@ -103,6 +103,17 @@ type Config struct {
 	// revoked commitment height.
 	BuildBreachRetribution BreachRetributionBuilder
 
+	// BuildSpliceBreachRetribution is BuildBreachRetribution for the
+	// peer's revoked commitment on a splice's funding output.
+	BuildSpliceBreachRetribution SpliceBreachRetributionBuilder
+
+	// FetchSpliceRevocations returns the splices on whose funding outputs
+	// the peer revoked a commitment at a height, besides the one on the
+	// channel's own: while a splice is pending there is one on each. Nil
+	// for none.
+	FetchSpliceRevocations func(id lnwire.ChannelID,
+		commitHeight uint64) ([]chainhash.Hash, error)
+
 	// NewAddress generates a new on-chain sweep pkscript.
 	NewAddress func() ([]byte, error)
 
@@ -662,6 +673,19 @@ func (m *Manager) BackupState(chanID *lnwire.ChannelID, stateNum uint64) error {
 	default:
 	}
 
+	// A blob for each commitment the peer revoked at this height: a tower
+	// can only match a breach by its commitment's txid. Read before the
+	// height is taken as presented, so a failure leaves it to a retry.
+	var splices []chainhash.Hash
+	if m.cfg.FetchSpliceRevocations != nil {
+		var err error
+		splices, err = m.cfg.FetchSpliceRevocations(*chanID, stateNum)
+		if err != nil {
+			return fmt.Errorf("unable to read splice revocations: "+
+				"%w", err)
+		}
+	}
+
 	// Make sure that this channel is registered with the tower client.
 	m.backupMu.Lock()
 	info, ok := m.chanInfos[*chanID]
@@ -710,7 +734,18 @@ func (m *Manager) BackupState(chanID *lnwire.ChannelID, stateNum uint64) error {
 	}
 	m.clientsMu.Unlock()
 
-	return client.backupState(chanID, stateNum)
+	err := client.backupState(chanID, stateNum, chainhash.Hash{})
+	if err != nil {
+		return err
+	}
+	for _, txid := range splices {
+		err := client.backupState(chanID, stateNum, txid)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // isChanClosed can be used to check if the channel with the given ID has been

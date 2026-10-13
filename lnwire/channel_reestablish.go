@@ -12,8 +12,12 @@ import (
 )
 
 const (
+	CRNextFunding tlv.Type = 1
 	CRDynHeight   tlv.Type = 20
 	CRLocalNonces tlv.Type = 22
+
+	// CRMyCurrentFundingLocked is the type of my_current_funding_locked.
+	CRMyCurrentFundingLocked tlv.Type = 5
 )
 
 // DynHeight is a newtype wrapper to get the proper RecordProducer instance
@@ -97,6 +101,17 @@ type ChannelReestablish struct {
 	// field to support multiple in-flight splices, each of which needs
 	// its own nonce keyed by the relevant funding TXID.
 	LocalNonces OptLocalNonces
+
+	// NextFunding names the latest interactive funding transaction (a
+	// splice) the sender hasn't received tx_signatures for, and what it
+	// wants retransmitted (TLV type 1).
+	NextFunding fn.Option[FundingTxidFlags]
+
+	// MyCurrentFundingLocked names the latest funding transaction the
+	// sender has sent splice_locked (or channel_ready) for, and what it
+	// wants retransmitted (TLV type 5). Once splicing is negotiated it is
+	// sent on every reestablish past channel_ready.
+	MyCurrentFundingLocked fn.Option[FundingTxidFlags]
 
 	// ExtraData is the set of data that was appended to this message to
 	// fill out the full maximum transport message size. These fields can
@@ -185,7 +200,21 @@ func (a *ChannelReestablish) Encode(w *bytes.Buffer, pver uint32) error {
 		return err
 	}
 
-	recordProducers := make([]tlv.RecordProducer, 0, 3)
+	recordProducers := make([]tlv.RecordProducer, 0, 5)
+	a.NextFunding.WhenSome(func(f FundingTxidFlags) {
+		recordProducers = append(
+			recordProducers, &fundingTxidFlagsRecord{
+				CRNextFunding, &f,
+			},
+		)
+	})
+	a.MyCurrentFundingLocked.WhenSome(func(f FundingTxidFlags) {
+		recordProducers = append(
+			recordProducers, &fundingTxidFlagsRecord{
+				CRMyCurrentFundingLocked, &f,
+			},
+		)
+	})
 	a.LocalNonce.WhenSome(func(localNonce Musig2NonceTLV) {
 		recordProducers = append(recordProducers, &localNonce)
 	})
@@ -257,10 +286,14 @@ func (a *ChannelReestablish) Decode(r io.Reader, pver uint32) error {
 		dynHeight       DynHeight
 		localNonce      = a.LocalNonce.Zero()
 		localNoncesData LocalNoncesData
+		nextFunding     FundingTxidFlags
+		fundingLocked   FundingTxidFlags
 	)
 
 	typeMap, err := tlvRecords.ExtractRecords(
 		&localNonce, &dynHeight, &localNoncesData,
+		&fundingTxidFlagsRecord{CRNextFunding, &nextFunding},
+		&fundingTxidFlagsRecord{CRMyCurrentFundingLocked, &fundingLocked},
 	)
 	if err != nil {
 		return err
@@ -274,6 +307,12 @@ func (a *ChannelReestablish) Decode(r io.Reader, pver uint32) error {
 	}
 	if val, ok := typeMap[CRLocalNonces]; ok && val == nil {
 		a.LocalNonces = SomeLocalNonces(localNoncesData)
+	}
+	if present(typeMap, CRNextFunding) {
+		a.NextFunding = fn.Some(nextFunding)
+	}
+	if present(typeMap, CRMyCurrentFundingLocked) {
+		a.MyCurrentFundingLocked = fn.Some(fundingLocked)
 	}
 
 	if len(tlvRecords) != 0 {
@@ -295,4 +334,70 @@ func (a *ChannelReestablish) MsgType() MessageType {
 // This is part of the lnwire.SizeableMessage interface.
 func (a *ChannelReestablish) SerializedSize() (uint32, error) {
 	return MessageSerializedSize(a)
+}
+
+// Retransmit flags of next_funding and my_current_funding_locked.
+const (
+	// RetransmitCommitSig, in next_funding, asks for the
+	// commitment_signed of that funding transaction again.
+	RetransmitCommitSig uint8 = 1 << 0
+
+	// RetransmitAnnounceSigs, in my_current_funding_locked, asks for the
+	// announcement_signatures of that funding transaction again.
+	RetransmitAnnounceSigs uint8 = 1 << 0
+)
+
+// FundingTxidFlags is a funding transaction id with retransmit flags, the
+// value of next_funding and my_current_funding_locked.
+type FundingTxidFlags struct {
+	// Txid is the funding transaction's id.
+	Txid chainhash.Hash
+
+	// RetransmitFlags says what the sender wants sent again.
+	RetransmitFlags uint8
+}
+
+// fundingTxidFlagsRecord is the 33-byte record of a FundingTxidFlags.
+type fundingTxidFlagsRecord struct {
+	typ tlv.Type
+	val *FundingTxidFlags
+}
+
+// Record returns the record: the txid, then the flags byte.
+func (f *fundingTxidFlagsRecord) Record() tlv.Record {
+	return tlv.MakeStaticRecord(
+		f.typ, f.val, 33,
+		func(w io.Writer, val interface{}, _ *[8]byte) error {
+			v, ok := val.(*FundingTxidFlags)
+			if !ok {
+				return tlv.NewTypeForEncodingErr(
+					val, "*FundingTxidFlags",
+				)
+			}
+			if _, err := w.Write(v.Txid[:]); err != nil {
+				return err
+			}
+			_, err := w.Write([]byte{v.RetransmitFlags})
+
+			return err
+		},
+		func(r io.Reader, val interface{}, _ *[8]byte,
+			l uint64) error {
+
+			v, ok := val.(*FundingTxidFlags)
+			if !ok || l != 33 {
+				return tlv.NewTypeForDecodingErr(
+					val, "*FundingTxidFlags", l, 33,
+				)
+			}
+			var b [33]byte
+			if _, err := io.ReadFull(r, b[:]); err != nil {
+				return err
+			}
+			copy(v.Txid[:], b[:32])
+			v.RetransmitFlags = b[32]
+
+			return nil
+		},
+	)
 }

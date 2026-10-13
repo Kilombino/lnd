@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btclog/v2"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/keychain"
@@ -95,6 +96,13 @@ type RegisteredTower struct {
 type BreachRetributionBuilder func(id lnwire.ChannelID,
 	commitHeight uint64) (*lnwallet.BreachRetribution,
 	channeldb.ChannelType, error)
+
+// SpliceBreachRetributionBuilder is a BreachRetributionBuilder for the peer's
+// revoked commitment on a splice's funding output, named by the splice's
+// txid.
+type SpliceBreachRetributionBuilder func(id lnwire.ChannelID,
+	commitHeight uint64, spliceTxid chainhash.Hash) (
+	*lnwallet.BreachRetribution, channeldb.ChannelType, error)
 
 // newTowerMsg is an internal message we'll use within the client to signal
 // that a new tower can be considered.
@@ -499,11 +507,12 @@ func (c *client) stop() error {
 //   - breached outputs contain too little value to sweep at the target sweep
 //     fee rate.
 func (c *client) backupState(chanID *lnwire.ChannelID,
-	stateNum uint64) error {
+	stateNum uint64, spliceTxid chainhash.Hash) error {
 
 	id := &wtdb.BackupID{
 		ChanID:       *chanID,
 		CommitHeight: stateNum,
+		SpliceTxid:   spliceTxid,
 	}
 
 	return c.pipeline.QueueBackupID(id)
@@ -1067,7 +1076,9 @@ func (c *client) newSessionQueue(s *ClientSession,
 		MaxBackoff:             c.cfg.MaxBackoff,
 		Log:                    c.log,
 		BuildBreachRetribution: c.cfg.BuildBreachRetribution,
-		TaskPipeline:           c.pipeline,
+		BuildSpliceBreachRetribution: c.cfg.
+			BuildSpliceBreachRetribution,
+		TaskPipeline: c.pipeline,
 	}, updates)
 }
 

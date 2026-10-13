@@ -343,6 +343,22 @@ func MainRPCServerPermissions() map[string][]bakery.Op {
 			Entity: "offchain",
 			Action: "write",
 		}},
+		// A splice moves wallet funds into a channel or channel funds
+		// on chain: both, like opening and closing.
+		"/lnrpc.Lightning/SpliceChannel": {{
+			Entity: "onchain",
+			Action: "write",
+		}, {
+			Entity: "offchain",
+			Action: "write",
+		}},
+		"/lnrpc.Lightning/EstimateSplice": {{
+			Entity: "onchain",
+			Action: "read",
+		}, {
+			Entity: "offchain",
+			Action: "read",
+		}},
 		"/lnrpc.Lightning/GetInfo": {{
 			Entity: "info",
 			Action: "read",
@@ -744,12 +760,20 @@ func (r *rpcServer) addDeps(ctx context.Context, s *server,
 		SubscribeHtlcEvents:    s.htlcNotifier.SubscribeHtlcEvents,
 		InterceptableForwarder: s.interceptableSwitch,
 		SetChannelEnabled: func(outpoint wire.OutPoint) error {
-			return s.chanStatusMgr.RequestEnable(outpoint, true)
+			return s.chanStatusMgr.RequestEnable(
+				s.channelName(outpoint), true,
+			)
 		},
 		SetChannelDisabled: func(outpoint wire.OutPoint) error {
-			return s.chanStatusMgr.RequestDisable(outpoint, true)
+			return s.chanStatusMgr.RequestDisable(
+				s.channelName(outpoint), true,
+			)
 		},
-		SetChannelAuto:     s.chanStatusMgr.RequestAuto,
+		SetChannelAuto: func(outpoint wire.OutPoint) error {
+			return s.chanStatusMgr.RequestAuto(
+				s.channelName(outpoint),
+			)
+		},
 		UseStatusInitiated: subServerCgs.RouterRPC.UseStatusInitiated,
 		ParseCustomChannelData: func(msg proto.Message) error {
 			err = fn.MapOptionZ(
@@ -2783,6 +2807,10 @@ func (r *rpcServer) CloseChannel(in *lnrpc.CloseChannelRequest,
 		return err
 	}
 
+	// Named by its current funding output after a splice, the channel is
+	// known everywhere below by the one it was opened with.
+	*chanPoint = channel.FundingOutpoint
+
 	// We can't coop or force close restored channels or channels that have
 	// experienced local data loss. Normally we would detect this in the
 	// channel arbitrator if the channel has the status
@@ -3264,6 +3292,10 @@ func (r *rpcServer) abandonChan(chanPoint *wire.OutPoint,
 	}
 	r.server.cc.Wallet.CancelRebroadcast(*txid)
 
+	// A splice moved the channel's edge to its current funding output;
+	// read before the channel goes.
+	edgePoint := r.currentFunding(*chanPoint)
+
 	// Abandoning a channel is a three-step process: remove from the open
 	// channel state, remove from the graph, remove from the contract
 	// court. Between any step it's possible that the users restarts the
@@ -3274,7 +3306,7 @@ func (r *rpcServer) abandonChan(chanPoint *wire.OutPoint,
 		return err
 	}
 	// TODO: update to support deletions for v2 channels.
-	err = abandonChanFromGraph(r.server.v1Graph, chanPoint)
+	err = abandonChanFromGraph(r.server.v1Graph, &edgePoint)
 	if err != nil {
 		return err
 	}
@@ -3346,6 +3378,11 @@ func (r *rpcServer) AbandonChannel(_ context.Context,
 	// on-disk state, we'll remove the channel from the switch and peer
 	// state if it's been loaded in.
 	case err == nil:
+		// Named by its current funding output after a splice, the
+		// channel is known everywhere below by the one it was opened
+		// with.
+		*chanPoint = dbChan.FundingOutpoint
+
 		// If the user requested the more safe version that only allows
 		// the removal of externally (shim) funded channels that are
 		// still pending, we enforce this option now that we know the
@@ -4017,6 +4054,7 @@ func (r *rpcServer) ChannelBalance(ctx context.Context,
 		Balance:            int64(localBalance.ToSatoshis()),
 		PendingOpenBalance: int64(pendingOpenLocalBalance.ToSatoshis()),
 	}
+	r.addSpliceBalances(openChannels, resp)
 
 	err = fn.MapOptionZ(
 		r.server.implCfg.AuxDataParser,
@@ -4473,8 +4511,10 @@ func (r *rpcServer) fetchWaitingCloseChannels(
 		unifiedSigs := waitingClose.ChanType.HasUnifiedSigs()
 		channel := &lnrpc.PendingChannelsResponse_PendingChannel{
 			RemoteNodePub: hex.EncodeToString(pub),
-			ChannelPoint:  chanPoint.String(),
-			Capacity:      int64(waitingClose.Capacity),
+			ChannelPoint: waitingClose.CurrentFundingOutpoint().
+				String(),
+			OriginalChannelPoint: chanPoint.String(),
+			Capacity:             int64(waitingClose.Capacity),
 			LocalBalance: int64(
 				localCommit.LocalBalance.ToSatoshis(),
 			),
@@ -5307,6 +5347,10 @@ func createRPCOpenChannel(ctx context.Context, r *rpcServer,
 		return nil, err
 	}
 
+	// A splice moves the funding output; the channel's other fields
+	// come from the same state.
+	r.addSpliceFields(dbChannel, channel)
+
 	return channel, nil
 }
 
@@ -5368,6 +5412,10 @@ func (r *rpcServer) createRPCClosedChannel(
 		OpenInitiator:     openInit,
 		CloseInitiator:    closeInitiator,
 		AliasScids:        make([]uint64, 0, len(channelAliases)),
+
+		// The channel's name: the funding output it was opened
+		// with, whatever a splice later moved it to.
+		OriginalChannelPoint: dbChannel.ChanPoint.String(),
 	}
 
 	// Populate the set of aliases.
@@ -5686,6 +5734,9 @@ func (r *rpcServer) SubscribeChannelEvents(req *lnrpc.ChannelEventSubscription,
 				channelnotifier.InactiveLinkEvent:
 
 				continue
+
+			case channelnotifier.SpliceEvent:
+				update = rpcSpliceEvent(event)
 
 			case channelnotifier.FullyResolvedChannelEvent:
 				update = &lnrpc.ChannelEventUpdate{
@@ -6524,14 +6575,25 @@ func (r *rpcServer) GetChanInfo(ctx context.Context,
 			ctx, in.ChanId,
 		)
 
+		// A channel of ours a splice moved, by an id it had before.
+		latest, ok := r.server.spliceGraph.latestScid(
+			lnwire.NewShortChanIDFromInt(in.ChanId),
+		)
+		if errors.Is(err, graphdb.ErrEdgeNotFound) && ok {
+			edgeInfo, edge1, edge2, err = graph.FetchChannelEdgesByID(
+				ctx, latest.ToUint64(),
+			)
+		}
+
 	case in.ChanPoint != "":
 		var chanPoint *wire.OutPoint
 		chanPoint, err = wire.NewOutPointFromString(in.ChanPoint)
 		if err != nil {
 			return nil, err
 		}
+		current := r.currentFunding(*chanPoint)
 		edgeInfo, edge1, edge2, err = graph.FetchChannelEdgesByOutpoint(
-			ctx, chanPoint,
+			ctx, &current,
 		)
 
 	default:
@@ -7501,10 +7563,10 @@ func (r *rpcServer) UpdateChannelPolicy(ctx context.Context,
 		if err != nil {
 			return nil, err
 		}
-		targetChans = append(targetChans, wire.OutPoint{
+		targetChans = append(targetChans, r.currentFunding(wire.OutPoint{
 			Hash:  *txid,
 			Index: scope.ChanPoint.OutputIndex,
-		})
+		}))
 	default:
 		return nil, fmt.Errorf("unknown scope: %v", scope)
 	}

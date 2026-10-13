@@ -229,6 +229,11 @@ type Single struct {
 	// into the unified signature hash. Carried in the version byte rather
 	// than as a field of its own, see unifiedSigsVersionMask.
 	UnifiedSigs bool
+
+	// Splice, for a channel a splice has moved or may move, is where it
+	// is and where it may go. The fields above describe the channel as
+	// it was opened. Carried in a trailer, see spliceTrailerMagic.
+	Splice *SpliceBackup
 }
 
 // CloseTxInputs contains data needed to produce a force close transaction
@@ -266,6 +271,20 @@ type CloseTxInputs struct {
 // provided private key.
 func NewSingle(channel *channeldb.OpenChannel,
 	nodeAddrs []net.Addr) Single {
+
+	single, err := BuildSingle(channel, nodeAddrs)
+	if err != nil {
+		log.Errorf("Unable to read the splices of ChannelPoint(%v) "+
+			"for its backup: %v", channel.FundingOutpoint, err)
+	}
+
+	return single
+}
+
+// BuildSingle is NewSingle, failing when the channel's splices can't be read:
+// a backup of a spliced channel without them would name the wrong keys.
+func BuildSingle(channel *channeldb.OpenChannel,
+	nodeAddrs []net.Addr) (Single, error) {
 
 	var shaChainRootDesc keychain.KeyDescriptor
 
@@ -368,10 +387,26 @@ func NewSingle(channel *channeldb.OpenChannel,
 
 	// Include unsigned force-close transaction for the most recent channel
 	// state as well as the data needed to produce the signature, given the
-	// private key is provided separately.
+	// private key is provided separately. On a spliced channel it spends
+	// the current funding output, signed with the current key from Splice.
 	single.CloseTxInputs = buildCloseTxInputs(channel)
 
-	return single
+	// The fields describe the channel as it was opened; a splice moved
+	// the funding output, its keys and the capacity.
+	splice, original, err := spliceBackupFor(channel)
+	if err != nil {
+		return single, err
+	}
+	single.Splice = splice
+	if original != nil {
+		single.Capacity = original.Capacity
+		single.LocalChanCfg.MultiSigKey = original.LocalKey
+		single.RemoteChanCfg.MultiSigKey = keychain.KeyDescriptor{
+			PubKey: original.RemoteKey,
+		}
+	}
+
+	return single, nil
 }
 
 // errEmptyTapscriptRoot is returned by Serialize if field TapscriptRoot is
@@ -548,6 +583,9 @@ func (s *Single) PackToWriter(w io.Writer, keyRing keychain.KeyRing) error {
 	// go to encrypt the entire thing.
 	var rawBytes bytes.Buffer
 	if err := s.Serialize(&rawBytes); err != nil {
+		return err
+	}
+	if err := writeSpliceTrailer(&rawBytes, []Single{*s}); err != nil {
 		return err
 	}
 
@@ -796,7 +834,15 @@ func (s *Single) UnpackFromReader(r io.Reader, keyRing keychain.KeyRing) error {
 	// Finally, we'll pack the bytes into a reader to we can deserialize
 	// the plaintext bytes of the SCB.
 	backupReader := bytes.NewReader(plaintext)
-	return s.Deserialize(backupReader)
+	if err := s.Deserialize(backupReader); err != nil {
+		return err
+	}
+
+	singles := []Single{*s}
+	readSpliceTrailer(backupReader, singles)
+	s.Splice = singles[0].Splice
+
+	return nil
 }
 
 // PackStaticChanBackups accepts a set of existing open channels, and a

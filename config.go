@@ -830,6 +830,7 @@ func DefaultConfig() Config {
 			OnionMsgPeerBurstBytes:   onionmessage.DefaultPeerOnionMsgBurstBytes,
 			OnionMsgGlobalKbps:       onionmessage.DefaultGlobalOnionMsgKbps,
 			OnionMsgGlobalBurstBytes: onionmessage.DefaultGlobalOnionMsgBurstBytes,
+			SplicePeerInputConfs:     36,
 		},
 		Gossip: &lncfg.Gossip{
 			MaxChannelUpdateBurst: discovery.DefaultMaxChannelUpdateBurst,
@@ -1221,6 +1222,25 @@ func ValidateConfig(cfg Config, interceptor signal.Interceptor, fileParser,
 			"max channel size %v, must be no less than min chan "+
 			"size %v", cfg.MaxChanSize, cfg.MinChanSize,
 		)
+	}
+
+	// Splicing pauses the channel with quiescence first, so it can't be on
+	// while quiescence is off.
+	if cfg.ProtocolOptions.Splice() && cfg.ProtocolOptions.NoQuiescence() {
+		return nil, mkErr("protocol.splice needs quiescence; it " +
+			"can't be set with protocol.no-quiescence")
+	}
+
+	// A splice negotiates while the channel is quiescent, and BOLT 2 gives
+	// it 60 seconds when HTLCs are pending; a shorter timeout would cut
+	// negotiations short.
+	if cfg.ProtocolOptions.Splice() && !lncfg.IsDevBuild() &&
+		cfg.Htlcswitch.QuiescenceTimeout < lncfg.DefaultQuiescenceTimeout {
+
+		return nil, mkErr("protocol.splice needs "+
+			"htlcswitch.quiescencetimeout of at least %v, got %v",
+			lncfg.DefaultQuiescenceTimeout,
+			cfg.Htlcswitch.QuiescenceTimeout)
 	}
 
 	// Don't allow superfluous --maxchansize greater than

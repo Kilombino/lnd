@@ -256,6 +256,11 @@ type ChannelLinkConfig struct {
 	// ChannelNotifier when a channel link become inactive.
 	NotifyInactiveLinkEvent func(wire.OutPoint)
 
+	// SpliceHandler is the channel's splice machine, nil when splicing is
+	// off for this channel. The link hands it the splice messages and
+	// tells it about the splice's commitment_signed.
+	SpliceHandler SpliceHandler
+
 	// NotifyChannelUpdate allows the link to tell the ChannelNotifier when
 	// a channel's state has been updated.
 	NotifyChannelUpdate func(*channeldb.OpenChannel)
@@ -436,6 +441,19 @@ type channelLink struct {
 	// the result.
 	quiescenceReqs chan StfuReq
 
+	// resumeReqs is a queue of requests to end quiescence on this link,
+	// handled on the link's goroutine like everything that touches the
+	// channel's state.
+	resumeReqs chan fn.Req[fn.Unit, error]
+
+	// spliceReqs is a queue of splice steps to run on the link's
+	// goroutine.
+	spliceReqs chan spliceReq
+
+	// batch collects a batch of commitment_signed messages announced by
+	// start_batch, nil outside one.
+	batch *commitBatch
+
 	// cg is a helper that encapsulates a wait group and quit channel and
 	// allows contexts that either block or cancel on those depending on
 	// the use case.
@@ -545,6 +563,8 @@ func NewChannelLink(cfg ChannelLinkConfig,
 		incomingCommitHooks: newHookMap(),
 		quiescer:            qsm,
 		quiescenceReqs:      quiescenceReqs,
+		resumeReqs:          make(chan fn.Req[fn.Unit, error], 1),
+		spliceReqs:          make(chan spliceReq, 1),
 		cg:                  fn.NewContextGuard(),
 	}
 }
@@ -821,6 +841,45 @@ func (l *channelLink) InitStfu() <-chan fn.Result[lntypes.ChannelParty] {
 	return out
 }
 
+// ResumeQuiescence asks the link to end quiescence. See the
+// ChannelUpdateHandler interface.
+func (l *channelLink) ResumeQuiescence() <-chan error {
+	req, out := fn.NewReq[fn.Unit, error](fn.Unit{})
+
+	select {
+	case l.resumeReqs <- req:
+	case <-l.cg.Done():
+		req.Resolve(ErrLinkShuttingDown)
+	}
+
+	return out
+}
+
+// resumeQuiescence ends quiescence, on the link's goroutine. Three things
+// were held back while the channel was quiescent, and each is taken up again
+// here: remote adds whose processing was deferred (the quiescer's resume
+// hooks), settles and fails from the switch that were dropped without being
+// acknowledged (they stay in the mailbox until its packets are reset), and a
+// commitment owed to the peer.
+func (l *channelLink) resumeQuiescence(ctx context.Context) error {
+	if !l.quiescer.IsQuiescent() {
+		return nil
+	}
+
+	l.quiescer.Resume()
+
+	if err := l.mailBox.ResetPackets(); err != nil {
+		l.log.Errorf("failed to reset packets after quiescence: %v",
+			err)
+	}
+
+	if l.channel.OweCommitment() {
+		l.updateCommitTxOrFail(ctx)
+	}
+
+	return nil
+}
+
 // isReestablished returns true if the link has successfully completed the
 // channel reestablishment dance.
 func (l *channelLink) isReestablished() bool {
@@ -938,6 +997,7 @@ func (l *channelLink) syncChanStates(ctx context.Context) error {
 		return fmt.Errorf("unable to generate chan sync message for "+
 			"ChannelPoint(%v)", l.channel.ChannelPoint())
 	}
+	l.amendChanSync(localChanSyncMsg)
 	if err := l.cfg.Peer.SendMessage(true, localChanSyncMsg); err != nil {
 		return fmt.Errorf("unable to send chan sync message for "+
 			"ChannelPoint(%v): %v", l.channel.ChannelPoint(), err)
@@ -966,7 +1026,8 @@ func (l *channelLink) syncChanStates(ctx context.Context) error {
 		// ChannelReady message.
 		if remoteChanSyncMsg.NextLocalCommitHeight == 1 &&
 			localChanSyncMsg.NextLocalCommitHeight == 1 &&
-			!l.channel.IsPending() {
+			!l.channel.IsPending() &&
+			!l.namesSplice(localChanSyncMsg, remoteChanSyncMsg) {
 
 			l.log.Infof("resending ChannelReady message to peer")
 
@@ -1088,6 +1149,13 @@ func (l *channelLink) syncChanStates(ctx context.Context) error {
 				l.log.Errorf("failed to send %v: %v",
 					msg.MsgType(), err)
 			}
+		}
+
+		// The splice's part: our commitment_signed for it if asked
+		// for, then the machine's.
+		if l.cfg.SpliceHandler != nil {
+			l.resendSpliceCommitSig(remoteChanSyncMsg)
+			l.cfg.SpliceHandler.HandleReestablish(remoteChanSyncMsg)
 		}
 
 	case <-l.cg.Done():
@@ -1463,6 +1531,14 @@ func (l *channelLink) htlcManager(ctx context.Context) {
 					"req: %v", err)
 			}
 
+		// The protocol that paused the channel is done with it.
+		case rReq := <-l.resumeReqs:
+			rReq.Resolve(l.resumeQuiescence(ctx))
+
+		// A step of a splice.
+		case sReq := <-l.spliceReqs:
+			sReq.Resolve(sReq.Request(ctx))
+
 		case <-l.cg.Done():
 			return
 		}
@@ -1833,6 +1909,18 @@ func (l *channelLink) handleUpstreamMsg(ctx context.Context,
 		return
 	}
 
+	// Nothing but the announced commitment_signed messages may come
+	// inside a batch.
+	if _, ok := msg.(*lnwire.CommitSig); l.batch != nil && !ok {
+		l.failf(LinkFailureError{
+			code:          ErrInvalidUpdate,
+			FailureAction: LinkFailureDisconnect,
+			Warning:       true,
+		}, "%T inside a batch", msg)
+
+		return
+	}
+
 	var err error
 
 	switch msg := msg.(type) {
@@ -1849,13 +1937,35 @@ func (l *channelLink) handleUpstreamMsg(ctx context.Context,
 		err = l.processRemoteUpdateFailHTLC(msg)
 
 	case *lnwire.CommitSig:
-		err = l.processRemoteCommitSig(ctx, msg)
+		switch {
+		// A member of a batch: processed with the rest of it.
+		case l.batch != nil:
+			err = l.handleBatchedCommitSig(ctx, msg)
+
+		// A splice's own commitment_signed: checked and handed to
+		// the splice machine, not answered with a revocation.
+		case l.isSpliceCommitSig(msg):
+			l.handleSpliceCommitSig(msg)
+
+		default:
+			err = l.processRemoteCommitSig(ctx, msg, nil)
+		}
 
 		// At this point our local commitment state has been irrevocably
 		// committed to and our balances are updated. We notify our
 		// subscribers that the channel state has been updated.
 		if err == nil {
 			l.cfg.NotifyChannelUpdate(l.channel.ChannelState())
+		}
+
+	case *lnwire.StartBatch:
+		err = l.handleStartBatch(msg)
+		if err != nil {
+			l.failf(LinkFailureError{
+				code:          ErrInvalidUpdate,
+				FailureAction: LinkFailureDisconnect,
+				Warning:       true,
+			}, "start_batch: %v", err)
 		}
 
 	case *lnwire.RevokeAndAck:
@@ -1884,6 +1994,11 @@ func (l *channelLink) handleUpstreamMsg(ctx context.Context,
 		l.processRemoteError(msg)
 
 	default:
+		if isSpliceMessage(msg) {
+			l.handleSpliceMessage(msg)
+			break
+		}
+
 		if !l.unknownMessageLogged {
 			l.log.Warnf("received unknown message of type %T", msg)
 			l.unknownMessageLogged = true
@@ -2106,7 +2221,11 @@ func (l *channelLink) updateCommitTx(ctx context.Context) error {
 		PartialSig:    newCommit.PartialSig,
 		CustomRecords: auxBlobRecords,
 	}
-	err = l.cfg.Peer.SendMessage(false, commitSig)
+
+	// While splices are pending, a batch: one per funding.
+	err = l.cfg.Peer.SendMessage(
+		false, l.commitSigMessages(commitSig, newCommit.SpliceSigs)...,
+	)
 	if err != nil {
 		l.log.Errorf("failed to send CommitSig: %v", err)
 	}
@@ -3220,6 +3339,25 @@ func (l *channelLink) processRemoteAdds(fwdPkg *channeldb.FwdPkg) {
 			continue
 		}
 
+		// The first time it is processed, an HTLC that draws on what
+		// the peer put into a splice not yet deep enough is failed
+		// back: the peer could reorganise the splice away after we
+		// paid out.
+		if fwdPkg.State == channeldb.FwdStateLockedIn &&
+			l.peerInputHeld() {
+
+			l.log.Warnf("failing htlc(id=%v): it draws on the "+
+				"peer's coins in a splice not yet deep enough",
+				add.ID)
+			l.sendHTLCError(
+				add, sourceRef, NewLinkError(
+					&lnwire.FailTemporaryChannelFailure{},
+				), obfuscator, fwdInfo.IsExit(),
+			)
+
+			continue
+		}
+
 		switch {
 		case fwdInfo.IsExit():
 			err := l.processExitHop(
@@ -4003,6 +4141,12 @@ func (l *channelLink) resumeLink(ctx context.Context) error {
 
 			return err
 		}
+	} else if l.cfg.SpliceHandler != nil {
+		// A channel just opened has nothing to reestablish: the
+		// splice machine may send from now on all the same.
+		l.cfg.SpliceHandler.HandleReestablish(
+			&lnwire.ChannelReestablish{ChanID: l.ChanID()},
+		)
 	}
 
 	// If a shutdown message has previously been sent on this link, then we
@@ -4332,8 +4476,11 @@ func (l *channelLink) processRemoteUpdateFailHTLC(
 
 // processRemoteCommitSig takes a `CommitSig` msg sent from the remote and
 // processes it.
+//
+// spliceSigs are the same commitment's signatures on each pending splice's
+// funding, from the same batch.
 func (l *channelLink) processRemoteCommitSig(ctx context.Context,
-	msg *lnwire.CommitSig) error {
+	msg *lnwire.CommitSig, spliceSigs []lnwallet.SpliceCommitSigs) error {
 
 	// Since we may have learned new preimages for the first time, we'll add
 	// them to our preimage cache. By doing this, we ensure any contested
@@ -4372,12 +4519,12 @@ func (l *channelLink) processRemoteCommitSig(ctx context.Context,
 
 		return err
 	}
-	err = l.channel.ReceiveNewCommitment(&lnwallet.CommitSigs{
+	err = l.channel.ReceiveNewCommitmentBatch(&lnwallet.CommitSigs{
 		CommitSig:  msg.CommitSig,
 		HtlcSigs:   msg.HtlcSigs,
 		PartialSig: msg.PartialSig,
 		AuxSigBlob: auxSigBlob,
-	})
+	}, spliceSigs)
 	if err != nil {
 		// If we were unable to reconstruct their proposed commitment,
 		// then we'll examine the type of error. If it's an

@@ -1,9 +1,11 @@
 package wtdb
 
 import (
+	"errors"
 	"fmt"
 	"io"
 
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/watchtower/blob"
 	"github.com/lightningnetwork/lnd/watchtower/wtpolicy"
@@ -116,26 +118,85 @@ type BackupID struct {
 
 	// CommitHeight is the commitment height of the revoked commitment.
 	CommitHeight uint64
+
+	// SpliceTxid, for a commitment on a splice's funding output that the
+	// channel wasn't on when the commitment was revoked, names the splice:
+	// while a splice is pending the peer has a commitment on each funding
+	// output at a height. Zero for the commitment on the channel's own.
+	//
+	// Written after the other fields only when set, where a version
+	// without it stops reading.
+	SpliceTxid chainhash.Hash
 }
 
-// Encode writes the BackupID from the passed io.Writer.
-func (b *BackupID) Encode(w io.Writer) error {
+// IsSplice reports whether the backup is of a commitment on a splice's
+// funding output.
+func (b *BackupID) IsSplice() bool {
+	return b.SpliceTxid != chainhash.Hash{}
+}
+
+// encodeFixed writes the fields every version reads.
+func (b *BackupID) encodeFixed(w io.Writer) error {
 	return WriteElements(w,
 		b.ChanID,
 		b.CommitHeight,
 	)
 }
 
-// Decode reads a BackupID from the passed io.Reader.
-func (b *BackupID) Decode(r io.Reader) error {
+// decodeFixed reads the fields every version writes.
+func (b *BackupID) decodeFixed(r io.Reader) error {
 	return ReadElements(r,
 		&b.ChanID,
 		&b.CommitHeight,
 	)
 }
 
+// encodeSplice writes the splice txid, if set.
+func (b *BackupID) encodeSplice(w io.Writer) error {
+	if !b.IsSplice() {
+		return nil
+	}
+	_, err := w.Write(b.SpliceTxid[:])
+
+	return err
+}
+
+// decodeSplice reads the splice txid, if there is one.
+func (b *BackupID) decodeSplice(r io.Reader) error {
+	_, err := io.ReadFull(r, b.SpliceTxid[:])
+	if errors.Is(err, io.EOF) {
+		b.SpliceTxid = chainhash.Hash{}
+		return nil
+	}
+
+	return err
+}
+
+// Encode writes the BackupID from the passed io.Writer.
+func (b *BackupID) Encode(w io.Writer) error {
+	if err := b.encodeFixed(w); err != nil {
+		return err
+	}
+
+	return b.encodeSplice(w)
+}
+
+// Decode reads a BackupID from the passed io.Reader.
+func (b *BackupID) Decode(r io.Reader) error {
+	if err := b.decodeFixed(r); err != nil {
+		return err
+	}
+
+	return b.decodeSplice(r)
+}
+
 // String returns a human-readable encoding of a BackupID.
 func (b BackupID) String() string {
+	if b.IsSplice() {
+		return fmt.Sprintf("backup(%v, %d, splice %v)", b.ChanID,
+			b.CommitHeight, b.SpliceTxid)
+	}
+
 	return fmt.Sprintf("backup(%v, %d)", b.ChanID, b.CommitHeight)
 }
 
@@ -166,28 +227,39 @@ type CommittedUpdateBody struct {
 	EncryptedBlob []byte
 }
 
-// Encode writes the CommittedUpdateBody to the passed io.Writer.
+// Encode writes the CommittedUpdateBody to the passed io.Writer. A splice
+// txid goes last.
 func (u *CommittedUpdateBody) Encode(w io.Writer) error {
-	err := u.BackupID.Encode(w)
+	err := u.BackupID.encodeFixed(w)
 	if err != nil {
 		return err
 	}
 
-	return WriteElements(w,
+	err = WriteElements(w,
 		u.Hint,
 		u.EncryptedBlob,
 	)
+	if err != nil {
+		return err
+	}
+
+	return u.BackupID.encodeSplice(w)
 }
 
 // Decode reads a CommittedUpdateBody from the passed io.Reader.
 func (u *CommittedUpdateBody) Decode(r io.Reader) error {
-	err := u.BackupID.Decode(r)
+	err := u.BackupID.decodeFixed(r)
 	if err != nil {
 		return err
 	}
 
-	return ReadElements(r,
+	err = ReadElements(r,
 		&u.Hint,
 		&u.EncryptedBlob,
 	)
+	if err != nil {
+		return err
+	}
+
+	return u.BackupID.decodeSplice(r)
 }

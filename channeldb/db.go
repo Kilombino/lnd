@@ -33,6 +33,7 @@ import (
 	"github.com/lightningnetwork/lnd/channeldb/migration35"
 	"github.com/lightningnetwork/lnd/channeldb/migration36"
 	"github.com/lightningnetwork/lnd/channeldb/migration37"
+	"github.com/lightningnetwork/lnd/channeldb/migration38"
 	"github.com/lightningnetwork/lnd/channeldb/migration_01_to_11"
 	"github.com/lightningnetwork/lnd/clock"
 	graphdb "github.com/lightningnetwork/lnd/graph/db"
@@ -339,6 +340,15 @@ var (
 			number:    37,
 			migration: migration37.MigrateChainHashState,
 		},
+		{
+			// Changes no data. It marks a database that has run
+			// with splicing on, so that an older binary, which
+			// would miss a breach on a spliced channel's new
+			// funding output, refuses it. Applied only when lnd
+			// starts with splicing on (OptionSplicing).
+			number:    splicingDBVersion,
+			migration: migration38.MarkSplicing,
+		},
 	}
 
 	// optionalVersions stores all optional migrations that are applied
@@ -434,8 +444,11 @@ func CreateWithBackend(backend kvdb.Backend, modifiers ...OptionModifier) (*DB,
 		modifier(&opts)
 	}
 
+	versions := targetVersions(opts.splicing)
+
 	if !opts.NoMigration {
-		if err := initChannelDB(backend); err != nil {
+		err := initChannelDB(backend, getLatestDBVersion(versions))
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -460,7 +473,7 @@ func CreateWithBackend(backend kvdb.Backend, modifiers ...OptionModifier) (*DB,
 
 	// Synchronize the version of database and apply migrations if needed.
 	if !opts.NoMigration {
-		if err := chanDB.syncVersions(dbVersions); err != nil {
+		if err := chanDB.syncVersions(versions); err != nil {
 			backend.Close()
 			return nil, err
 		}
@@ -516,14 +529,14 @@ func (d *DB) Wipe() error {
 		return err
 	}
 
-	return initChannelDB(d.Backend)
+	return initChannelDB(d.Backend, getLatestDBVersion(dbVersions))
 }
 
 // initChannelDB creates and initializes a fresh version of channeldb. In the
 // case that the target path has not yet been created or doesn't yet exist, then
 // the path is created. Additionally, all required top-level buckets used within
 // the database are created.
-func initChannelDB(db kvdb.Backend) error {
+func initChannelDB(db kvdb.Backend, version uint32) error {
 	err := kvdb.Update(db, func(tx kvdb.RwTx) error {
 		// Check if DB was marked as inactive with a tomb stone.
 		if err := EnsureNoTombstone(tx); err != nil {
@@ -549,7 +562,7 @@ func initChannelDB(db kvdb.Backend) error {
 		// Initialize the DB version after creating the required
 		// top-level buckets.
 		case errors.Is(metaErr, ErrMetaNotFound):
-			meta.DbVersionNumber = getLatestDBVersion(dbVersions)
+			meta.DbVersionNumber = version
 			return putMeta(meta, tx)
 
 		// The DB already has a metadata bucket but no version key.
@@ -751,12 +764,18 @@ func (c *ChannelStateDB) fetchNodeChannels(tx kvdb.RTx,
 }
 
 // FetchChannel attempts to locate a channel specified by the passed channel
-// point. If the channel cannot be found, then an error will be returned.
+// point: the outpoint that names it, or any funding output a splice moved it
+// to. If the channel cannot be found, then an error will be returned.
 func (c *ChannelStateDB) FetchChannel(chanPoint wire.OutPoint) (*OpenChannel,
 	error) {
 
+	chanPoint, err := c.channelName(chanPoint)
+	if err != nil {
+		return nil, err
+	}
+
 	var targetChanPoint bytes.Buffer
-	err := graphdb.WriteOutpoint(&targetChanPoint, &chanPoint)
+	err = graphdb.WriteOutpoint(&targetChanPoint, &chanPoint)
 	if err != nil {
 		return nil, err
 	}
@@ -1733,6 +1752,10 @@ type ChannelShell struct {
 	// Chan is a shell of an OpenChannel, it contains only the items
 	// required to restore the channel on disk.
 	Chan *OpenChannel
+
+	// Splice, for a channel a splice moved or may move, is where it is
+	// and where it may go.
+	Splice *ShellSplice
 }
 
 // RestoreChannelShells is a method that allows the caller to reconstruct the
@@ -1757,11 +1780,21 @@ func (c *ChannelStateDB) RestoreChannelShells(channelShells ...*ChannelShell) er
 			// already exists, then in order to ensure this method
 			// is idempotent, we'll continue to the next step.
 			channel.Db = c
+			splice := channelShell.Splice
+			if splice != nil {
+				channel.spliceFunding = splice.Funding
+			}
 			err := syncNewChannel(
 				tx, channel, channelShell.NodeAddrs,
 			)
 			if err != nil {
 				return err
+			}
+			if splice != nil {
+				err := restoreShellSplice(tx, channel, splice)
+				if err != nil {
+					return err
+				}
 			}
 		}
 
@@ -1909,6 +1942,14 @@ func (c *ChannelStateDB) DeleteChannelOpeningState(outPoint []byte) error {
 func (d *DB) syncVersions(versions []mandatoryVersion) error {
 	latestVersion := getLatestDBVersion(versions)
 
+	// The newest version this binary knows: a database there is fine even
+	// when the migrations asked for stop earlier (a node that ran with
+	// splicing on and has it off now).
+	knownVersion := latestVersion
+	if v := getLatestDBVersion(dbVersions); v > knownVersion {
+		knownVersion = v
+	}
+
 	meta, err := d.FetchMeta()
 	if err != nil {
 		switch {
@@ -1952,15 +1993,15 @@ func (d *DB) syncVersions(versions []mandatoryVersion) error {
 	// If the database reports a higher version that we are aware of, the
 	// user is probably trying to revert to a prior version of lnd. We fail
 	// here to prevent reversions and unintended corruption.
-	case meta.DbVersionNumber > latestVersion:
+	case meta.DbVersionNumber > knownVersion:
 		log.Errorf("Refusing to revert from db_version=%d to "+
 			"lower version=%d", meta.DbVersionNumber,
-			latestVersion)
+			knownVersion)
 		return ErrDBReversion
 
-	// If the current database version matches the latest version number,
-	// then we don't need to perform any migrations.
-	case meta.DbVersionNumber == latestVersion:
+	// If the current database version is at or past the version asked
+	// for, then we don't need to perform any migrations.
+	case meta.DbVersionNumber >= latestVersion:
 		return nil
 	}
 
@@ -2102,6 +2143,31 @@ func (d *DB) ChannelStateDB() *ChannelStateDB {
 // known to the channel DB.
 func LatestDBVersion() uint32 {
 	return getLatestDBVersion(dbVersions)
+}
+
+// OpenableDBVersions returns the channel database versions this build opens
+// as they are: the latest, and the one before the splicing mark, at which a
+// node that never ran with splicing stays. A tool that copies a database
+// for this build (lndinit's SQLite conversion) accepts either.
+func OpenableDBVersions() []uint32 {
+	return []uint32{
+		getLatestDBVersion(targetVersions(false)),
+		getLatestDBVersion(targetVersions(true)),
+	}
+}
+
+// splicingDBVersion is the database version that marks a node that has run
+// with splicing on.
+const splicingDBVersion = 38
+
+// targetVersions returns the migrations to apply: all of them with splicing
+// on, all but the splicing mark without.
+func targetVersions(splicing bool) []mandatoryVersion {
+	if splicing {
+		return dbVersions
+	}
+
+	return dbVersions[:len(dbVersions)-1]
 }
 
 func getLatestDBVersion(versions []mandatoryVersion) uint32 {

@@ -13,6 +13,7 @@ import (
 	"github.com/lightningnetwork/lnd/chanbackup"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/contractcourt"
+	"github.com/lightningnetwork/lnd/fn/v2"
 	"github.com/lightningnetwork/lnd/keychain"
 	"github.com/lightningnetwork/lnd/legacychain"
 	"github.com/lightningnetwork/lnd/lnwire"
@@ -301,7 +302,73 @@ func (c *chanDBRestorer) openChannelShell(backup chanbackup.Single) (
 		},
 	}
 
+	if backup.Splice != nil {
+		splice, err := c.shellSplice(backup, chanShell.Chan)
+		if err != nil {
+			return nil, err
+		}
+		chanShell.Splice = splice
+	}
+
 	return &chanShell, nil
+}
+
+// shellSplice restores what a backup knew of a channel's splices: the
+// channel is put on the funding output a splice moved it to, and the splices
+// pending on it are recorded, so a spend by one is followed. The shachain
+// root was derived from the original funding key before this.
+func (c *chanDBRestorer) shellSplice(backup chanbackup.Single,
+	channel *channeldb.OpenChannel) (*channeldb.ShellSplice, error) {
+
+	var splice channeldb.ShellSplice
+	if cur := backup.Splice.Current; cur != nil {
+		localKey, err := c.secretKeys.DeriveKey(cur.LocalKey.KeyLocator)
+		if err != nil {
+			return nil, fmt.Errorf("unable to derive splice funding "+
+				"key: %w", err)
+		}
+
+		splice.Original = &channeldb.PreviousFunding{
+			OutPoint:  backup.FundingOutpoint,
+			Capacity:  backup.Capacity,
+			LocalKey:  channel.LocalChanCfg.MultiSigKey,
+			RemoteKey: channel.RemoteChanCfg.MultiSigKey.PubKey,
+		}
+		splice.Funding = fn.Some(channeldb.SpliceFunding{
+			OutPoint: cur.OutPoint,
+			Scid:     cur.ShortChannelID,
+		})
+		channel.Capacity = cur.Capacity
+		channel.LocalChanCfg.MultiSigKey = localKey
+		channel.RemoteChanCfg.MultiSigKey = keychain.KeyDescriptor{
+			PubKey: cur.RemoteKey,
+		}
+	}
+
+	for _, cand := range backup.Splice.Candidates {
+		localKey, err := c.secretKeys.DeriveKey(cand.LocalKey.KeyLocator)
+		if err != nil {
+			return nil, fmt.Errorf("unable to derive splice funding "+
+				"key: %w", err)
+		}
+		splice.Candidates = append(splice.Candidates,
+			&channeldb.SpliceRecord{
+				OutPoint:  cand.OutPoint,
+				Capacity:  cand.Capacity,
+				LocalKey:  localKey,
+				RemoteKey: cand.RemoteKey,
+			})
+	}
+
+	current := backup.FundingOutpoint
+	if cur := backup.Splice.Current; cur != nil {
+		current = cur.OutPoint
+	}
+	ltndLog.Infof("SCB Recovery: ChannelPoint(%v) restored on funding "+
+		"%v with %d pending splices", backup.FundingOutpoint, current,
+		len(splice.Candidates))
+
+	return &splice, nil
 }
 
 // RestoreChansFromSingles attempts to map the set of single channel backups to

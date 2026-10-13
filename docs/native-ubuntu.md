@@ -184,6 +184,36 @@ lncli openchannel --node_key=<public key> --local_amt=<sats>
 lncli pendingchannels       # opens after a few confirmations
 ```
 
+### Resizing a channel
+
+A channel can take more funds, or give some back, without closing
+(splicing). It is off by default. To turn it on, add this to `lnd.conf`
+under `[protocol]` and restart lnd (with the dashboard, use **Resize
+Channels** in Advanced Settings instead):
+
+```ini
+[protocol]
+protocol.splice=true
+```
+
+The peer's node must support it too, and only channels with chain-bound
+signatures can be resized. Turning it on upgrades lnd's database at the
+next start, after which this node can't go back to an older version of
+Lightning Fork. Then:
+
+```sh
+lncli splice estimate in --chan_point=<txid:index> --amt=<sats>
+lncli splice in --chan_point=<txid:index> --amt=<sats>       # from the wallet
+lncli splice out --chan_point=<txid:index> --amt=<sats>      # to the wallet
+lncli splice out --chan_point=<txid:index> --amt=<sats> --addr=<address>
+lncli listchannels          # pending_splice shows how far it got
+```
+
+The channel keeps working while the change confirms; its new size counts
+once both nodes have seen at least six confirmations (more, up to 36,
+when the peer puts coins in). Turning the setting off stops new resizes,
+and one already in progress finishes first.
+
 ## Being reachable over clearnet
 
 Without Tor's onion address, others can reach you only if port 9735 is

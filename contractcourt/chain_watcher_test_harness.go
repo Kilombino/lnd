@@ -1,6 +1,7 @@
 package contractcourt
 
 import (
+	"bytes"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -67,7 +68,9 @@ type chainWatcherTestHarness struct {
 type mockChainNotifier struct {
 	*lnmock.ChainNotifier
 
-	// confEvents tracks active confirmation event subscriptions.
+	// confEvents tracks active confirmation event subscriptions, under
+	// confMu: the chain watcher registers from its own goroutine.
+	confMu     sync.Mutex
 	confEvents []*mockConfirmationEvent
 
 	// confRegistered is a channel that signals when a new confirmation
@@ -80,11 +83,93 @@ type mockChainNotifier struct {
 	// spendRegistered is a channel that signals when a new spend
 	// event has been registered.
 	spendRegistered chan struct{}
+
+	// spendOutpoints records the outpoint of each spend registration.
+	spendMu        sync.Mutex
+	spendOutpoints []wire.OutPoint
+
+	// perOutpoint gives each spend registration its own channel, the
+	// latest one per outpoint in spendChans, so a test can spend one
+	// outpoint among several watched.
+	perOutpoint bool
+	spendChans  map[wire.OutPoint]chan *chainntnfs.SpendDetail
+}
+
+// confEventFor returns the first live confirmation registration for txid.
+func (m *mockChainNotifier) confEventFor(
+	txid chainhash.Hash) *mockConfirmationEvent {
+
+	m.confMu.Lock()
+	defer m.confMu.Unlock()
+
+	for _, event := range m.confEvents {
+		if event.txid == txid && !event.cancelled {
+			return event
+		}
+	}
+
+	return nil
+}
+
+// confEventForScript returns the first live confirmation registration for a
+// script alone.
+func (m *mockChainNotifier) confEventForScript(
+	pkScript []byte) *mockConfirmationEvent {
+
+	m.confMu.Lock()
+	defer m.confMu.Unlock()
+
+	for _, event := range m.confEvents {
+		if event.txid == (chainhash.Hash{}) && !event.cancelled &&
+			bytes.Equal(event.pkScript, pkScript) {
+
+			return event
+		}
+	}
+
+	return nil
+}
+
+// confRegisteredFor reports whether txid was registered with numConfs.
+func (m *mockChainNotifier) confRegisteredFor(txid chainhash.Hash,
+	numConfs uint32) bool {
+
+	m.confMu.Lock()
+	defer m.confMu.Unlock()
+
+	for _, event := range m.confEvents {
+		if event.txid == txid && event.numConfs == numConfs {
+			return true
+		}
+	}
+
+	return false
+}
+
+// spendChanFor returns the channel of the latest registration for op.
+func (m *mockChainNotifier) spendChanFor(
+	op wire.OutPoint) (chan *chainntnfs.SpendDetail, bool) {
+
+	m.spendMu.Lock()
+	defer m.spendMu.Unlock()
+
+	ch, ok := m.spendChans[op]
+
+	return ch, ok
+}
+
+// lastSpendOutpoint returns the outpoint of the latest spend registration.
+func (m *mockChainNotifier) lastSpendOutpoint() wire.OutPoint {
+	m.spendMu.Lock()
+	defer m.spendMu.Unlock()
+
+	return m.spendOutpoints[len(m.spendOutpoints)-1]
 }
 
 // mockConfirmationEvent represents a mock confirmation event subscription.
 type mockConfirmationEvent struct {
 	txid          chainhash.Hash
+	pkScript      []byte
 	numConfs      uint32
 	confirmedChan chan *chainntnfs.TxConfirmation
 	negConfChan   chan int32
@@ -95,15 +180,31 @@ type mockConfirmationEvent struct {
 func (m *mockChainNotifier) RegisterSpendNtfn(outpoint *wire.OutPoint,
 	pkScript []byte, heightHint uint32) (*chainntnfs.SpendEvent, error) {
 
-	// The base mock already has SpendChan, use that.
+	// The base mock already has SpendChan, use that, unless each
+	// outpoint gets its own.
+	spendChan := m.SpendChan
+	if m.perOutpoint {
+		spendChan = make(chan *chainntnfs.SpendDetail, 1)
+		m.spendMu.Lock()
+		if m.spendChans == nil {
+			m.spendChans = make(
+				map[wire.OutPoint]chan *chainntnfs.SpendDetail,
+			)
+		}
+		m.spendChans[*outpoint] = spendChan
+		m.spendMu.Unlock()
+	}
 	spendEvent := &chainntnfs.SpendEvent{
-		Spend: m.SpendChan,
+		Spend: spendChan,
 		Cancel: func() {
 			// No-op for now.
 		},
 	}
 
 	m.spendEvents = append(m.spendEvents, spendEvent)
+	m.spendMu.Lock()
+	m.spendOutpoints = append(m.spendOutpoints, *outpoint)
+	m.spendMu.Unlock()
 
 	// Signal that a new spend event has been registered.
 	select {
@@ -120,14 +221,22 @@ func (m *mockChainNotifier) RegisterConfirmationsNtfn(txid *chainhash.Hash,
 	opts ...chainntnfs.NotifierOption,
 ) (*chainntnfs.ConfirmationEvent, error) {
 
+	// A nil txid asks for the script's confirmation.
+	var id chainhash.Hash
+	if txid != nil {
+		id = *txid
+	}
 	mockEvent := &mockConfirmationEvent{
-		txid:          *txid,
+		txid:          id,
+		pkScript:      pkScript,
 		numConfs:      numConfs,
 		confirmedChan: make(chan *chainntnfs.TxConfirmation, 1),
 		negConfChan:   make(chan int32, 1),
 	}
 
+	m.confMu.Lock()
 	m.confEvents = append(m.confEvents, mockEvent)
+	m.confMu.Unlock()
 
 	// Signal that a new confirmation event has been registered.
 	select {
@@ -139,7 +248,9 @@ func (m *mockChainNotifier) RegisterConfirmationsNtfn(txid *chainhash.Hash,
 		Confirmed:    mockEvent.confirmedChan,
 		NegativeConf: mockEvent.negConfChan,
 		Cancel: func() {
+			m.confMu.Lock()
 			mockEvent.cancelled = true
+			m.confMu.Unlock()
 		},
 	}, nil
 }
@@ -416,17 +527,10 @@ func (h *chainWatcherTestHarness) confirmTx(tx *wire.MsgTx, height int32) {
 	h.t.Helper()
 
 	// Find the confirmation event for this transaction.
-	txHash := tx.TxHash()
-	var confEvent *mockConfirmationEvent
-	for _, event := range h.notifier.confEvents {
-		if event.txid == txHash && !event.cancelled {
-			confEvent = event
-			break
-		}
-	}
+	confEvent := h.notifier.confEventFor(tx.TxHash())
 
 	if confEvent == nil {
-		h.t.Fatalf("no confirmation event registered for tx %v", txHash)
+		h.t.Fatalf("no confirmation event registered for tx %v", tx.TxHash())
 	}
 
 	// Send confirmation.
@@ -448,14 +552,7 @@ func (h *chainWatcherTestHarness) triggerReorg(tx *wire.MsgTx,
 	h.t.Helper()
 
 	// Find the confirmation event for this transaction.
-	txHash := tx.TxHash()
-	var confEvent *mockConfirmationEvent
-	for _, event := range h.notifier.confEvents {
-		if event.txid == txHash && !event.cancelled {
-			confEvent = event
-			break
-		}
-	}
+	confEvent := h.notifier.confEventFor(tx.TxHash())
 
 	if confEvent == nil {
 		// The chain watcher might not have registered for

@@ -172,6 +172,12 @@ var defaultSetDesc = setDesc{
 		SetInit:    {}, // I
 		SetNodeAnn: {}, // N
 	},
+	// Splicing is off unless protocol.splice is set: the feature manager
+	// unsets it otherwise (Config.Splice).
+	lnwire.SpliceOptional: {
+		SetInit:    {}, // I
+		SetNodeAnn: {}, // N
+	},
 	lnwire.OnionMessagesOptional: {
 		SetInit:    {}, // I
 		SetNodeAnn: {}, // N

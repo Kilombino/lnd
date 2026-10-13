@@ -348,9 +348,18 @@ func (s *SubSwapper) backupUpdater() {
 				log.Debugf("Adding channel %v to backup state",
 					newChan.FundingOutpoint)
 
-				single := NewSingle(
+				// Without its splices a spliced channel's
+				// backup would name the wrong keys: the one
+				// held stays.
+				single, err := BuildSingle(
 					newChan.OpenChannel, newChan.Addrs,
 				)
+				if err != nil {
+					log.Errorf("Unable to back up channel "+
+						"%v: %v",
+						newChan.FundingOutpoint, err)
+					continue
+				}
 				s.backupState[newChan.FundingOutpoint] = single
 			}
 

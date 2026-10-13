@@ -824,6 +824,26 @@ type LightningChannel struct {
 	// fundingOutput is the funding output (script+value).
 	fundingOutput wire.TxOut
 
+	// pendingFundings are the splices that have not locked yet: every
+	// commitment is also signed on each of their funding outputs.
+	pendingFundings []*pendingFunding
+
+	// retiredFundings are the fundings locked splices replaced, while
+	// the peer's commitments on them that were unrevoked at the lock wait
+	// to be revoked and logged.
+	retiredFundings []*retiredFunding
+
+	// obsoleteFundings are the fundings a locked splice replaced: the
+	// peer may still sign for them in a batch it started before it learned
+	// of the lock.
+	obsoleteFundings map[chainhash.Hash]bool
+
+	// spliceRestoreErr is set when the pending splices couldn't be
+	// restored. Updating the channel without them could leave a splice
+	// that confirms without a commitment we can publish, so every update
+	// is refused; closing on the current funding still works.
+	spliceRestoreErr error
+
 	// opts is the set of options that channel was initialized with.
 	opts *channelOpts
 
@@ -1044,6 +1064,20 @@ func NewLightningChannel(signer input.Signer,
 	// order to complete channel state transitions.
 	if err := lc.createSignDesc(); err != nil {
 		return nil, err
+	}
+
+	// Pending splices: their commitments are rebuilt from the chains just
+	// restored. A failure doesn't stop the channel from loading, so it can
+	// still be closed on its current funding, but it stops every update.
+	err = lc.restorePendingFundings()
+	if err == nil {
+		err = lc.loadObsoleteFundings()
+	}
+	if err != nil {
+		lc.log.Errorf("Unable to restore pending splices, the "+
+			"channel can't be updated: %v", err)
+		lc.pendingFundings = nil
+		lc.spliceRestoreErr = err
 	}
 
 	return lc, nil
@@ -2106,13 +2140,69 @@ func NewBreachRetribution(chanState *channeldb.OpenChannel, stateNum uint64,
 
 	// Query the on-disk revocation log for the snapshot which was recorded
 	// at this particular state num. Based on whether a legacy revocation
-	// log is returned or not, we will process them differently.
-	revokedLog, revokedLogLegacy, err := chanState.FindPreviousState(
-		stateNum,
+	// log is returned or not, we will process them differently. A spliced
+	// channel has had commitments on more than one funding at a height:
+	// the entry is the one on the funding the breach spends.
+	funding := chanState.CurrentFundingOutpoint()
+	if spendTx != nil && len(spendTx.TxIn) > 0 {
+		funding = spendTx.TxIn[0].PreviousOutPoint
+	}
+	revokedLog, revokedLogLegacy, err := chanState.FindPreviousStateFor(
+		funding, stateNum,
 	)
 	if err != nil {
 		return nil, err
 	}
+
+	return newBreachRetribution(
+		chanState, stateNum, breachHeight, spendTx, revokedLog,
+		revokedLogLegacy, leafStore, auxResolver,
+	)
+}
+
+// NewTowerBreachRetribution is NewBreachRetribution for a watchtower backup,
+// before any breach: the peer's revoked commitment at stateNum from the
+// channel's own revocation log, or with spliceTxid set, the one on that
+// splice's funding output from the splice's log.
+func NewTowerBreachRetribution(chanState *channeldb.OpenChannel,
+	stateNum uint64, spliceTxid chainhash.Hash,
+	leafStore fn.Option[AuxLeafStore],
+	auxResolver fn.Option[AuxContractResolver]) (*BreachRetribution,
+	error) {
+
+	var (
+		revokedLog       *channeldb.RevocationLog
+		revokedLogLegacy *channeldb.ChannelCommitment
+		err              error
+	)
+	if spliceTxid == (chainhash.Hash{}) {
+		revokedLog, revokedLogLegacy, err = chanState.FindPreviousState(
+			stateNum,
+		)
+	} else {
+		revokedLog, err = chanState.FetchSpliceRevocationLog(
+			spliceTxid, stateNum,
+		)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return newBreachRetribution(
+		chanState, stateNum, 0, nil, revokedLog, revokedLogLegacy,
+		leafStore, auxResolver,
+	)
+}
+
+// newBreachRetribution builds a BreachRetribution from the revocation log
+// entry of the peer's revoked commitment.
+func newBreachRetribution(chanState *channeldb.OpenChannel, stateNum uint64,
+	breachHeight uint32, spendTx *wire.MsgTx,
+	revokedLog *channeldb.RevocationLog,
+	revokedLogLegacy *channeldb.ChannelCommitment,
+	leafStore fn.Option[AuxLeafStore],
+	auxResolver fn.Option[AuxContractResolver]) (*BreachRetribution,
+	error) {
 
 	// Sanity check that at least one of the logs is returned.
 	if revokedLog == nil && revokedLogLegacy == nil {
@@ -2909,7 +2999,7 @@ func (lc *LightningChannel) fetchCommitmentView(
 	commitTx, err := lc.commitBuilder.createUnsignedCommitmentTx(
 		ourBalance, theirBalance, whoseCommitChain, feePerKw,
 		nextHeight, htlcView, filteredHTLCView, keyRing,
-		commitChain.tip(),
+		commitChain.tip(), lc.currentCommitFunding(),
 	)
 	if err != nil {
 		return nil, err
@@ -3015,7 +3105,11 @@ func (lc *LightningChannel) fetchCommitmentView(
 // returned by this function uses a max sequence number, so it isn't able to be
 // used with RBF by default.
 func fundingTxIn(chanState *channeldb.OpenChannel) wire.TxIn {
-	return *wire.NewTxIn(&chanState.FundingOutpoint, nil, nil)
+	// The funding output on chain now, which a splice may have moved;
+	// FundingOutpoint keeps naming the channel.
+	current := chanState.CurrentFundingOutpoint()
+
+	return *wire.NewTxIn(&current, nil, nil)
 }
 
 // evaluateHTLCView processes all update entries in both HTLC update logs,
@@ -3944,6 +4038,10 @@ func (lc *LightningChannel) validateCommitmentSanity(theirLogCounter,
 			feePerKw, chainfee.FeePerKwFloor)
 	}
 
+	// The same checks on each pending splice's funding follow, from the
+	// balances before the fee.
+	ourPreFee, theirPreFee := ourBalance, theirBalance
+
 	// The channel opener has to account for the commitment fee. This
 	// includes also a buffer type. Depending on whether we are the opener
 	// of the channel we either want to enforce a buffer on the local
@@ -4025,6 +4123,14 @@ func (lc *LightningChannel) validateCommitmentSanity(theirLogCounter,
 
 		return fmt.Errorf("%w: their balance below chan reserve",
 			ErrBelowChanReserve)
+	}
+
+	err = lc.checkPendingFundingBalances(
+		ourPreFee, theirPreFee, ourInitialBalance, theirInitialBalance,
+		commitWeight, feePerKw, buffer,
+	)
+	if err != nil {
+		return err
 	}
 
 	// validateUpdates take a set of updates, and validates them against
@@ -4126,6 +4232,10 @@ type NewCommitState struct {
 	// PendingHTLCs is the set of new/pending HTLCs produced by this
 	// commitment state.
 	PendingHTLCs []channeldb.HTLC
+
+	// SpliceSigs are the signatures for the same commitment on each
+	// pending splice's funding, sent in the same batch.
+	SpliceSigs []SpliceCommitSigs
 }
 
 // SignNextCommitment signs a new commitment which includes any previous
@@ -4146,6 +4256,13 @@ func (lc *LightningChannel) SignNextCommitment(
 
 	lc.Lock()
 	defer lc.Unlock()
+
+	if lc.spliceRestoreErr != nil {
+		return nil, lc.spliceRestoreErr
+	}
+	if err := lc.requireExchanged(); err != nil {
+		return nil, err
+	}
 
 	// Check for empty commit sig. This should never happen, but we don't
 	// dare to fail hard here. We assume peers can deal with the empty sig
@@ -4349,6 +4466,15 @@ func (lc *LightningChannel) SignNextCommitment(
 		auxSigs = append(auxSigs, auxJobResp.SigBlob)
 	}
 
+	// The same commitment on every pending splice's funding goes out in
+	// the same batch.
+	spliceSigs, spliceCommits, err := lc.signPendingFundings(
+		ctx, newCommitView, keyRing,
+	)
+	if err != nil {
+		return nil, err
+	}
+
 	// As we're about to proposer a new commitment state for the remote
 	// party, we'll write this pending state to disk before we exit, so we
 	// can retransmit it if necessary.
@@ -4358,10 +4484,20 @@ func (lc *LightningChannel) SignNextCommitment(
 	if err != nil {
 		return nil, err
 	}
+	if len(spliceSigs) > 0 {
+		commitDiff.CommitSig.FundingTxid = fn.Some(
+			lc.channelState.CurrentFundingOutpoint().Hash,
+		)
+	}
 
-	err = lc.channelState.AppendRemoteCommitChain(commitDiff)
+	err = lc.channelState.AppendRemoteCommitChain(
+		commitDiff, lc.spliceRemoteWrites(spliceSigs, spliceCommits)...,
+	)
 	if err != nil {
 		return nil, err
+	}
+	for i, p := range lc.pendingFundings {
+		p.remote[newCommitView.height] = spliceCommits[i]
 	}
 
 	// TODO(roasbeef): check that one eclair bug
@@ -4386,6 +4522,7 @@ func (lc *LightningChannel) SignNextCommitment(
 			AuxSigBlob: auxSigBlob,
 		},
 		PendingHTLCs: commitDiff.Commitment.Htlcs,
+		SpliceSigs:   spliceSigs,
 	}, nil
 }
 
@@ -4746,8 +4883,13 @@ func (lc *LightningChannel) ProcessChanSyncMsg(ctx context.Context,
 
 		// With the batch of updates accumulated, we'll now re-send the
 		// original CommitSig message required to re-sync their remote
-		// commitment chain with our local version of their chain.
-		commitUpdates = append(commitUpdates, commitDiff.CommitSig)
+		// commitment chain with our local version of their chain. With
+		// splices pending, the whole batch.
+		commitSigs, err := lc.retransmittedCommitSigs(commitDiff)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		commitUpdates = append(commitUpdates, commitSigs...)
 
 		// NOTE: If a revocation is not owed, then updates is empty.
 		if lc.channelState.LastWasRevoke {
@@ -5392,8 +5534,29 @@ var _ error = (*InvalidCommitSigError)(nil)
 //
 //nolint:funlen
 func (lc *LightningChannel) ReceiveNewCommitment(commitSigs *CommitSigs) error {
+	return lc.ReceiveNewCommitmentBatch(commitSigs, nil)
+}
+
+// ReceiveNewCommitmentBatch is ReceiveNewCommitment for a channel with
+// pending splices: spliceSigs are the same commitment's signatures on each
+// pending splice's funding, and must name exactly those splices. Either every
+// signature checks out and the commitment is accepted on every funding, or
+// none is.
+func (lc *LightningChannel) ReceiveNewCommitmentBatch(commitSigs *CommitSigs,
+	spliceSigs []SpliceCommitSigs) error {
+
 	lc.Lock()
 	defer lc.Unlock()
+
+	if lc.spliceRestoreErr != nil {
+		return lc.spliceRestoreErr
+	}
+	if err := lc.requireExchanged(); err != nil {
+		return err
+	}
+	if err := lc.checkBatch(spliceSigs); err != nil {
+		return err
+	}
 
 	// Check for empty commit sig. Because of a previously existing bug, it
 	// is possible that we receive an empty commit sig from nodes running an
@@ -5652,6 +5815,14 @@ func (lc *LightningChannel) ReceiveNewCommitment(commitSigs *CommitSigs) error {
 		return fmt.Errorf("unable to validate aux sigs: %w", err)
 	}
 
+	// The same commitment on every pending splice's funding.
+	spliceCommits, err := lc.verifyPendingFundings(
+		localCommitmentView, keyRing, spliceSigs,
+	)
+	if err != nil {
+		return err
+	}
+
 	// The signature checks out, so we can now add the new commitment to
 	// our local commitment chain. For regular channels, we can just
 	// serialize the ECDSA sig. For taproot channels, we'll serialize the
@@ -5676,6 +5847,9 @@ func (lc *LightningChannel) ReceiveNewCommitment(commitSigs *CommitSigs) error {
 	}
 
 	lc.commitChains.Local.addCommitment(localCommitmentView)
+	for i, p := range lc.pendingFundings {
+		p.local[localCommitmentView.height] = spliceCommits[i]
+	}
 
 	return nil
 }
@@ -5827,6 +6001,11 @@ func (lc *LightningChannel) RevokeCurrentCommitment() (*lnwire.RevokeAndAck,
 	lc.Lock()
 	defer lc.Unlock()
 
+	// Never revoke without the next commitment signed on every funding.
+	if err := lc.requireAllSigned(lc.currentHeight + 1); err != nil {
+		return nil, nil, nil, err
+	}
+
 	revocationMsg, err := lc.generateRevocation(lc.currentHeight)
 	if err != nil {
 		return nil, nil, nil, err
@@ -5852,10 +6031,12 @@ func (lc *LightningChannel) RevokeCurrentCommitment() (*lnwire.RevokeAndAck,
 
 	finalHtlcs, err := lc.channelState.UpdateCommitment(
 		newCommitment, unsignedAckedUpdates,
+		lc.spliceLocalWrites(lc.currentHeight)...,
 	)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	lc.pruneFundingCommits()
 
 	lc.log.Tracef("state transition accepted: "+
 		"our_balance=%v, their_balance=%v, unsigned_acked_updates=%v",
@@ -6119,9 +6300,15 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 	// sync now to ensure the revocation producer state is consistent with
 	// the current commitment height and also to advance the on-disk
 	// commitment chain.
+	spliceWrites, err := lc.spliceRevocationWrites(
+		revocation, lc.commitChains.Remote.tail().height,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
 	err = lc.channelState.AdvanceCommitChainTail(
 		fwdPkg, localPeerUpdates,
-		ourOutputIndex, theirOutputIndex,
+		ourOutputIndex, theirOutputIndex, spliceWrites...,
 	)
 	if err != nil {
 		return nil, nil, err
@@ -6130,6 +6317,7 @@ func (lc *LightningChannel) ReceiveRevocation(revMsg *lnwire.RevokeAndAck) (
 	// Since they revoked the current lowest height in their commitment
 	// chain, we can advance their chain by a single commitment.
 	lc.commitChains.Remote.advanceTail()
+	lc.pruneFundingCommits()
 
 	// As we've just completed a new state transition, attempt to see if we
 	// can remove any entries from the update log which have been removed
@@ -9004,6 +9192,10 @@ type AnchorResolutions struct {
 	// commitment tx. The value will be non-nil iff we've created a new
 	// commitment tx for the remote party which they haven't ACKed yet.
 	RemotePending *AnchorResolution
+
+	// Splices are the same for the commitments on each pending splice's
+	// funding output: if the splice confirms, they are the ones that can.
+	Splices []*AnchorResolutions
 }
 
 // NewAnchorResolutions returns a set of anchor resolutions wrapped in the
@@ -9061,8 +9253,9 @@ func (lc *LightningChannel) NewAnchorResolutions() (*AnchorResolutions,
 		return nil, err
 	}
 
+	var pendingRemoteKeyRing *CommitmentKeyRing
 	if remotePendingCommit != nil {
-		pendingRemoteKeyRing := DeriveCommitmentKeys(
+		pendingRemoteKeyRing = DeriveCommitmentKeys(
 			lc.channelState.RemoteNextRevocation, lntypes.Remote,
 			lc.channelState.ChanType, &lc.channelState.LocalChanCfg,
 			&lc.channelState.RemoteChanCfg,
@@ -9076,6 +9269,13 @@ func (lc *LightningChannel) NewAnchorResolutions() (*AnchorResolutions,
 			return nil, err
 		}
 		resolutions.RemotePending = remotePendingRes
+	}
+
+	resolutions.Splices, err = lc.spliceAnchorResolutions(
+		localKeyRing, remoteKeyRing, pendingRemoteKeyRing,
+	)
+	if err != nil {
+		return nil, err
 	}
 
 	return &resolutions, nil
@@ -9252,6 +9452,12 @@ func (lc *LightningChannel) availableBalance(
 		htlcView, lntypes.Remote, buffer,
 	)
 
+	// The same on each pending splice's funding: an HTLC must fit on
+	// every one.
+	ourLocalCommitBalance = lc.minAvailableOnPendingFundings(
+		htlcView, buffer, ourLocalCommitBalance,
+	)
+
 	// Return which ever balance is lowest.
 	if ourRemoteCommitBalance < ourLocalCommitBalance {
 		return ourRemoteCommitBalance, commitWeight
@@ -9271,6 +9477,17 @@ func (lc *LightningChannel) availableCommitmentBalance(view *HtlcView,
 	whoseCommitChain lntypes.ChannelParty, buffer BufferType) (
 	lnwire.MilliSatoshi, lntypes.WeightUnit) {
 
+	return lc.availableCommitmentBalanceOn(
+		view, whoseCommitChain, buffer, commitFunding{},
+	)
+}
+
+// availableCommitmentBalanceOn is availableCommitmentBalance on a given
+// funding: a pending splice's moves both balances by its contributions.
+func (lc *LightningChannel) availableCommitmentBalanceOn(view *HtlcView,
+	whoseCommitChain lntypes.ChannelParty, buffer BufferType,
+	funding commitFunding) (lnwire.MilliSatoshi, lntypes.WeightUnit) {
+
 	// Compute the current balances for this commitment. This will take
 	// into account HTLCs to determine the commit weight, which the
 	// initiator must pay the fee for.
@@ -9281,6 +9498,12 @@ func (lc *LightningChannel) availableCommitmentBalance(view *HtlcView,
 	if err != nil {
 		lc.log.Errorf("Unable to fetch available balance: %v", err)
 		return 0, 0
+	}
+	ourBalance, theirBalance, err = funding.applyDeltas(
+		ourBalance, theirBalance,
+	)
+	if err != nil {
+		return 0, commitWeight
 	}
 
 	// We can never spend from the channel reserve, so we'll subtract it

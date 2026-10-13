@@ -736,12 +736,21 @@ type unsignedCommitmentTx struct {
 // createUnsignedCommitmentTx generates the unsigned commitment transaction for
 // a commitment view and returns it as part of the unsignedCommitmentTx. The
 // passed in balances should be balances *before* subtracting any commitment
-// fees, but after anchor outputs.
+// fees, but after anchor outputs. funding is the funding output the
+// commitment spends, with the change a pending splice makes to the balances.
 func (cb *CommitmentBuilder) createUnsignedCommitmentTx(ourBalance,
 	theirBalance lnwire.MilliSatoshi, whoseCommit lntypes.ChannelParty,
 	feePerKw chainfee.SatPerKWeight, height uint64, originalHtlcView,
 	filteredHTLCView *HtlcView, keyRing *CommitmentKeyRing,
-	prevCommit *commitment) (*unsignedCommitmentTx, error) {
+	prevCommit *commitment, funding commitFunding) (*unsignedCommitmentTx,
+	error) {
+
+	ourBalance, theirBalance, err := funding.applyDeltas(
+		ourBalance, theirBalance,
+	)
+	if err != nil {
+		return nil, err
+	}
 
 	dustLimit := cb.chanState.LocalChanCfg.DustLimit
 	if whoseCommit.IsRemote() {
@@ -829,18 +838,19 @@ func (cb *CommitmentBuilder) createUnsignedCommitmentTx(ourBalance,
 	if cb.chanState.ChanType.HasLeaseExpiration() {
 		leaseExpiry = cb.chanState.ThawHeight
 	}
+	localCfg, remoteCfg := funding.configs(cb.chanState)
 	if whoseCommit.IsLocal() {
 		commitTx, err = CreateCommitTx(
-			cb.chanState.ChanType, fundingTxIn(cb.chanState), keyRing,
-			&cb.chanState.LocalChanCfg, &cb.chanState.RemoteChanCfg,
+			cb.chanState.ChanType, funding.txIn, keyRing,
+			localCfg, remoteCfg,
 			ourBalance.ToSatoshis(), theirBalance.ToSatoshis(),
 			numHTLCs, cb.chanState.IsInitiator, leaseExpiry,
 			auxResult.AuxLeaves,
 		)
 	} else {
 		commitTx, err = CreateCommitTx(
-			cb.chanState.ChanType, fundingTxIn(cb.chanState), keyRing,
-			&cb.chanState.RemoteChanCfg, &cb.chanState.LocalChanCfg,
+			cb.chanState.ChanType, funding.txIn, keyRing,
+			remoteCfg, localCfg,
 			theirBalance.ToSatoshis(), ourBalance.ToSatoshis(),
 			numHTLCs, !cb.chanState.IsInitiator, leaseExpiry,
 			auxResult.AuxLeaves,
@@ -964,11 +974,11 @@ func (cb *CommitmentBuilder) createUnsignedCommitmentTx(ourBalance,
 	for _, txOut := range commitTx.TxOut {
 		totalOut += btcutil.Amount(txOut.Value)
 	}
-	if totalOut+commitFee > cb.chanState.Capacity {
+	if totalOut+commitFee > funding.capacity {
 		return nil, fmt.Errorf("height=%v, for ChannelPoint(%v) "+
 			"attempts to consume %v while channel capacity is %v",
 			height, cb.chanState.FundingOutpoint,
-			totalOut+commitFee, cb.chanState.Capacity)
+			totalOut+commitFee, funding.capacity)
 	}
 
 	return &unsignedCommitmentTx{
@@ -1351,11 +1361,22 @@ func findOutputIndexesFromRemote(revocationPreimage *chainhash.Hash,
 	chanState *channeldb.OpenChannel,
 	leafStore fn.Option[AuxLeafStore]) (uint32, uint32, error) {
 
+	return findOutputIndexesIn(
+		revocationPreimage, chanState, chanState.RemoteCommitment,
+		leafStore,
+	)
+}
+
+// findOutputIndexesIn finds our and their output indexes in chanCommit, a
+// remote commitment: the channel's current one, or the one on a pending
+// splice's funding at the same height.
+func findOutputIndexesIn(revocationPreimage *chainhash.Hash,
+	chanState *channeldb.OpenChannel, chanCommit channeldb.ChannelCommitment,
+	leafStore fn.Option[AuxLeafStore]) (uint32, uint32, error) {
+
 	// Init the output indexes as empty.
 	ourIndex := uint32(channeldb.OutputIndexEmpty)
 	theirIndex := uint32(channeldb.OutputIndexEmpty)
-
-	chanCommit := chanState.RemoteCommitment
 	_, commitmentPoint := btcec.PrivKeyFromBytes(revocationPreimage[:])
 
 	// With the commitment point generated, we can now derive the king ring

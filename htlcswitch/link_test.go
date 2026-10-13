@@ -2089,10 +2089,14 @@ func (m *mockPeer) SendMessage(sync bool, msgs ...lnwire.Message) error {
 		return fmt.Errorf("disconnected")
 	}
 
-	select {
-	case m.sentMsgs <- msgs[0]:
-	case <-m.quit:
-		return fmt.Errorf("mockPeer shutting down")
+	// Every message, in order: a batch of commitment_signed goes out in
+	// one call.
+	for _, msg := range msgs {
+		select {
+		case m.sentMsgs <- msg:
+		case <-m.quit:
+			return fmt.Errorf("mockPeer shutting down")
+		}
 	}
 	return nil
 }
@@ -7938,5 +7942,30 @@ func TestLinkQuiescenceExitHopProcessingDeferred(t *testing.T) {
 	ensureNoUpdateAfterStfu(t, network.bobServer.protocolTrace)
 	network.bobServer.protocolTraceMtx.Unlock()
 
-	// TODO(proofofkeags): make sure these actions are run on resume.
+	// While quiescent, Bob's processing of the add was deferred, so the
+	// invoice isn't settled yet.
+	ctx := t.Context()
+	inv, err := network.bobServer.registry.LookupInvoice(
+		ctx, htlc.PaymentHash,
+	)
+	require.NoError(t, err)
+	require.NotEqual(t, invpkg.ContractSettled, inv.State)
+
+	// Both sides end quiescence, as they do once a splice's
+	// tx_signatures have been exchanged. In a splice each side resumes
+	// on the peer's tx_signatures, in message order, so the side that
+	// resumes last never sees an update first. Here the order is made
+	// explicit: Alice, who has nothing to send, resumes first; then Bob,
+	// whose deferred add is processed and settled, and the payment
+	// completes.
+	require.NoError(t, <-aliceLink.ResumeQuiescence())
+	require.NoError(t, <-bobLink.ResumeQuiescence())
+
+	require.Eventually(t, func() bool {
+		inv, err := network.bobServer.registry.LookupInvoice(
+			ctx, htlc.PaymentHash,
+		)
+
+		return err == nil && inv.State == invpkg.ContractSettled
+	}, 10*time.Second, 50*time.Millisecond)
 }

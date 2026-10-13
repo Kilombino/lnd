@@ -291,12 +291,21 @@ type chainWatcherConfig struct {
 	// the full required confirmation depth via the existing async path.
 	notifyEarlyCoopClose func(*channeldb.ChannelCloseSummary)
 
+	// publishTx broadcasts a transaction. When a splice confirms after we
+	// force closed the channel on its previous funding, our commitment on
+	// the splice's funding is published with it. Nil skips that.
+	publishTx func(*wire.MsgTx, string) error
+
 	// markLinkInactive takes the channel's link out of the switch. It is
 	// called as soon as the funding output is seen spent by a transaction
 	// this version doesn't recognise: from then on no payment may be
 	// forwarded over the channel, since its funds may sit on an output
 	// this node doesn't watch. It may be nil (tests).
 	markLinkInactive func() error
+
+	// notifySpentUnknown, if set, is told when the channel is first
+	// flagged for a spend of its funding output it doesn't recognise.
+	notifySpentUnknown func(chanPoint wire.OutPoint, txid chainhash.Hash)
 }
 
 // chainWatcher is a system that's assigned to every active channel. The duty
@@ -357,6 +366,25 @@ type chainWatcher struct {
 	// suppress the duplicate notify at full conf depth, so the field is an
 	// atomic.Bool to make that cross-goroutine read race-free.
 	coopCloseEarlyDispatched atomic.Bool
+
+	// splice is set once a pending splice of the channel has confirmed:
+	// the watch has moved to its funding output. Only the close observer
+	// uses it.
+	splice *spliceWatch
+
+	// previousSpends carries a spend of a funding output a locked splice
+	// replaced, by anything but that splice, to the close observer.
+	previousSpends chan *chainntnfs.SpendDetail
+
+	// movedWatch starts, once, the search for the peer's commitment on a
+	// funding output a restored channel's backup didn't know, and
+	// movedCommits carries it to the close observer.
+	movedWatch   sync.Once
+	movedCommits chan *chainntnfs.SpendDetail
+
+	// watchedPrevious are the replaced funding outputs being watched,
+	// used only from Start and the close observer.
+	watchedPrevious map[wire.OutPoint]bool
 }
 
 // EarlyCoopCloseDispatched reports whether the chain watcher already fired the
@@ -401,9 +429,10 @@ func newChainWatcher(cfg chainWatcherConfig) (*chainWatcher, error) {
 	heightHint := chanState.DeriveHeightHint()
 
 	// We'll register for a notification to be dispatched if the funding
-	// output is spent.
+	// output is spent: the one on chain now, which a splice may have moved.
+	currentFunding := chanState.CurrentFundingOutpoint()
 	spendNtfn, err := cfg.notifier.RegisterSpendNtfn(
-		&chanState.FundingOutpoint, fundingPkScript, heightHint,
+		&currentFunding, fundingPkScript, heightHint,
 	)
 	if err != nil {
 		return nil, err
@@ -415,6 +444,9 @@ func newChainWatcher(cfg chainWatcherConfig) (*chainWatcher, error) {
 		quit:                make(chan struct{}),
 		clientSubscriptions: make(map[uint64]*ChainEventSubscription),
 		fundingSpendNtfn:    spendNtfn,
+		previousSpends:      make(chan *chainntnfs.SpendDetail, 1),
+		movedCommits:        make(chan *chainntnfs.SpendDetail, 1),
+		watchedPrevious:     make(map[wire.OutPoint]bool),
 	}
 
 	// If this is a pending taproot channel, we need to register for a
@@ -422,8 +454,7 @@ func newChainWatcher(cfg chainWatcherConfig) (*chainWatcher, error) {
 	// `fundingConfirmedNtfn` for details.
 	if c.cfg.chanState.IsPending && c.cfg.chanState.ChanType.IsTaproot() {
 		confNtfn, err := cfg.notifier.RegisterConfirmationsNtfn(
-			&chanState.FundingOutpoint.Hash, fundingPkScript, 1,
-			heightHint,
+			&currentFunding.Hash, fundingPkScript, 1, heightHint,
 		)
 		if err != nil {
 			return nil, err
@@ -457,6 +488,9 @@ func (c *chainWatcher) Start() error {
 
 	log.Debugf("Starting chain watcher for ChannelPoint(%v)",
 		c.cfg.chanState.FundingOutpoint)
+
+	// Before the close observer, which may add to them.
+	c.watchPreviousFundings()
 
 	c.wg.Add(1)
 	go c.closeObserver()
@@ -902,8 +936,10 @@ func (c *chainWatcher) closeObserver() {
 
 		heightHint := c.cfg.chanState.DeriveHeightHint()
 
+		currentFunding := c.cfg.chanState.CurrentFundingOutpoint()
+
 		return c.cfg.notifier.RegisterSpendNtfn(
-			&c.cfg.chanState.FundingOutpoint,
+			&currentFunding,
 			fundingPkScript,
 			heightHint,
 		)
@@ -935,10 +971,14 @@ func (c *chainWatcher) closeObserver() {
 		var (
 			confChan         <-chan *chainntnfs.TxConfirmation
 			negativeConfChan <-chan int32
+			spliceReorgChan  <-chan int32
 		)
 		if confNtfn != nil {
 			confChan = confNtfn.Confirmed
 			negativeConfChan = confNtfn.NegativeConf
+		}
+		if c.splice != nil {
+			spliceReorgChan = c.splice.confNtfn.NegativeConf
 		}
 
 		select {
@@ -951,6 +991,10 @@ func (c *chainWatcher) closeObserver() {
 
 			spend := c.handleBlockbeat(beat)
 			if spend == nil {
+				continue
+			}
+			if moved, ok := c.maybeFollowSplice(spend, spendNtfn); ok {
+				spendNtfn = moved
 				continue
 			}
 
@@ -967,6 +1011,10 @@ func (c *chainWatcher) closeObserver() {
 		case spend, ok := <-spendNtfn.Spend:
 			if !ok {
 				return
+			}
+			if moved, ok := c.maybeFollowSplice(spend, spendNtfn); ok {
+				spendNtfn = moved
+				continue
 			}
 
 			result := c.processDetectedSpend(
@@ -1051,11 +1099,54 @@ func (c *chainWatcher) closeObserver() {
 			log.Infof("ChannelPoint(%v): re-registered for spend "+
 				"detection", c.cfg.chanState.FundingOutpoint)
 
+		// A funding output a locked splice replaced was spent by
+		// something else: a reorg took the splice out.
+		case spend := <-c.previousSpends:
+			c.handlePreviousFundingSpend(spend)
+
+		// The peer's commitment on a funding output a restored
+		// channel's backup didn't know.
+		case spend := <-c.movedCommits:
+			c.handleMovedCommitment(spend)
+
+		// A reorg took out the splice the watch had moved for: the old
+		// funding output is unspent again, and watched again.
+		case depth, ok := <-spliceReorgChan:
+			if !ok {
+				spliceReorgChan = nil
+				continue
+			}
+			log.Warnf("ChannelPoint(%v): splice %v reorged out at "+
+				"depth %d, watching the previous funding output",
+				c.cfg.chanState.FundingOutpoint, c.splice.txid,
+				depth)
+
+			if confNtfn != nil {
+				confNtfn.Cancel()
+				confNtfn = nil
+				pendingSpend = nil
+			}
+			c.splice.confNtfn.Cancel()
+			c.splice = nil
+
+			spendNtfn.Cancel()
+			var err error
+			spendNtfn, err = registerForSpend()
+			if err != nil {
+				log.Errorf("Unable to re-register for spend: "+
+					"%v", err)
+				return
+			}
+			c.fundingSpendNtfn = spendNtfn
+
 		// The chainWatcher has been signalled to exit, so we'll do so
 		// now.
 		case <-c.quit:
 			if confNtfn != nil {
 				confNtfn.Cancel()
+			}
+			if c.splice != nil {
+				c.splice.confNtfn.Cancel()
 			}
 
 			return
@@ -1479,7 +1570,8 @@ func isCommitmentShaped(spendingTx *wire.MsgTx) bool {
 // close sequence can be trusted to be that close. Both closers persist the
 // shutdown before producing any closing signature, in both roles, and never
 // delete it. A channel restored from a static backup has no shutdown on
-// disk: see restoredCoopClose.
+// disk, and a splice after the backup spends its funding output with this
+// node's cooperation too: that is no close.
 func (c *chainWatcher) closeNegotiated() bool {
 	chanState := c.cfg.chanState
 	if chanState.HasChanStatus(channeldb.ChanStatusCoopBroadcasted) {
@@ -1519,36 +1611,14 @@ func (c *chainWatcher) isCoopCloseSpend(spendingTx *wire.MsgTx) bool {
 		return true
 	}
 
-	// A restored channel knows of no shutdown, and its backup may be of a
-	// channel spliced since, by a later version: a splice that only moves
-	// funds out spends the funding output alone too.
+	// A restored channel knows of no shutdown, and its backup may predate
+	// a splice, which spends the funding output alone too when it only
+	// moves funds out.
 	if c.cfg.chanState.HasChanStatus(channeldb.ChanStatusRestored) {
 		return c.restoredCoopClose(spendingTx)
 	}
 
 	return false
-}
-
-// restoredCoopClose reports whether a spend of a restored channel's funding
-// output, alone and with a cooperative close's sequence, is a close rather
-// than a splice made after the backup. A splice creates the channel's new
-// funding output, a P2WSH 2-of-2 on every channel type that can be spliced; a
-// close this node took part in pays it. So: a close when something pays us
-// and no output is P2WSH. A close paying a P2WSH script is left flagged: what
-// it paid us the wallet finds anyway.
-func (c *chainWatcher) restoredCoopClose(tx *wire.MsgTx) bool {
-	// Never spliced.
-	if c.cfg.chanState.ChanType.IsTaproot() {
-		return true
-	}
-
-	for _, out := range tx.TxOut {
-		if txscript.IsPayToWitnessScriptHash(out.PkScript) {
-			return false
-		}
-	}
-
-	return c.toSelfAmount(tx) > 0
 }
 
 // isUnknownSpend reports whether the supplied spending tx is neither shaped
@@ -1597,9 +1667,19 @@ func (c *chainWatcher) handleUnknownSpend(
 		return nil
 	}
 
-	return chanState.ApplyChanStatus(
+	err := chanState.ApplyChanStatus(
 		channeldb.ChanStatusFundingSpentUnknown,
 	)
+	if err != nil {
+		return err
+	}
+	if c.cfg.notifySpentUnknown != nil {
+		c.cfg.notifySpentUnknown(
+			chanState.FundingOutpoint, *commitSpend.SpenderTxHash,
+		)
+	}
+
+	return nil
 }
 
 // maybeDispatchEarlyCoopClose fires a preliminary CLOSED_CHANNEL event over
@@ -2070,10 +2150,26 @@ func (c *chainWatcher) handleCommitSpend(
 
 	// First, we'll construct the chainset which includes all the data we
 	// need to dispatch an event to our subscribers about this possible
-	// channel close event.
-	chainSet, err := newChainSet(c.cfg.chanState)
-	if err != nil {
-		return fmt.Errorf("create commit set: %w", err)
+	// channel close event. A spend of a confirmed splice's funding output
+	// is judged against the channel as it is on that funding.
+	var (
+		chainSet *chainSet
+		err      error
+	)
+	if c.splice != nil {
+		var view *channeldb.OpenChannel
+		chainSet, view, err = c.spliceChainSet(c.splice)
+		if err != nil {
+			return fmt.Errorf("splice commit set: %w", err)
+		}
+		chanState := c.cfg.chanState
+		c.cfg.chanState = view
+		defer func() { c.cfg.chanState = chanState }()
+	} else {
+		chainSet, err = newChainSet(c.cfg.chanState)
+		if err != nil {
+			return fmt.Errorf("create commit set: %w", err)
+		}
 	}
 
 	// Decode the state hint encoded within the commitment transaction to
@@ -2127,6 +2223,15 @@ func (c *chainWatcher) handleCommitSpend(
 	// commitment is something this version doesn't recognise. The data
 	// loss recovery below assumes a commitment, so it must not run.
 	if !isCommitmentShaped(commitTxBroadcast) {
+		// On a restored channel it is a splice after the backup: the
+		// peer's commitment will spend the output it moved to.
+		restored := c.cfg.chanState.HasChanStatus(
+			channeldb.ChanStatusRestored,
+		)
+		if restored {
+			c.watchMovedFunding(uint32(commitSpend.SpendingHeight))
+		}
+
 		return c.handleUnknownSpend(commitSpend)
 	}
 

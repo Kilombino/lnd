@@ -23,6 +23,10 @@ type channelNotifier struct {
 	// us to get the latest set of addresses for a given node. We'll need
 	// this to be able to create an SCB for new channels.
 	addrs channeldb.AddrSource
+
+	// chanDB reads a channel again when a splice changes what its backup
+	// carries.
+	chanDB *channeldb.ChannelStateDB
 }
 
 // SubscribeChans requests a new channel subscription relative to the initial
@@ -146,6 +150,26 @@ func (c *channelNotifier) SubscribeChans(ctx context.Context,
 					case <-quit:
 						return
 					}
+
+				// A splice step changes the channel's backup:
+				// a splice signed or gone changes the pending
+				// ones, a lock the funding output.
+				case channelnotifier.SpliceEvent:
+					if c.chanDB == nil {
+						continue
+					}
+					ch, err := c.chanDB.FetchChannel(
+						event.OriginalChannelPoint,
+					)
+					if err != nil {
+						ltndLog.Errorf("Unable to read "+
+							"channel %v for its "+
+							"backup: %v",
+							event.OriginalChannelPoint,
+							err)
+						continue
+					}
+					sendChanOpenUpdate(ch)
 
 				// A channel was fully resolved on chain. This
 				// should only really interest us if it was a

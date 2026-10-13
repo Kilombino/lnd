@@ -813,3 +813,81 @@ func FuzzFee(f *testing.F) {
 		)
 	})
 }
+
+func FuzzTxAddInput(f *testing.F) {
+	f.Fuzz(func(t *testing.T, data []byte) {
+		wireMsgHarness(t, data, MsgTxAddInput)
+	})
+}
+
+func FuzzTxAddOutput(f *testing.F) {
+	f.Fuzz(func(t *testing.T, data []byte) {
+		wireMsgHarness(t, data, MsgTxAddOutput)
+	})
+}
+
+func FuzzTxRemoveInput(f *testing.F) {
+	f.Fuzz(func(t *testing.T, data []byte) {
+		wireMsgHarness(t, data, MsgTxRemoveInput)
+	})
+}
+
+func FuzzTxRemoveOutput(f *testing.F) {
+	f.Fuzz(func(t *testing.T, data []byte) {
+		wireMsgHarness(t, data, MsgTxRemoveOutput)
+	})
+}
+
+func FuzzTxComplete(f *testing.F) {
+	f.Fuzz(func(t *testing.T, data []byte) {
+		wireMsgHarness(t, data, MsgTxComplete)
+	})
+}
+
+func FuzzTxSignatures(f *testing.F) {
+	f.Fuzz(func(t *testing.T, data []byte) {
+		wireMsgHarness(t, data, MsgTxSignatures)
+	})
+}
+
+func FuzzTxInitRbf(f *testing.F) {
+	f.Fuzz(func(t *testing.T, data []byte) {
+		wireMsgHarness(t, data, MsgTxInitRbf)
+	})
+}
+
+func FuzzTxAckRbf(f *testing.F) {
+	f.Fuzz(func(t *testing.T, data []byte) {
+		wireMsgHarness(t, data, MsgTxAckRbf)
+	})
+}
+
+func FuzzTxAbort(f *testing.F) {
+	f.Fuzz(func(t *testing.T, data []byte) {
+		wireMsgHarness(t, data, MsgTxAbort)
+	})
+}
+
+func FuzzSpliceInit(f *testing.F) {
+	f.Fuzz(func(t *testing.T, data []byte) {
+		wireMsgHarness(t, data, MsgSpliceInit)
+	})
+}
+
+func FuzzSpliceAck(f *testing.F) {
+	f.Fuzz(func(t *testing.T, data []byte) {
+		wireMsgHarness(t, data, MsgSpliceAck)
+	})
+}
+
+func FuzzSpliceLocked(f *testing.F) {
+	f.Fuzz(func(t *testing.T, data []byte) {
+		wireMsgHarness(t, data, MsgSpliceLocked)
+	})
+}
+
+func FuzzStartBatch(f *testing.F) {
+	f.Fuzz(func(t *testing.T, data []byte) {
+		wireMsgHarness(t, data, MsgStartBatch)
+	})
+}
