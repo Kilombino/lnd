@@ -398,8 +398,7 @@ func TestSpliceDisconnected(t *testing.T) {
 // TestSpliceWithheldGivesBackPlace checks a peer's splice whose tx_signatures
 // the peer withholds after ours: kept, as the peer could publish it, but its
 // place for the peer's splices given back at the timeout; after a restart,
-// taken again for the peer to send them, and given back again at the
-// timeout.
+// given back again, the time running from the agreement.
 func TestSpliceWithheldGivesBackPlace(t *testing.T) {
 	t.Parallel()
 
@@ -442,15 +441,16 @@ func TestSpliceWithheldGivesBackPlace(t *testing.T) {
 		5*time.Second, 10*time.Millisecond)
 	require.Len(t, h.bob.PendingFundings(), 1)
 
+	// Restarted past the deadline, which runs from the agreement and
+	// not from the connection: the place goes back at once, not after
+	// a new 2s.
 	cfg := h.machine.cfg
 	h.machine.Stop()
-	cfg.Policy.NegotiationTimeout = 300 * time.Millisecond
 	m := NewMachine(cfg)
 	require.NoError(t, m.Start())
 	t.Cleanup(m.Stop)
-	require.Equal(t, 1, placed())
 	require.Eventually(t, func() bool { return placed() == 0 },
-		5*time.Second, 10*time.Millisecond)
+		time.Second, 10*time.Millisecond)
 	m.mu.Lock()
 	require.NotNil(t, m.active)
 	m.mu.Unlock()
