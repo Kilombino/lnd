@@ -82,6 +82,26 @@ func TestAcceptSpliceLimits(t *testing.T) {
 		})
 	}
 
+	// The connection ending under the peer's splice being negotiated:
+	// the place is free, and the splice counts as an abort, else a peer
+	// could start one, disconnect and start again for good. (The counts
+	// are the node's in memory: our own restart clears them anyway.)
+	t.Run("disconnected", func(t *testing.T) {
+		t.Parallel()
+
+		h := newAcceptorHarness(t)
+		limits := NewLimits()
+		h.machine.cfg.Limits = limits
+		init(h)
+		next[*lnwire.SpliceAck](t, h)
+		h.machine.Stop()
+
+		limits.mu.Lock()
+		defer limits.mu.Unlock()
+		require.Empty(t, limits.pending)
+		require.Equal(t, 1, limits.recentAborts(h.machine.cfg.ChanID))
+	})
+
 	t.Run("node-wide cap", func(t *testing.T) {
 		t.Parallel()
 
@@ -96,25 +116,6 @@ func TestAcceptSpliceLimits(t *testing.T) {
 		init(h)
 		require.Contains(t, abortReason(t, h), codeTooManySplices)
 		requireResumed(t, h)
-	})
-
-	t.Run("stopped while negotiating", func(t *testing.T) {
-		t.Parallel()
-
-		h := newAcceptorHarness(t)
-		limits := NewLimits()
-		h.machine.cfg.Limits = limits
-
-		init(h)
-		next[*lnwire.SpliceAck](t, h)
-		h.machine.Stop()
-
-		// Negotiation doesn't survive the restart: the place is
-		// free, and the splice no abort of the peer's.
-		limits.mu.Lock()
-		defer limits.mu.Unlock()
-		require.Empty(t, limits.pending)
-		require.Zero(t, limits.recentAborts(h.machine.cfg.ChanID))
 	})
 
 	t.Run("aborts", func(t *testing.T) {

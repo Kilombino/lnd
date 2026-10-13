@@ -359,3 +359,54 @@ func TestSpliceWithheldGivesBackPlace(t *testing.T) {
 	require.NotNil(t, m.active)
 	m.mu.Unlock()
 }
+
+// TestSpliceDisconnectedDuringReplacement checks the connection ending while
+// the peer's replacement of our pending splice is negotiated: the splice it
+// replaces is still ours and pending, its coins leased, and the request is
+// not told it was aborted.
+func TestSpliceDisconnectedDuringReplacement(t *testing.T) {
+	t.Parallel()
+
+	p := newSplicePair(t)
+	p.alice.fund(t, 1, 5_000_000)
+	updates, err := p.alice.machine.Splice(Request{
+		Direction: DirectionIn, Amount: 1_000_000, FeeRate: 2_500,
+	})
+	require.NoError(t, err)
+	requireUpdates(t, updates, StatePreparing, StateNegotiating,
+		StateSigned, StateBroadcast)
+	leases := p.alice.wallet.leaseCount()
+	require.Positive(t, leases)
+
+	fromAlice := make(chan lnwire.Message, 64)
+	p.dropMu.Lock()
+	p.drop = func(from *node, msg lnwire.Message) bool {
+		if from == p.alice {
+			fromAlice <- msg
+		}
+
+		return true
+	}
+	p.dropMu.Unlock()
+	p.alice.link.mu.Lock()
+	p.alice.link.initiator = lntypes.Remote
+	p.alice.link.mu.Unlock()
+	p.alice.machine.HandleSpliceMessage(&lnwire.TxInitRbf{
+		ChannelID:    p.alice.machine.cfg.ChanID,
+		LockTime:     p.chain.height,
+		FeeRatePerKw: 3_000,
+	})
+	select {
+	case msg := <-fromAlice:
+		require.IsType(t, &lnwire.TxAckRbf{}, msg)
+	case <-time.After(5 * time.Second):
+		t.Fatal("no answer")
+	}
+
+	p.alice.machine.Stop()
+	for u := range updates {
+		require.NotEqual(t, StateAborted, u.State, u.Reason)
+	}
+	require.Equal(t, leases, p.alice.wallet.leaseCount())
+	require.Len(t, p.alice.ch.PendingFundings(), 1)
+}
