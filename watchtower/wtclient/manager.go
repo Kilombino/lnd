@@ -674,15 +674,19 @@ func (m *Manager) BackupState(chanID *lnwire.ChannelID, stateNum uint64) error {
 	}
 
 	// A blob for each commitment the peer revoked at this height: a tower
-	// can only match a breach by its commitment's txid. Read before the
-	// height is taken as presented, so a failure leaves it to a retry.
+	// can only match a breach by its commitment's txid. Nothing retries
+	// a height, the revocation being stored already: unable to read
+	// them, the channel's own commitment is backed up all the same.
 	var splices []chainhash.Hash
 	if m.cfg.FetchSpliceRevocations != nil {
 		var err error
 		splices, err = m.cfg.FetchSpliceRevocations(*chanID, stateNum)
 		if err != nil {
-			return fmt.Errorf("unable to read splice revocations: "+
-				"%w", err)
+			log.Errorf("Unable to read splice revocations of "+
+				"chanid=%v at height=%d, backing up the "+
+				"channel's commitment only: %v", chanID,
+				stateNum, err)
+			splices = nil
 		}
 	}
 

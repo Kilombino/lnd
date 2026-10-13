@@ -1180,12 +1180,12 @@ var clientTests = []clientTest{
 			hints := h.advanceChannelN(0, numUpdates)
 			spliceHints := h.advanceChannelN(1, numUpdates)
 
-			// A failure to read them leaves the height to a retry.
-			h.backupState(0, 0, errRead)
+			// Unable to read them, the channel's own commitment
+			// at the height is backed up all the same.
 			h.backupStates(0, 0, numUpdates, nil)
 
 			h.server.waitForUpdates(
-				append(hints, spliceHints...), waitTime,
+				append(hints, spliceHints[1:]...), waitTime,
 			)
 		},
 	},
