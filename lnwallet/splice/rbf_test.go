@@ -763,9 +763,9 @@ func TestReplacementWithoutContribution(t *testing.T) {
 }
 
 // TestTxAbortWithoutSplice checks a tx_abort for a splice we don't have is
-// echoed, as BOLT 2 asks (the Core Lightning port waits for the echo), and
-// that two idle nodes of ours stop after one echo each way rather than
-// echoing each other for good.
+// echoed, as BOLT 2 asks (the Core Lightning port waits for the echo), every
+// time, and that an echo, empty, isn't: two idle nodes of ours stop after
+// one rather than echoing each other for good.
 func TestTxAbortWithoutSplice(t *testing.T) {
 	t.Parallel()
 
@@ -790,9 +790,15 @@ func TestTxAbortWithoutSplice(t *testing.T) {
 		return false
 	}
 	p.dropMu.Unlock()
-	p.alice.machine.HandleSpliceMessage(&lnwire.TxAbort{
-		ChannelID: p.alice.machine.cfg.ChanID,
-	})
+	stray := &lnwire.TxAbort{
+		ChannelID: p.alice.machine.cfg.ChanID, Data: []byte("gone"),
+	}
+	p.alice.machine.HandleSpliceMessage(stray)
+	time.Sleep(500 * time.Millisecond)
+	require.Equal(t, int32(1), aborts.Load())
+
+	// A second on the connection: echoed too.
+	p.alice.machine.HandleSpliceMessage(stray)
 	time.Sleep(500 * time.Millisecond)
 	require.Equal(t, int32(2), aborts.Load())
 }
@@ -806,9 +812,18 @@ func TestMessagesCrossingOurAbort(t *testing.T) {
 
 	for _, aborted := range []bool{true, false} {
 		h := newAcceptorHarness(t)
+
+		// Our tx_abort: the peer's splice_init refused.
 		if aborted {
-			h.machine.HandleSpliceMessage(&lnwire.TxAbort{
-				ChannelID: h.machine.cfg.ChanID,
+			key, err := btcec.NewPrivateKey()
+			require.NoError(t, err)
+			h.machine.cfg.Estimator = estimateOnly{rate: 10_000}
+			h.machine.HandleSpliceMessage(&lnwire.SpliceInit{
+				ChannelID:           h.machine.cfg.ChanID,
+				FundingContribution: 1_000_000,
+				FundingFeeRatePerKw: 300,
+				LockTime:            h.chain.height,
+				FundingPubKey:       key.PubKey(),
 			})
 			next[*lnwire.TxAbort](t, h)
 		}

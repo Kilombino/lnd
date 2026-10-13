@@ -459,15 +459,19 @@ func (m *Machine) handleTxAbort(msg *lnwire.TxAbort) {
 	}
 
 	switch {
-	// One we no longer have, or never had: echoed all the same, the Core
-	// Lightning port waiting for the echo and taking nothing else until
-	// it comes. Our echo counts as sent, so the peer's echo of it, from
-	// a node in the same state, ends the exchange rather than echoing
-	// again.
+	// An empty one is an echo: ours carry no reason, nor the Core
+	// Lightning port's, while every first tx_abort, ours and the port's,
+	// gives one. Not answered, or two nodes echo each other for good.
+	case a == nil && len(msg.Data) == 0:
+		log.Debugf("ChannelID(%v): tx_abort echo without a splice",
+			m.cfg.ChanID)
+
+	// One we no longer have, or never had: echoed, the port waiting for
+	// the echo and taking nothing else until it comes. Not counted as
+	// ours sent, so a second one on this connection is echoed too.
 	case a == nil:
 		log.Debugf("ChannelID(%v): tx_abort without a splice: %v",
 			m.cfg.ChanID, reason)
-		m.abortSent = true
 		m.send(&lnwire.TxAbort{ChannelID: m.cfg.ChanID})
 
 		// A quiescence the peer won ends with it: it ends its own.
