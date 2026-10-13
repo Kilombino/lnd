@@ -339,6 +339,16 @@ func (m *Machine) startSigningTimeout() {
 				return
 			}
 
+			// A transaction the peer built: the Core Lightning
+			// port signs its part as soon as tx_complete is
+			// exchanged and fails the channel on a tx_abort
+			// after. Kept likewise; one the peer doesn't name on
+			// reconnecting is dropped then, quietly.
+			if a.role == interactivetx.Acceptor {
+				m.releaseWithheld(a)
+				return
+			}
+
 			// Restarted past the time: a tx_abort before the
 			// peer's channel_reestablish fails its link, so the
 			// splice goes then, as one never signed does.
@@ -364,8 +374,8 @@ func (m *Machine) releaseWithheld(a *active) {
 
 		return
 	}
-	log.Warnf("ChannelID(%v): peer withholds its tx_signatures for "+
-		"splice %v; its place for the peer's splices given back",
+	log.Warnf("ChannelID(%v): peer's signatures for splice %v not in "+
+		"time; its place for the peer's splices given back",
 		m.cfg.ChanID, a.txid)
 	m.cfg.Limits.release(m, m.cfg.ChanID, false)
 }

@@ -74,8 +74,9 @@ func TestSpliceSigningTimeout(t *testing.T) {
 }
 
 // TestSpliceSigningTimeoutAcceptor checks the peer's splice stalled the same
-// way: it ends at the timeout and gives back the node's place for the
-// peer's splices, also when the node restarted in between.
+// way: kept at the timeout, as the peer may have signed its part, and the
+// node's place for the peer's splices given back, also when the node
+// restarted in between.
 func TestSpliceSigningTimeoutAcceptor(t *testing.T) {
 	t.Parallel()
 
@@ -96,7 +97,21 @@ func TestSpliceSigningTimeoutAcceptor(t *testing.T) {
 		p.bob.link.initiator = lntypes.Local
 		p.bob.link.mu.Unlock()
 		p.bob.fund(t, 1, 5_000_000)
-		dropCommitSigsFrom(p, p.bob)
+
+		// Bob's commitment_signed never comes; a tx_abort of
+		// Alice's is counted.
+		var aborts atomic.Int32
+		countAborts := func(n *node, msg lnwire.Message) bool {
+			if _, ok := msg.(*lnwire.TxAbort); ok && n == p.alice {
+				aborts.Add(1)
+			}
+			_, isSig := msg.(*lnwire.CommitSig)
+
+			return n == p.bob && isSig
+		}
+		p.dropMu.Lock()
+		p.drop = countAborts
+		p.dropMu.Unlock()
 
 		_, err := p.bob.machine.Splice(Request{
 			Direction: DirectionIn, Amount: 1_000_000,
@@ -145,27 +160,10 @@ func TestSpliceSigningTimeoutAcceptor(t *testing.T) {
 					return nil
 				})
 			require.NoError(t, err)
-			// Nothing goes before the peer's
-			// channel_reestablish: a tx_abort then fails its
-			// link.
-			var early atomic.Int32
-			p.dropMu.Lock()
-			p.drop = func(n *node, msg lnwire.Message) bool {
-				if _, ok := msg.(*lnwire.TxAbort); ok &&
-					n == p.alice {
-
-					early.Add(1)
-				}
-				_, isSig := msg.(*lnwire.CommitSig)
-
-				return n == p.bob && isSig
-			}
-			p.dropMu.Unlock()
 			m = NewMachine(cfg)
 			require.NoError(t, m.Start())
 			t.Cleanup(m.Stop)
 			time.Sleep(200 * time.Millisecond)
-			require.Zero(t, early.Load())
 			m.mu.Lock()
 			require.NotNil(t, m.active)
 			m.mu.Unlock()
@@ -177,17 +175,23 @@ func TestSpliceSigningTimeoutAcceptor(t *testing.T) {
 			})
 		}
 
+		// A splice Bob built: the Core Lightning port signs its
+		// part once tx_complete is exchanged and fails the channel
+		// on a tx_abort after. Kept, named by Bob on reconnecting,
+		// its place given back; never a tx_abort.
 		require.Eventually(t, func() bool {
-			m.mu.Lock()
-			defer m.mu.Unlock()
+			limits.mu.Lock()
+			defer limits.mu.Unlock()
 
-			return m.active == nil
+			return len(limits.pending) == 0
 		}, 5*time.Second, 10*time.Millisecond, "restart %v", restart)
-		limits.mu.Lock()
-		pending := len(limits.pending)
-		limits.mu.Unlock()
-		require.Zero(t, pending, "restart %v", restart)
-		require.Empty(t, p.alice.ch.PendingFundings())
+		time.Sleep(200 * time.Millisecond)
+		m.mu.Lock()
+		kept := m.active != nil && m.active.phase == phaseSigning
+		m.mu.Unlock()
+		require.True(t, kept, "restart %v", restart)
+		require.Zero(t, aborts.Load(), "restart %v", restart)
+		require.Len(t, p.alice.ch.PendingFundings(), 1)
 	}
 }
 
