@@ -687,3 +687,30 @@ func TestReplacementAbortsCounted(t *testing.T) {
 	rbf(5_000)
 	require.Contains(t, abortReason(t, h), codeTooManyAborts)
 }
+
+// TestReplacementWithoutContribution checks a tx_init_rbf without
+// funding_output_contribution: the peer puts nothing in the replacement, as
+// the spec reads, whatever it put in the splice replaced.
+func TestReplacementWithoutContribution(t *testing.T) {
+	t.Parallel()
+
+	h := newAcceptorHarness(t)
+	first := startAliceSplice(t, h, 40_000_000, 2_500)
+	first.construct(t, h)
+	signSplice(t, h, first, nil)
+
+	h.machine.HandleSpliceMessage(&lnwire.TxInitRbf{
+		ChannelID:    h.machine.cfg.ChanID,
+		LockTime:     h.chain.height,
+		FeeRatePerKw: 5_000,
+	})
+	next[*lnwire.TxAckRbf](t, h)
+	require.Eventually(t, func() bool {
+		h.machine.mu.Lock()
+		defer h.machine.mu.Unlock()
+
+		a := h.machine.active
+		return a != nil && len(a.replaced) == 1 &&
+			a.theirContribution == 0
+	}, 5*time.Second, 10*time.Millisecond)
+}

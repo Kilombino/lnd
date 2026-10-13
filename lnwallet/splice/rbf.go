@@ -57,10 +57,10 @@ func (m *Machine) handleTxInitRbf(msg *lnwire.TxInitRbf) {
 		return
 	}
 
-	// The peer's contribution it may change; absent, it stays.
-	contribution := msg.FundingOutputContribution.UnwrapOr(
-		a.theirContribution,
-	)
+	// The peer's contribution it may change; absent, the peer puts in
+	// nothing, as the spec reads (the Core Lightning port always sends
+	// it).
+	contribution := msg.FundingOutputContribution.UnwrapOr(0)
 	feeRate := chainfee.SatPerKWeight(msg.FeeRatePerKw)
 
 	// Replacing a splice we started, we put in what we did: the same
@@ -372,9 +372,7 @@ func (m *Machine) checkTxInitRbf(msg *lnwire.TxInitRbf) (string, string) {
 
 	// The checks of a splice_init, with the splice's keys.
 	return m.checkSpliceInit(&lnwire.SpliceInit{
-		FundingContribution: msg.FundingOutputContribution.UnwrapOr(
-			a.theirContribution,
-		),
+		FundingContribution: msg.FundingOutputContribution.UnwrapOr(0),
 		FundingFeeRatePerKw: msg.FeeRatePerKw,
 		LockTime:            msg.LockTime,
 		FundingPubKey:       a.theirKey,
