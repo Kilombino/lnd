@@ -331,7 +331,8 @@ func TestAcceptSpliceReplaced(t *testing.T) {
 }
 
 // TestAcceptSpliceReplacementRefused checks the replacements refused: one
-// paying less in fees, one of a splice not yet signed both ways, and one
+// paying less in fees, one of a splice not yet signed both ways (a
+// disconnection), and one
 // after our splice_locked; and one at the same fee rate accepted. The
 // splice carries on.
 func TestAcceptSpliceReplacementRefused(t *testing.T) {
@@ -384,8 +385,10 @@ func TestAcceptSpliceReplacementRefused(t *testing.T) {
 		first := startAliceSplice(t, h, 40_000_000, 2_500)
 		first.construct(t, h)
 
+		// Not answered with tx_abort, which would end the splice:
+		// the peer broke the protocol.
 		rbf(h, 5_000)
-		require.Contains(t, abortReason(t, h), codeRbfUnsupported)
+		requireDisconnected(t, h)
 	})
 
 	t.Run("after our splice_locked", func(t *testing.T) {
@@ -641,4 +644,38 @@ func TestRefusedReplacementEcho(t *testing.T) {
 		ChannelID: h.machine.cfg.ChanID, Data: []byte("no"),
 	})
 	require.True(t, misbehaved())
+}
+
+// TestReplacementAbortsCounted checks that failed replacements count
+// against the channel's aborts, as aborted splices do: each kept the channel
+// quiescent, so once the channel has had its aborts, a replacement is
+// refused whatever its rate.
+func TestReplacementAbortsCounted(t *testing.T) {
+	t.Parallel()
+
+	h := newAcceptorHarness(t)
+	h.machine.cfg.Limits = NewLimits()
+	first := startAliceSplice(t, h, 40_000_000, 2_500)
+	first.construct(t, h)
+	signSplice(t, h, first, nil)
+
+	rbf := func(feeRate uint32) {
+		h.machine.HandleSpliceMessage(&lnwire.TxInitRbf{
+			ChannelID:                 h.machine.cfg.ChanID,
+			LockTime:                  h.chain.height,
+			FeeRatePerKw:              feeRate,
+			FundingOutputContribution: fn.Some(btcutil.Amount(40_000_000)),
+		})
+	}
+	for range DefaultMaxAborts {
+		rbf(2_000)
+		require.Contains(t, abortReason(t, h), codeFeeBelowFloor)
+		requireResumed(t, h)
+		h.machine.HandleSpliceMessage(&lnwire.TxAbort{
+			ChannelID: h.machine.cfg.ChanID,
+		})
+	}
+
+	rbf(5_000)
+	require.Contains(t, abortReason(t, h), codeTooManyAborts)
 }

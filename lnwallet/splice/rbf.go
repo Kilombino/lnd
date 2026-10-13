@@ -41,8 +41,16 @@ func (m *Machine) handleTxInitRbf(msg *lnwire.TxInitRbf) {
 		return
 	}
 
+	// A splice still negotiated or signed can't be replaced, and a
+	// tx_abort would end it: the peer broke the protocol.
 	a := m.active
+	if a != nil && a.phase != phasePending {
+		m.warnAndDisconnect("tx_init_rbf while the splice is being " +
+			"negotiated or signed")
+		return
+	}
 	if code, why := m.checkTxInitRbf(msg); code != "" {
+		m.cfg.Limits.noteAbort(m.cfg.ChanID)
 		m.abort(code, "%s", why)
 		m.resume()
 
@@ -306,6 +314,11 @@ func (m *Machine) checkTxInitRbf(msg *lnwire.TxInitRbf) (string, string) {
 	case m.misbehaved || m.cfg.Limits.isMisbehaved(m.cfg.ChanID):
 		return codePeerMisbehaved, ""
 
+	// Failed replacements count as aborts: each kept the channel
+	// quiescent.
+	case m.cfg.Limits.abortsReached(m.cfg.ChanID):
+		return codeTooManyAborts, ""
+
 	// The rate may stay (the Core Lightning port replaces at the fee
 	// floor), not fall.
 	case chainfee.SatPerKWeight(msg.FeeRatePerKw) < a.feeRate:
@@ -334,6 +347,7 @@ func (m *Machine) forgetReplacement() {
 	if a.timeout != nil {
 		a.timeout.Stop()
 	}
+	m.cfg.Limits.noteAbort(m.cfg.ChanID)
 	if a.res != nil {
 		m.removeFunding(a.txid)
 	}

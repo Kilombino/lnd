@@ -130,6 +130,35 @@ func (l *Limits) release(owner *Machine, chanID lnwire.ChannelID,
 	l.aborts[chanID] = append(l.aborts[chanID], l.Now())
 }
 
+// noteAbort counts a failed replacement of a splice against the channel, as
+// an aborted splice counts: each attempt keeps the channel quiescent.
+func (l *Limits) noteAbort(chanID lnwire.ChannelID) {
+	if l == nil {
+		return
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.aborts == nil {
+		l.aborts = make(map[lnwire.ChannelID][]time.Time)
+	}
+	l.aborts[chanID] = append(l.aborts[chanID], l.Now())
+}
+
+// abortsReached reports whether the channel has had its aborts within the
+// window.
+func (l *Limits) abortsReached(chanID lnwire.ChannelID) bool {
+	if l == nil {
+		return false
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	return l.recentAborts(chanID) >= l.MaxAborts
+}
+
 // recentAborts counts a channel's aborts within the window, dropping older
 // ones.
 //
