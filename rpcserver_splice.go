@@ -85,6 +85,10 @@ func (r *rpcServer) spliceStatus(
 
 		return spliceStatusClosing, nil
 
+	// Shutdown sent: a cooperative close is under way.
+	case hasShutdownInfo(ch):
+		return spliceStatusClosing, nil
+
 	case !ch.ChanType.HasUnifiedSigs():
 		return spliceStatusNoUnifiedSigs, nil
 
@@ -866,4 +870,11 @@ func (r *rpcServer) currentFunding(op wire.OutPoint) wire.OutPoint {
 	}
 
 	return ch.CurrentFundingOutpoint()
+}
+
+// hasShutdownInfo reports whether we sent shutdown on the channel.
+func hasShutdownInfo(ch *channeldb.OpenChannel) bool {
+	info, err := ch.ShutdownInfo()
+
+	return err == nil && info.IsSome()
 }

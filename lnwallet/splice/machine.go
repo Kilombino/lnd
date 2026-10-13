@@ -814,10 +814,22 @@ func (m *Machine) spliceable() string {
 	case state.HasChanStatus(channeldb.ChanStatusCoopBroadcasted),
 		state.HasChanStatus(channeldb.ChanStatusLocalCloseInitiator),
 		state.HasChanStatus(channeldb.ChanStatusRemoteCloseInitiator),
-		state.HasChanStatus(channeldb.ChanStatusFundingSpentUnknown):
+		state.HasChanStatus(channeldb.ChanStatusFundingSpentUnknown),
+		shutdownSent(state):
 
 		return codeClosing
 	}
 
 	return ""
+}
+
+// shutdownSent reports whether we sent shutdown, starting a cooperative
+// close or answering the peer's: BOLT 2 allows no splice from then on.
+func shutdownSent(state *channeldb.OpenChannel) bool {
+	if state.Db == nil {
+		return false
+	}
+	info, err := state.ShutdownInfo()
+
+	return err == nil && info.IsSome()
 }

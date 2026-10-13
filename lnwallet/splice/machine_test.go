@@ -845,6 +845,22 @@ func TestAcceptSpliceRefused(t *testing.T) {
 		requireResumed(t, h)
 	})
 
+	// Shutdown sent, a cooperative close under way: BOLT 2 allows no
+	// splice from then on.
+	t.Run("closing", func(t *testing.T) {
+		t.Parallel()
+
+		h := newAcceptorHarness(t)
+		require.NoError(t, h.bob.State().MarkShutdownSent(
+			channeldb.NewShutdownInfo(
+				lnwire.DeliveryAddress(p2wpkh(3)), true,
+			),
+		))
+		init(h, 1_000_000, 2_500)
+		require.Contains(t, abortReason(t, h), codeClosing)
+		requireResumed(t, h)
+	})
+
 	// Leaving less than the reserve the peer is held to: refused before
 	// anything is signed, though 1% of the new capacity would allow it.
 	t.Run("below the peer's reserve", func(t *testing.T) {
