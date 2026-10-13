@@ -208,3 +208,70 @@ func TestSpliceUseMaxKeepsReserve(t *testing.T) {
 	}
 	require.True(t, kept, "no change of the reserve")
 }
+
+// TestSpliceDisconnected checks the connection ending under a splice: one
+// still negotiating ends with it, its coins released and its request told;
+// one past its signatures goes on with the next connection's machine, and
+// only the request's updates end.
+func TestSpliceDisconnected(t *testing.T) {
+	t.Parallel()
+
+	t.Run("negotiating", func(t *testing.T) {
+		t.Parallel()
+
+		p := newSplicePair(t)
+		p.alice.fund(t, 1, 5_000_000)
+		p.dropMu.Lock()
+		p.drop = func(from *node, msg lnwire.Message) bool {
+			switch msg.(type) {
+			case *lnwire.TxAddInput, *lnwire.TxAddOutput,
+				*lnwire.TxComplete:
+
+				return from == p.bob
+			}
+
+			return false
+		}
+		p.dropMu.Unlock()
+
+		updates, err := p.alice.machine.Splice(Request{
+			Direction: DirectionIn, UseMax: true, FeeRate: 2_500,
+		})
+		require.NoError(t, err)
+		requireUpdates(t, updates, StatePreparing, StateNegotiating)
+		require.Equal(t, 1, p.alice.wallet.leaseCount())
+
+		p.alice.machine.Stop()
+		u := requireUpdates(t, updates, StateAborted)
+		require.Equal(t, codeDisconnected, u.Reason)
+		_, open := <-updates
+		require.False(t, open)
+		require.Zero(t, p.alice.wallet.leaseCount())
+	})
+
+	t.Run("broadcast", func(t *testing.T) {
+		t.Parallel()
+
+		p := newSplicePair(t)
+		p.alice.fund(t, 1, 5_000_000)
+		updates, err := p.alice.machine.Splice(Request{
+			Direction: DirectionIn, Amount: 1_000_000,
+			FeeRate: 2_500,
+		})
+		require.NoError(t, err)
+		requireUpdates(t, updates, StatePreparing, StateNegotiating,
+			StateSigned, StateBroadcast)
+
+		p.alice.machine.Stop()
+		select {
+		case _, open := <-updates:
+			require.False(t, open)
+		case <-time.After(5 * time.Second):
+			t.Fatal("updates not ended")
+		}
+
+		// The splice is still the channel's, its coins leased.
+		require.Len(t, p.alice.ch.PendingFundings(), 1)
+		require.Equal(t, 1, p.alice.wallet.leaseCount())
+	})
+}

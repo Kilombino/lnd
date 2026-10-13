@@ -253,6 +253,7 @@ const (
 	codePeerContribUnsupp = "peer_contribution_unsupported"
 	codePeerMisbehaved    = "peer_misbehaved"
 	codeInsufficientFunds = "insufficient_funds"
+	codeDisconnected      = "peer_disconnected"
 )
 
 // phase is where an active splice is.
@@ -475,7 +476,43 @@ func (m *Machine) Stop() {
 		if a != nil && a.role == interactivetx.Acceptor {
 			m.cfg.Limits.release(m, m.cfg.ChanID, false)
 		}
+		if a != nil {
+			m.endWithConnection(a)
+		}
 	})
+}
+
+// endWithConnection settles what the stopped machine leaves: a splice not
+// yet agreed was never recorded and ends with the connection, its coins
+// released and its request told; one recorded is carried on by the next
+// connection's machine, and only the request's updates end here. Before,
+// a peer that disconnected mid-negotiation left our coins leased for 14
+// days and the request waiting for good. Called once the machine's
+// goroutine is done.
+func (m *Machine) endWithConnection(a *active) {
+	switch a.phase {
+	case phasePreparing, phaseNegotiating:
+		if len(a.ourInputs) > 0 {
+			err := ReleaseCoins(m.cfg.Wallet, a.ourInputs)
+			if err != nil {
+				log.Errorf("ChannelID(%v): unable to release "+
+					"coins: %v", m.cfg.ChanID, err)
+			}
+		}
+		if a.updates != nil {
+			m.report(Update{
+				State: StateAborted, Reason: codeDisconnected,
+			})
+		}
+
+	default:
+		m.mu.Lock()
+		if a.updates != nil {
+			close(a.updates)
+			a.updates = nil
+		}
+		m.mu.Unlock()
+	}
 }
 
 // run is the machine's goroutine.
