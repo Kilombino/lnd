@@ -53,7 +53,51 @@ func (c *chainWatcher) knownSplice(
 		}
 	}
 
+	// A transaction of a splice dropped after signing (declared dead, or
+	// a replacement another one beat), confirmed after all by a
+	// reorganisation: its output holds the channel now.
+	r, err := c.cfg.chanState.DroppedSplice(*spend.SpenderTxHash)
+	if err == nil {
+		log.Warnf("ChannelPoint(%v): dropped splice %v confirmed",
+			c.cfg.chanState.FundingOutpoint, spend.SpenderTxHash)
+
+		return r
+	}
+
 	return nil
+}
+
+// retiredChainSet returns the commitments to judge a spend of a retired
+// funding output by: a splice dropped after signing, or the output a lock
+// replaced. We have no commitment there to publish, as ours were revoked; the
+// peer's that weren't revoked when it retired stand until they are, and every
+// earlier one of the peer's is revoked, found in the funding's own log.
+func (c *chainWatcher) retiredChainSet(
+	r *channeldb.SpliceRecord) (*chainSet, *channeldb.OpenChannel, error) {
+
+	if err := c.cfg.chanState.Refresh(); err != nil {
+		return nil, nil, err
+	}
+	view := c.cfg.chanState.SpliceView(r)
+	remote := view.RemoteCommitment
+	set := &chainSet{
+		remoteStateNum: c.cfg.chanState.RemoteCommitment.CommitHeight,
+		localCommit:    view.LocalCommitment,
+		remoteCommit:   remote,
+		commitSet: CommitSet{
+			HtlcSets: map[HtlcSetKey][]channeldb.HTLC{
+				LocalHtlcSet:  view.LocalCommitment.Htlcs,
+				RemoteHtlcSet: remote.Htlcs,
+			},
+		},
+	}
+	if r.RemoteTip != nil {
+		tip := *r.RemoteTip
+		set.remotePendingCommit = &tip
+		set.commitSet.HtlcSets[RemotePendingHtlcSet] = tip.Htlcs
+	}
+
+	return set, view, nil
 }
 
 // spliceFundingScript returns a splice's funding output script.
@@ -161,6 +205,11 @@ func (c *chainWatcher) spliceChainSet(
 		}
 
 		return set, view, nil
+	}
+
+	// A splice dropped after signing that confirmed all the same.
+	if r, err := c.cfg.chanState.DroppedSplice(w.txid); err == nil {
+		return c.retiredChainSet(r)
 	}
 
 	// Locked: the channel is on this funding now.
@@ -550,6 +599,35 @@ func (c *chainWatcher) handlePreviousFundingSpend(
 		"spent by %v", c.cfg.chanState.FundingOutpoint,
 		spend.SpendingTx.TxIn[0].PreviousOutPoint, spend.SpenderTxHash)
 
+	// The peer's commitment there that was unrevoked at the lock, or a
+	// revoked one: judged by the retired output's own commitments.
+	spent := spend.SpendingTx.TxIn[0].PreviousOutPoint
+	if r := c.retiredRecord(spent); r != nil &&
+		isCommitmentShaped(spend.SpendingTx) {
+
+		chainSet, view, err := c.retiredChainSet(r)
+		if err == nil {
+			stateNum := c.cfg.extractStateNumHint(
+				spend.SpendingTx, c.stateHintObfuscator,
+			)
+			chanState := c.cfg.chanState
+			c.cfg.chanState = view
+			ok, err := c.handleKnownRemoteState(
+				spend, stateNum, chainSet,
+			)
+			c.cfg.chanState = chanState
+			if err != nil {
+				log.Errorf("ChannelPoint(%v): unable to handle "+
+					"close on %v: %v",
+					c.cfg.chanState.FundingOutpoint, spent,
+					err)
+			}
+			if ok {
+				return
+			}
+		}
+	}
+
 	if isCommitmentShaped(spend.SpendingTx) {
 		chainSet, err := newChainSet(c.cfg.chanState)
 		if err == nil {
@@ -574,4 +652,20 @@ func (c *chainWatcher) handlePreviousFundingSpend(
 		log.Errorf("ChannelPoint(%v): unable to flag spend: %v",
 			c.cfg.chanState.FundingOutpoint, err)
 	}
+}
+
+// retiredRecord returns the retired record of a funding output, nil if there
+// is none.
+func (c *chainWatcher) retiredRecord(op wire.OutPoint) *channeldb.SpliceRecord {
+	records, err := c.cfg.chanState.SpliceRecords()
+	if err != nil {
+		return nil
+	}
+	for _, r := range records {
+		if r.Retired && r.OutPoint == op {
+			return r
+		}
+	}
+
+	return nil
 }

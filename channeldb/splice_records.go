@@ -36,6 +36,13 @@ var (
 	// splice txid -> commitment height -> RevocationLog
 	spliceRevocationLogBucket = []byte("splice-revocation-log")
 
+	// spliceDroppedBucket keeps, for the life of the channel, the funding
+	// outputs and keys of the splice transactions it dropped after
+	// signing them, keyed by txid: one could still confirm after a deep
+	// reorganisation, and the peer's revoked commitments on it must be
+	// found and punished.
+	spliceDroppedBucket = []byte("splice-dropped")
+
 	// ErrSpliceRecordNotFound is returned for an unknown splice.
 	ErrSpliceRecordNotFound = errors.New("splice record not found")
 )
@@ -782,6 +789,121 @@ func (c *OpenChannel) DeleteSpliceRecord(txid chainhash.Hash) error {
 		}
 		return deleteSpliceRecord(chanBucket, txid)
 	}, func() {})
+}
+
+// RetireSpliceRecord drops a pending splice that won't lock: one aborted,
+// declared dead, or a replacement that lost to another transaction of the
+// splice. One that could still confirm, our tx_signatures out and its
+// commitments exchanged, is kept as retired, without commitments of ours,
+// until the peer's commitments on it are revoked and logged, and its funding
+// output is remembered: a reorganisation could still confirm it. Any other
+// is deleted. It reports whether the splice was retired.
+func (c *OpenChannel) RetireSpliceRecord(txid chainhash.Hash) (bool, error) {
+	c.Lock()
+	defer c.Unlock()
+
+	var retired bool
+	err := kvdb.Update(c.Db.backend, func(tx kvdb.RwTx) error {
+		chanBucket, err := fetchChanBucketRw(
+			tx, c.IdentityPub, &c.FundingOutpoint, c.ChainHash,
+		)
+		if err != nil {
+			return err
+		}
+
+		retired, err = retireSpliceRecord(chanBucket, txid)
+
+		return err
+	}, func() {
+		retired = false
+	})
+
+	return retired, err
+}
+
+// retireSpliceRecord is RetireSpliceRecord in a transaction.
+func retireSpliceRecord(chanBucket kvdb.RwBucket,
+	txid chainhash.Hash) (bool, error) {
+
+	r, err := fetchSpliceRecord(chanBucket, txid)
+	if err != nil {
+		return false, err
+	}
+	unsigned := r.Negotiation != nil &&
+		r.Negotiation.OurTxSignatures == nil
+	if r.RemoteTail == nil || unsigned {
+		return false, deleteSpliceRecord(chanBucket, txid)
+	}
+
+	dropped, err := chanBucket.CreateBucketIfNotExists(spliceDroppedBucket)
+	if err != nil {
+		return false, err
+	}
+	var b bytes.Buffer
+	err = encodeSpliceRecord(&b, &SpliceRecord{
+		OutPoint: r.OutPoint, Capacity: r.Capacity,
+		LocalKey: r.LocalKey, RemoteKey: r.RemoteKey, Retired: true,
+	})
+	if err != nil {
+		return false, err
+	}
+	if err := dropped.Put(txid[:], b.Bytes()); err != nil {
+		return false, err
+	}
+
+	r.Retired = true
+	r.LocalCommit, r.SpliceSig, r.RemoteTipSig = nil, nil, nil
+	r.LocalDelta, r.RemoteDelta = 0, 0
+	r.Negotiation = nil
+
+	return true, putSpliceRecord(chanBucket, r)
+}
+
+// DroppedSplice returns what the channel keeps of a splice transaction it
+// dropped after signing it: its retired record while the peer's commitments
+// on it are still to be logged, then its funding output and keys alone.
+func (c *OpenChannel) DroppedSplice(txid chainhash.Hash) (*SpliceRecord,
+	error) {
+
+	c.RLock()
+	defer c.RUnlock()
+
+	var r *SpliceRecord
+	err := kvdb.View(c.Db.backend, func(tx kvdb.RTx) error {
+		chanBucket, err := fetchChanBucket(
+			tx, c.IdentityPub, &c.FundingOutpoint, c.ChainHash,
+		)
+		if err != nil {
+			return err
+		}
+		dropped := chanBucket.NestedReadBucket(spliceDroppedBucket)
+		if dropped == nil {
+			return ErrSpliceRecordNotFound
+		}
+		v := dropped.Get(txid[:])
+		if v == nil {
+			return ErrSpliceRecordNotFound
+		}
+		known, err := decodeSpliceRecord(bytes.NewReader(v))
+		if err != nil {
+			return err
+		}
+		r = known
+
+		retired, err := fetchSpliceRecord(chanBucket, txid)
+		if err == nil && retired.Retired {
+			r = retired
+		}
+
+		return nil
+	}, func() {
+		r = nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return r, nil
 }
 
 // FetchSpliceRevocationLog returns the revocation log entry of the peer's

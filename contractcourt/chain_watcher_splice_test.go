@@ -596,3 +596,56 @@ func TestChainWatcherForceCloseSpliceReorg(t *testing.T) {
 		t.Fatal("our commitment not published again")
 	}
 }
+
+// TestChainWatcherDroppedSpliceBreach checks a splice transaction dropped
+// after signing (declared dead, say) that a reorganisation confirms after
+// all: its output is watched rather than the spend flagged as unknown, and
+// the peer's commitment on it, revoked since, is a breach found in the
+// splice's own log.
+func TestChainWatcherDroppedSpliceBreach(t *testing.T) {
+	t.Parallel()
+
+	h := newChainWatcherTestHarness(t, withRequiredConfs(1))
+	splice := pendSplice(t, h)
+	revoked, err := h.bobChannel.SignedSpliceCommitment(splice.TxHash())
+	require.NoError(t, err)
+
+	require.NoError(t, h.aliceChannel.RemovePendingFunding(
+		splice.TxHash(),
+	))
+	require.NoError(t, h.bobChannel.RemovePendingFunding(splice.TxHash()))
+	addFakeHTLC(t, 10_000_000, 0, h.aliceChannel, h.bobChannel)
+	require.NoError(t, lnwallet.ForceStateTransition(
+		h.aliceChannel, h.bobChannel,
+	))
+
+	followSplice(t, h, splice)
+	require.False(t, h.aliceChannel.State().HasChanStatus(
+		channeldb.ChanStatusFundingSpentUnknown,
+	))
+
+	h.sendSpend(revoked)
+	breach := h.waitForBreach(5 * time.Second)
+	h.assertBreachTx(breach, revoked)
+}
+
+// TestChainWatcherDroppedSpliceRemoteClose checks the same splice confirmed
+// before the peer revoked its commitment on it: that commitment is the
+// peer's close, its outputs resolved.
+func TestChainWatcherDroppedSpliceRemoteClose(t *testing.T) {
+	t.Parallel()
+
+	h := newChainWatcherTestHarness(t, withRequiredConfs(1))
+	splice := pendSplice(t, h)
+	latest, err := h.bobChannel.SignedSpliceCommitment(splice.TxHash())
+	require.NoError(t, err)
+
+	require.NoError(t, h.aliceChannel.RemovePendingFunding(
+		splice.TxHash(),
+	))
+	followSplice(t, h, splice)
+
+	h.sendSpend(latest)
+	closeInfo := h.waitForRemoteUnilateralClose(5 * time.Second)
+	h.assertRemoteUnilateralCloseTx(closeInfo, latest)
+}

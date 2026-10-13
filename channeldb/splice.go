@@ -7,6 +7,7 @@ import (
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightningnetwork/lnd/fn/v2"
 	graphdb "github.com/lightningnetwork/lnd/graph/db"
@@ -238,17 +239,19 @@ func swapSpliceCommitments(chanBucket kvdb.RwBucket, channel *OpenChannel,
 		}
 	}
 
-	// Every pending splice goes; earlier retired fundings stay until
-	// their commitments are logged.
+	// The splice locked goes, and every other transaction of it,
+	// replacements that lost, is retired: a reorganisation could still
+	// confirm one. Earlier retired fundings stay until their commitments
+	// are logged.
 	bucket := chanBucket.NestedReadWriteBucket(spliceRecordsBucket)
-	var drop [][]byte
+	var others []chainhash.Hash
 	err = bucket.ForEach(func(k, v []byte) error {
 		r, err := decodeSpliceRecord(bytes.NewReader(v))
 		if err != nil {
 			return err
 		}
-		if !r.Retired {
-			drop = append(drop, append([]byte(nil), k...))
+		if !r.Retired && r.Txid() != txid {
+			others = append(others, r.Txid())
 		}
 
 		return nil
@@ -256,8 +259,11 @@ func swapSpliceCommitments(chanBucket kvdb.RwBucket, channel *OpenChannel,
 	if err != nil {
 		return err
 	}
-	for _, k := range drop {
-		if err := bucket.Delete(k); err != nil {
+	if err := deleteSpliceRecord(chanBucket, txid); err != nil {
+		return err
+	}
+	for _, other := range others {
+		if _, err := retireSpliceRecord(chanBucket, other); err != nil {
 			return err
 		}
 	}

@@ -545,7 +545,7 @@ func leastLocalBalance(balance lnwire.MilliSatoshi,
 
 	least := balance
 	for _, r := range records {
-		if r.LocalDelta >= 0 {
+		if r.Retired || r.LocalDelta >= 0 {
 			continue
 		}
 		out := lnwire.NewMSatFromSatoshis(-r.LocalDelta)

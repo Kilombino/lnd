@@ -1210,9 +1210,24 @@ func (lc *LightningChannel) LockPendingFunding(txid chainhash.Hash,
 		lc.obsoleteFundings = make(map[chainhash.Hash]bool)
 	}
 	lc.obsoleteFundings[previous] = true
+	// The other transactions of the splice the lock retired, as their
+	// records were: their commitments are logged as they are revoked.
+	records, err := lc.channelState.SpliceRecords()
+	if err != nil {
+		return err
+	}
+	retiredRecords := make(map[chainhash.Hash]bool)
+	for _, r := range records {
+		if r.Retired {
+			retiredRecords[r.Txid()] = true
+		}
+	}
 	for _, other := range lc.pendingFundings {
 		if other != p {
 			lc.obsoleteFundings[other.txid()] = true
+			if retiredRecords[other.txid()] {
+				lc.retireFunding(other)
+			}
 		}
 	}
 	lc.pendingFundings = nil
@@ -1336,6 +1351,26 @@ func (lc *LightningChannel) requireExchanged() error {
 	return nil
 }
 
+// retireFunding keeps the peer's commitments on a pending splice that is
+// dropped, from the tail of its chain on, as its record keeps them: each is
+// logged when the peer revokes it, since a reorganisation could still
+// confirm the splice.
+func (lc *LightningChannel) retireFunding(p *pendingFunding) {
+	retired := &retiredFunding{
+		txid:   p.txid(),
+		remote: make(map[uint64]*channeldb.ChannelCommitment),
+	}
+	tail := lc.commitChains.Remote.tail().height
+	for h, c := range p.remote {
+		if h >= tail {
+			retired.remote[h] = c.toDiskCommit(lntypes.Remote)
+		}
+	}
+	if len(retired.remote) > 0 {
+		lc.retiredFundings = append(lc.retiredFundings, retired)
+	}
+}
+
 // RemovePendingFunding drops a pending splice that will never lock: one
 // aborted before our tx_signatures, or one that can no longer confirm. A
 // commitment_signed the peer still sends for it in a batch is ignored.
@@ -1343,11 +1378,16 @@ func (lc *LightningChannel) RemovePendingFunding(txid chainhash.Hash) error {
 	lc.Lock()
 	defer lc.Unlock()
 
-	if _, err := lc.pendingFunding(txid); err != nil {
+	p, err := lc.pendingFunding(txid)
+	if err != nil {
 		return err
 	}
-	if err := lc.channelState.DeleteSpliceRecord(txid); err != nil {
+	retired, err := lc.channelState.RetireSpliceRecord(txid)
+	if err != nil {
 		return err
+	}
+	if retired {
+		lc.retireFunding(p)
 	}
 
 	kept := lc.pendingFundings[:0]

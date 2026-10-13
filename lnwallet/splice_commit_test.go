@@ -1042,9 +1042,15 @@ func TestSpliceRemove(t *testing.T) {
 	require.True(t, alice.IsObsoleteFunding(txid))
 	require.Empty(t, alice.PendingFundings())
 
+	// Retired, with Bob's commitment on it still to be revoked and
+	// logged: a reorganisation could confirm the splice yet.
 	records, err := alice.channelState.SpliceRecords()
 	require.NoError(t, err)
-	require.Empty(t, records)
+	require.Len(t, records, 1)
+	require.True(t, records[0].Retired)
+	require.Nil(t, records[0].LocalCommit)
+	require.Nil(t, records[0].Negotiation)
+	dropHeight := records[0].RemoteTail.CommitHeight
 
 	// Bob's splice-out no longer limits what he can send (his HTLC id
 	// 0 is taken by withHTLCs).
@@ -1052,6 +1058,18 @@ func TestSpliceRemove(t *testing.T) {
 	addAndReceiveHTLC(t, bob, alice, htlc, nil)
 	require.NoError(t, ForceStateTransition(bob, alice))
 	require.NoError(t, ForceStateTransition(bob, alice))
+
+	// Bob revoked it: logged on the splice's funding, the record gone,
+	// the splice still known.
+	_, err = alice.channelState.FetchSpliceRevocationLog(txid, dropHeight)
+	require.NoError(t, err)
+	records, err = alice.channelState.SpliceRecords()
+	require.NoError(t, err)
+	require.Empty(t, records)
+	known, err := alice.channelState.DroppedSplice(txid)
+	require.NoError(t, err)
+	require.Equal(t, txid, known.Txid())
+	require.Nil(t, known.RemoteTail)
 
 	// After a restart too.
 	alice, err = restartChannel(alice)
@@ -1295,4 +1313,39 @@ func TestSpliceAnchorResolutions(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, res.Splices)
 	require.Equal(t, localTx.TxHash(), res.Local.CommitAnchor.Hash)
+}
+
+// TestSpliceLockRetiresSibling checks that locking one transaction of a
+// splice retires another signed one, a replacement that lost, rather than
+// deleting it: the peer's commitment on it is logged once revoked, and the
+// splice stays known, since a reorganisation could still confirm it.
+func TestSpliceLockRetiresSibling(t *testing.T) {
+	t.Parallel()
+
+	alice, bob, first := splicedPair(t, 100_000_000, 0)
+	keys := newSpliceKeys(t, alice, bob)
+	second := chainhash.Hash{0x5d}
+	addSplice(t, alice, bob, keys, second, 90_000_000, 0)
+	exchangeSpliceCommitments(t, alice, bob, second)
+
+	scid := lnwire.ShortChannelID{BlockHeight: 900_000, TxIndex: 1}
+	require.NoError(t, alice.LockPendingFunding(first, scid))
+	require.NoError(t, bob.LockPendingFunding(first, scid))
+
+	retired, err := alice.channelState.DroppedSplice(second)
+	require.NoError(t, err)
+	require.True(t, retired.Retired)
+	require.NotNil(t, retired.RemoteTail)
+	height := retired.RemoteTail.CommitHeight
+
+	htlc, _ := createHTLC(3, lnwire.NewMSatFromSatoshis(400_000))
+	addAndReceiveHTLC(t, alice, bob, htlc, nil)
+	require.NoError(t, ForceStateTransition(alice, bob))
+	require.NoError(t, ForceStateTransition(bob, alice))
+
+	_, err = alice.channelState.FetchSpliceRevocationLog(second, height)
+	require.NoError(t, err)
+	known, err := alice.channelState.DroppedSplice(second)
+	require.NoError(t, err)
+	require.Nil(t, known.RemoteTail)
 }

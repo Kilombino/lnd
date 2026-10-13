@@ -1110,7 +1110,31 @@ func (c *chainWatcher) closeObserver() {
 		// A funding output a locked splice replaced was spent by
 		// something else: a reorg took the splice out.
 		case spend := <-c.previousSpends:
-			c.handlePreviousFundingSpend(spend)
+			// A transaction of the splice dropped after signing,
+			// confirmed in place of the one that locked after a
+			// reorganisation: the watch moves to its output.
+			r := c.knownSplice(spend)
+			if r == nil {
+				c.handlePreviousFundingSpend(spend)
+				continue
+			}
+			moved, w, err := c.followSplice(r, spend)
+			if err != nil {
+				log.Errorf("ChannelPoint(%v): unable to follow "+
+					"splice %v: %v",
+					c.cfg.chanState.FundingOutpoint,
+					r.Txid(), err)
+				c.handlePreviousFundingSpend(spend)
+
+				continue
+			}
+			if c.splice != nil {
+				c.splice.confNtfn.Cancel()
+			}
+			spendNtfn.Cancel()
+			spendNtfn = moved
+			c.fundingSpendNtfn = moved
+			c.splice = w
 
 		// The peer's commitment on a funding output a restored
 		// channel's backup didn't know.
