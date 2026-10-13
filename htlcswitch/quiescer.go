@@ -95,6 +95,12 @@ type Quiescer interface {
 	// the channel has been quiescent and then resets the quiescer state to
 	// its initial state.
 	Resume()
+
+	// AssumeQuiescent puts the channel back in quiescence on
+	// reconnecting, for a splice still being signed: BOLT 2 keeps the
+	// channel quiescent until both tx_signatures are exchanged, across
+	// reconnections, without another stfu.
+	AssumeQuiescent(initiator lntypes.ChannelParty)
 }
 
 // QuiescerCfg is a config structure used to initialize a quiescer giving it the
@@ -493,9 +499,23 @@ func (q *QuiescerLive) onResume(hook func()) {
 	q.resumeQueue = append(q.resumeQueue, hook)
 }
 
+// AssumeQuiescent puts the channel back in quiescence on reconnecting, for a
+// splice still being signed. See the Quiescer interface.
+func (q *QuiescerLive) AssumeQuiescent(initiator lntypes.ChannelParty) {
+	q.Lock()
+	defer q.Unlock()
+
+	q.log.Debugf("quiescent again for a splice being signed, %v "+
+		"initiating", initiator)
+	q.sent, q.received = true, true
+	q.localInit = initiator == lntypes.Local
+	q.remoteInit = initiator == lntypes.Remote
+	q.startTimeout()
+}
+
 // Resume runs all of the deferred actions that have accumulated while the
-// channel has been quiescent and then resets the quiescer state to its initial
-// state.
+// channel has been quiescent and then resets the quiescer state to its
+// initial state.
 func (q *QuiescerLive) Resume() {
 	q.Lock()
 	defer q.Unlock()
@@ -558,13 +578,14 @@ var _ Quiescer = (*quiescerNoop)(nil)
 func (q *quiescerNoop) InitStfu(req StfuReq) {
 	req.Resolve(fn.Errf[lntypes.ChannelParty]("quiescence not supported"))
 }
-func (q *quiescerNoop) RecvStfu(_ lnwire.Stfu) error { return nil }
-func (q *quiescerNoop) CanRecvUpdates() bool         { return true }
-func (q *quiescerNoop) CanSendUpdates() bool         { return true }
-func (q *quiescerNoop) SendOwedStfu() error          { return nil }
-func (q *quiescerNoop) IsQuiescent() bool            { return false }
-func (q *quiescerNoop) OnResume(hook func())         { hook() }
-func (q *quiescerNoop) Resume()                      {}
+func (q *quiescerNoop) RecvStfu(_ lnwire.Stfu) error         { return nil }
+func (q *quiescerNoop) CanRecvUpdates() bool                 { return true }
+func (q *quiescerNoop) CanSendUpdates() bool                 { return true }
+func (q *quiescerNoop) SendOwedStfu() error                  { return nil }
+func (q *quiescerNoop) IsQuiescent() bool                    { return false }
+func (q *quiescerNoop) OnResume(hook func())                 { hook() }
+func (q *quiescerNoop) Resume()                              {}
+func (q *quiescerNoop) AssumeQuiescent(lntypes.ChannelParty) {}
 func (q *quiescerNoop) QuiescenceInitiator() fn.Result[lntypes.ChannelParty] {
 	return fn.Err[lntypes.ChannelParty](ErrNoQuiescenceInitiator)
 }

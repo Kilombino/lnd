@@ -4,6 +4,8 @@ import (
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/lightningnetwork/lnd/channeldb"
+	"github.com/lightningnetwork/lnd/lntypes"
+	"github.com/lightningnetwork/lnd/lnwallet/interactivetx"
 )
 
 // A peer that put coins into a splice could spend them through us once the
@@ -13,6 +15,24 @@ import (
 // affordable for a while. So until the splice has PeerInputConfs
 // confirmations, the peer's spliced-in amount is held: the link fails back
 // incoming HTLCs that would draw on it.
+
+// Signing reports whether a splice is being signed, its tx_signatures not
+// yet exchanged both ways, and which side started it: the channel stays
+// quiescent until they are, across reconnections. Safe from any goroutine.
+func (m *Machine) Signing() (bool, lntypes.ChannelParty) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	a := m.active
+	if a == nil || a.phase != phaseSigning {
+		return false, lntypes.Local
+	}
+	if a.role == interactivetx.Initiator {
+		return true, lntypes.Local
+	}
+
+	return true, lntypes.Remote
+}
 
 // Constructing reports whether a splice's transaction is being negotiated,
 // or agreed and not yet added to the channel's fundings: a commitment_signed

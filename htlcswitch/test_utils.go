@@ -1240,6 +1240,21 @@ func newTwoHopNetwork(t testing.TB,
 	startingHeight uint32,
 	linkOpts ...func(*ChannelLinkConfig)) *twoHopNetwork {
 
+	n := newTwoHopNetworkStopped(
+		t, aliceChannel, bobChannel, startingHeight, linkOpts...,
+	)
+	require.NoError(t, n.start())
+
+	return n
+}
+
+// newTwoHopNetworkStopped is newTwoHopNetwork without starting it: the
+// caller starts the servers, for links that aren't eligible at once.
+func newTwoHopNetworkStopped(t testing.TB,
+	aliceChannel, bobChannel *lnwallet.LightningChannel,
+	startingHeight uint32,
+	linkOpts ...func(*ChannelLinkConfig)) *twoHopNetwork {
+
 	aliceDb := aliceChannel.State().Db.GetParentDB()
 	bobDb := bobChannel.State().Db.GetParentDB()
 
@@ -1292,8 +1307,6 @@ func newTwoHopNetwork(t testing.TB,
 
 		hopNetwork: *hopNetwork,
 	}
-
-	require.NoError(t, n.start())
 	t.Cleanup(n.stop)
 
 	return n

@@ -56,6 +56,11 @@ type SpliceHandler interface {
 	// negotiated, or agreed and not yet among the channel's fundings.
 	// Safe from any goroutine.
 	Constructing() bool
+
+	// Signing reports whether a splice is being signed, its
+	// tx_signatures not exchanged both ways, and which side started it.
+	// Safe from any goroutine.
+	Signing() (bool, lntypes.ChannelParty)
 }
 
 // peerInputHeld reports whether the peer's balance is below what the splice

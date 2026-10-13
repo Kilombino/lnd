@@ -1176,6 +1176,14 @@ func (l *channelLink) syncChanStates(ctx context.Context) error {
 		// The splice's part: our commitment_signed for it if asked
 		// for, then the machine's.
 		if l.cfg.SpliceHandler != nil {
+			// A splice still being signed keeps the channel
+			// quiescent across the reconnection, as the peer
+			// assumes: no update goes out, or is taken, before
+			// both tx_signatures are exchanged. The machine
+			// ends it, completing or dropping the splice.
+			if signing, who := l.cfg.SpliceHandler.Signing(); signing {
+				l.quiescer.AssumeQuiescent(who)
+			}
 			l.resendSpliceCommitSig(remoteChanSyncMsg)
 			remoteChanSyncMsg.MyCurrentFundingLocked.WhenSome(
 				func(f lnwire.FundingTxidFlags) {
