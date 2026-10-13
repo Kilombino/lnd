@@ -196,6 +196,10 @@ type ChannelLinkConfig struct {
 	// remote party to revoke.
 	PendingCommitTicker ticker.Ticker
 
+	// HeldMessageTimeout is how long the peer's messages held for a
+	// splice step wait for it; zero for heldMessageTimeout.
+	HeldMessageTimeout time.Duration
+
 	// BatchSize is the max size of a batch of updates done to the link
 	// before we do a state update.
 	BatchSize uint32
@@ -1584,7 +1588,7 @@ func (l *channelLink) htlcManager(ctx context.Context) {
 					code:          ErrRemoteUnresponsive,
 					FailureAction: LinkFailureDisconnect,
 				}, "%T held over %v", l.held[0],
-					heldMessageTimeout)
+					l.heldWait())
 
 				return
 			}
@@ -1966,8 +1970,17 @@ func (l *channelLink) handleUpstreamMsg(ctx context.Context,
 
 	if l.processUpstreamMsg(ctx, msg) {
 		l.held = []lnwire.Message{msg}
-		l.heldTimer = time.NewTimer(heldMessageTimeout)
+		l.heldTimer = time.NewTimer(l.heldWait())
 	}
+}
+
+// heldWait is how long held messages wait.
+func (l *channelLink) heldWait() time.Duration {
+	if l.cfg.HeldMessageTimeout > 0 {
+		return l.cfg.HeldMessageTimeout
+	}
+
+	return heldMessageTimeout
 }
 
 // maxHeldMessages and heldMessageTimeout bound the messages held behind one

@@ -295,6 +295,16 @@ type spliceLinkHarness struct {
 func newSpliceLinkHarness(t *testing.T) *spliceLinkHarness {
 	t.Helper()
 
+	return newSpliceLinkHarnessWith(t, nil)
+}
+
+// newSpliceLinkHarnessWith is newSpliceLinkHarness with the link's config
+// changed by tweak before it starts.
+func newSpliceLinkHarnessWith(t *testing.T,
+	tweak func(*ChannelLinkConfig)) *spliceLinkHarness {
+
+	t.Helper()
+
 	h, err := newSingleLinkTestHarness(
 		t, 5*btcutil.SatoshiPerBitcoin, 0,
 	)
@@ -316,6 +326,9 @@ func newSpliceLinkHarness(t *testing.T) *spliceLinkHarness {
 		case s.failures <- e:
 		default:
 		}
+	}
+	if tweak != nil {
+		tweak(&link.cfg)
 	}
 	require.NoError(t, h.start())
 
@@ -1177,4 +1190,62 @@ func TestLinkCommitSigAfterPeerLock(t *testing.T) {
 	require.NoError(t, <-s.link.LockSplice(txid, scid))
 	nextSent[*lnwire.RevokeAndAck](t, s)
 	s.requireNoFailure(t)
+}
+
+// TestLinkHeldBounded checks the peer's messages held for a splice step are
+// bounded: the step not coming in time, or too many held, the connection
+// drops, rather than the link holding them for good.
+func TestLinkHeldBounded(t *testing.T) {
+	t.Parallel()
+
+	// heldUpdate has the peer send an update the link holds: quiescence
+	// ended on its side with tx_signatures, not yet on ours.
+	heldUpdate := func(s *spliceLinkHarness) *lnwire.UpdateAddHTLC {
+		quiesce(t, s)
+		s.link.HandleChannelUpdate(&lnwire.TxSignatures{
+			ChannelID: s.link.ChanID(),
+		})
+		amt := lnwire.NewMSatFromSatoshis(100_000)
+		var blob [lnwire.OnionPacketSize]byte
+		_, htlc, _, err := generatePayment(amt, amt, 5, blob)
+		require.NoError(t, err)
+		_, err = s.bob.AddHTLC(htlc, nil)
+		require.NoError(t, err)
+		s.link.HandleChannelUpdate(htlc)
+
+		return htlc
+	}
+
+	t.Run("timeout", func(t *testing.T) {
+		t.Parallel()
+
+		s := newSpliceLinkHarnessWith(t, func(c *ChannelLinkConfig) {
+			c.HeldMessageTimeout = 300 * time.Millisecond
+		})
+		heldUpdate(s)
+		s.requireFailure(t, LinkFailureDisconnect)
+	})
+
+	t.Run("too many", func(t *testing.T) {
+		t.Parallel()
+
+		s := newSpliceLinkHarness(t)
+		htlc := heldUpdate(s)
+		for range maxHeldMessages {
+			s.link.HandleChannelUpdate(htlc)
+		}
+		s.requireFailure(t, LinkFailureDisconnect)
+	})
+
+	// Below both, nothing fails.
+	t.Run("within", func(t *testing.T) {
+		t.Parallel()
+
+		s := newSpliceLinkHarness(t)
+		htlc := heldUpdate(s)
+		for range maxHeldMessages - 2 {
+			s.link.HandleChannelUpdate(htlc)
+		}
+		s.requireNoFailure(t)
+	})
 }
