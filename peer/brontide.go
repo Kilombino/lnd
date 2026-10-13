@@ -1671,10 +1671,11 @@ func (p *Brontide) addLink(chanPoint *wire.OutPoint,
 	chanID := lnwire.NewChanIDFromOutPoint(*chanPoint)
 	p.cfg.Switch.RemoveLink(chanID)
 
-	// The channel's splice machine, when splicing applies, hands the
-	// link nothing until the link exists.
-	if p.spliceNegotiated(lnChan) {
-		m, err := p.startSpliceMachine(chanID, lnChan)
+	// The channel's splice machine, when splicing applies or the channel
+	// holds the peer's spliced-in coins, hands the link nothing until the
+	// link exists.
+	if start, disabled := p.spliceMachineMode(lnChan); start {
+		m, err := p.startSpliceMachine(chanID, lnChan, disabled)
 		if err != nil {
 			return fmt.Errorf("unable to start splice machine: %w",
 				err)

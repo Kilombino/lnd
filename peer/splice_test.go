@@ -7,11 +7,13 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/contractcourt"
 	"github.com/lightningnetwork/lnd/fn/v2"
 	"github.com/lightningnetwork/lnd/htlcswitch"
 	"github.com/lightningnetwork/lnd/keychain"
 	"github.com/lightningnetwork/lnd/lnwallet"
+	"github.com/lightningnetwork/lnd/lnwallet/splice"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/stretchr/testify/require"
 )
@@ -71,4 +73,59 @@ func TestPeerNoCloseDuringSplice(t *testing.T) {
 	warning, ok := queued.msg.(*lnwire.Warning)
 	require.True(t, ok, "%T", queued.msg)
 	require.Equal(t, chanID, warning.ChanID)
+}
+
+// TestSpliceMachineForHolds checks that a channel holding coins the peer put
+// into a splice gets a machine, disabled, when splicing doesn't apply to the
+// connection: the peer left the feature out, or splicing was turned off. The
+// machine is what enforces the hold.
+func TestSpliceMachineForHolds(t *testing.T) {
+	t.Parallel()
+
+	harness, err := createTestPeerWithChannel(t, noUpdate)
+	require.NoError(t, err)
+	peer := harness.peer
+	chanID := lnwire.NewChanIDFromOutPoint(harness.channel.ChannelPoint())
+	ch, ok := peer.activeChannels.Load(chanID)
+	require.True(t, ok)
+
+	peer.cfg.SpliceMachine = func(splice.Config,
+		*btcec.PublicKey) *splice.Machine {
+
+		return nil
+	}
+	peer.cfg.SpliceEnabled = true
+
+	// The peer supports splicing: a machine, enabled.
+	peer.remoteFeatures = lnwire.NewFeatureVector(
+		lnwire.NewRawFeatureVector(lnwire.SpliceOptional),
+		lnwire.Features,
+	)
+	start, disabled := peer.spliceMachineMode(ch)
+	require.True(t, start)
+	require.False(t, disabled)
+
+	// It left the feature out: no machine while nothing is held.
+	peer.remoteFeatures = lnwire.EmptyFeatureVector()
+	start, _ = peer.spliceMachineMode(ch)
+	require.False(t, start)
+
+	// With a hold, a disabled machine.
+	require.NoError(t, ch.State().PutSpliceHold(channeldb.SpliceHold{
+		Txid:   chainhash.Hash{2},
+		Amount: 500_000,
+	}))
+	start, disabled = peer.spliceMachineMode(ch)
+	require.True(t, start)
+	require.True(t, disabled)
+
+	// The same with splicing turned off here and the peer supporting it.
+	peer.cfg.SpliceEnabled = false
+	peer.remoteFeatures = lnwire.NewFeatureVector(
+		lnwire.NewRawFeatureVector(lnwire.SpliceOptional),
+		lnwire.Features,
+	)
+	start, disabled = peer.spliceMachineMode(ch)
+	require.True(t, start)
+	require.True(t, disabled)
 }

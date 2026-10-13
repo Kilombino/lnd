@@ -219,7 +219,7 @@ func (s *server) newSpliceMachine(base splice.Config,
 
 		return err == nil
 	}
-	cfg.Disabled = !s.cfg.ProtocolOptions.Splice()
+	cfg.Disabled = base.Disabled || !s.cfg.ProtocolOptions.Splice()
 	cfg.Limits = s.spliceLimits
 	cfg.KeyRing = s.cc.KeyRing
 	cfg.Signer = s.cc.Signer

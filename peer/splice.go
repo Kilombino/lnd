@@ -44,6 +44,39 @@ func (p *Brontide) spliceNegotiated(lnChan *lnwallet.LightningChannel) bool {
 	return p.cfg.SpliceEnabled || len(lnChan.PendingFundings()) > 0
 }
 
+// spliceMachineMode reports whether the channel gets a splice machine on
+// this connection, and whether it starts disabled: one only enforcing the
+// channel's holds, since splicing doesn't apply.
+func (p *Brontide) spliceMachineMode(
+	lnChan *lnwallet.LightningChannel) (bool, bool) {
+
+	if p.spliceNegotiated(lnChan) {
+		return true, false
+	}
+
+	return p.spliceHeld(lnChan), true
+}
+
+// spliceHeld reports whether the channel holds coins the peer put into a
+// splice that locked and isn't deep enough yet. The machine enforces that
+// hold, so it runs even when splicing doesn't apply to this connection: a
+// peer that leaves the feature out on reconnecting, or splicing turned off
+// since, must not free the coins early.
+func (p *Brontide) spliceHeld(lnChan *lnwallet.LightningChannel) bool {
+	if p.cfg.SpliceMachine == nil {
+		return false
+	}
+	holds, err := lnChan.State().SpliceHolds()
+	if err != nil {
+		// Unreadable: start the machine, which reads them again and
+		// fails the link if it can't.
+		p.log.Errorf("unable to read splice holds: %v", err)
+		return true
+	}
+
+	return len(holds) > 0
+}
+
 // spliceLinkProxy is the channel's link as the splice machine sees it,
 // looked up in the switch on each call: the link is created after the
 // machine and replaced on reconnection.
@@ -163,15 +196,18 @@ func (p *Brontide) SpliceMachine(chanID lnwire.ChannelID) (*splice.Machine,
 }
 
 // startSpliceMachine creates and starts a channel's splice machine, stopping
-// one left from the previous connection.
+// one left from the previous connection. A disabled machine refuses every
+// splice and only enforces the channel's holds.
 func (p *Brontide) startSpliceMachine(chanID lnwire.ChannelID,
-	lnChan *lnwallet.LightningChannel) (*splice.Machine, error) {
+	lnChan *lnwallet.LightningChannel, disabled bool) (*splice.Machine,
+	error) {
 
 	m := p.cfg.SpliceMachine(splice.Config{
-		ChanID:  chanID,
-		Link:    &spliceLinkProxy{p: p, chanID: chanID},
-		Channel: lnChan,
-		Peer:    p,
+		ChanID:   chanID,
+		Link:     &spliceLinkProxy{p: p, chanID: chanID},
+		Channel:  lnChan,
+		Peer:     p,
+		Disabled: disabled,
 	}, p.IdentityKey())
 	if err := m.Start(); err != nil {
 		return nil, err
