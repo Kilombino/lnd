@@ -283,6 +283,31 @@ func (m *Machine) checkPeerOutput(out *interactivetx.Output) error {
 	return errors.New("output script not accepted")
 }
 
+// startSigningTimeout ends a splice whose signatures don't come in time
+// once its transaction is agreed. Until our tx_signatures are out the peer
+// can't complete the transaction, so the splice is forgotten: a peer that
+// stops answering here would otherwise keep our coins leased, the channel
+// unable to splice and, for its own splice, a slot of the node's.
+func (m *Machine) startSigningTimeout() {
+	timeout := 2 * m.cfg.Policy.NegotiationTimeout
+	a := m.active
+	if a.timeout != nil {
+		a.timeout.Stop()
+	}
+	a.timeout = time.AfterFunc(timeout, func() {
+		m.enqueue(func() {
+			if m.active != a || a.phase != phaseSigning ||
+				a.ourTxSigs != nil {
+
+				return
+			}
+			m.abort(codeTimeout, "signatures took over %v",
+				timeout)
+			m.forget()
+		})
+	})
+}
+
 // startTimeout ends a negotiation that doesn't finish in time.
 func (m *Machine) startTimeout() {
 	timeout := m.cfg.Policy.NegotiationTimeout
@@ -392,6 +417,7 @@ func (m *Machine) constructionDone(res *interactivetx.Result) {
 		a.session = nil
 		a.phase = phaseSigning
 	})
+	m.startSigningTimeout()
 
 	record := &channeldb.SpliceRecord{
 		OutPoint:    wire.OutPoint{Hash: txid, Index: res.FundingIndex},

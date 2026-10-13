@@ -425,6 +425,25 @@ func (m *Machine) restore() error {
 			a.phase = phasePending
 		}
 		m.watchWithheld()
+
+	// Our commitment_signed for it was never saved: we stopped between
+	// recording the splice and signing. Nothing of it is signed, and
+	// the channel can't take a commitment batch without ours, so it is
+	// dropped now.
+	case !a.commitSent:
+		m.enqueue(func() {
+			if m.active != a {
+				return
+			}
+			m.abort(codeInternal, "splice not signed before a "+
+				"restart")
+			m.forget()
+		})
+
+	// Neither side's signatures: the peer has until the timeout to go on
+	// with it after reconnecting.
+	default:
+		m.startSigningTimeout()
 	}
 
 	return nil
