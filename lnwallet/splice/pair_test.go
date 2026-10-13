@@ -734,10 +734,19 @@ func TestSpliceOutRecheckedWhenQuiescent(t *testing.T) {
 	u := requireUpdates(t, updates, StateAborted)
 	require.Contains(t, u.Reason, "above_max_out")
 
+	// Quiescence won and nothing to follow: a tx_abort tells the peer,
+	// waiting for a splice_init, and the channel resumes. Silence left
+	// the Core Lightning port refusing our next update.
 	select {
 	case msg := <-alice.peer.msgs:
-		t.Fatalf("sent %T", msg)
-	case <-time.After(100 * time.Millisecond):
+		require.IsType(t, &lnwire.TxAbort{}, msg)
+	case <-time.After(5 * time.Second):
+		t.Fatal("nothing sent")
+	}
+	select {
+	case <-alice.link.resumed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("not resumed")
 	}
 }
 

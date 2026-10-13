@@ -470,6 +470,9 @@ func (m *Machine) handleTxAbort(msg *lnwire.TxAbort) {
 		m.abortSent = true
 		m.send(&lnwire.TxAbort{ChannelID: m.cfg.ChanID})
 
+		// A quiescence the peer won ends with it: it ends its own.
+		m.resume()
+
 	case a.phase == phasePending || a.ourTxSigs != nil:
 		log.Errorf("ChannelID(%v): peer aborted splice %v after our "+
 			"tx_signatures: %v", m.cfg.ChanID, a.txid, reason)

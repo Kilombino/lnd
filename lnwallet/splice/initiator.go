@@ -355,11 +355,18 @@ func (m *Machine) checkMoveOut(contribution btcutil.Amount) error {
 func (m *Machine) quiesced(a *active,
 	res fn.Result[lntypes.ChannelParty]) {
 
+	initiator, err := res.Unpack()
 	if m.active != a || a.phase != phasePreparing {
+		// Canceled while quiescence was being reached, and won: the
+		// channel is ours to free, and the peer, quiescent too, waits
+		// for a splice_init that won't come.
+		if m.active != a && err == nil && initiator == lntypes.Local {
+			m.endQuiescence("canceled")
+		}
+
 		return
 	}
 
-	initiator, err := res.Unpack()
 	switch {
 	case err != nil:
 		m.failOurs(codeNotQuiescent, "%v", err)
@@ -379,7 +386,7 @@ func (m *Machine) quiesced(a *active,
 	if a.ourContribution < 0 {
 		if err := m.checkMoveOut(a.ourContribution); err != nil {
 			m.failOurs("above_max_out", "%v", err)
-			m.resume()
+			m.endQuiescence("above_max_out")
 
 			return
 		}
@@ -388,7 +395,7 @@ func (m *Machine) quiesced(a *active,
 	height, err := m.cfg.Chain.BestHeight()
 	if err != nil {
 		m.failOurs(codeChainNotSynced, "%v", err)
-		m.resume()
+		m.endQuiescence(codeChainNotSynced)
 
 		return
 	}
@@ -409,6 +416,16 @@ func (m *Machine) quiesced(a *active,
 		FundingPubKey:          a.ourKey.PubKey,
 		RequireConfirmedInputs: true,
 	})
+}
+
+// endQuiescence ends a quiescence we won without a splice_init to follow:
+// a tx_abort tells the peer, which waits in quiescence for one (the Core
+// Lightning port otherwise refuses our next update), and the link resumes.
+// The peer's echo of it is ours.
+func (m *Machine) endQuiescence(reason string) {
+	m.abortSent = true
+	m.send(&lnwire.TxAbort{ChannelID: m.cfg.ChanID, Data: []byte(reason)})
+	m.resume()
 }
 
 // failOurs ends a splice we started that hasn't left preparation or

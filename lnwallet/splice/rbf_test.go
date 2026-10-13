@@ -566,9 +566,12 @@ func TestAcceptSpliceReplacedEdges(t *testing.T) {
 		lockOn(t, h, first)
 	})
 
-	// After a restart the replacement, signed by neither, is dropped:
-	// the original, a candidate only since the restart, is published
-	// and watched again.
+	// After a restart the replacement, signed by neither and not named
+	// by the peer's reestablish, is dropped there, quietly: the
+	// original, a candidate only since the restart, is published and
+	// watched again. Kept, it held the channel quiescent until its
+	// deadline, then a tx_abort went to a peer whose splice was signed
+	// both ways.
 	t.Run("a replacement dropped after a restart", func(t *testing.T) {
 		t.Parallel()
 
@@ -581,16 +584,19 @@ func TestAcceptSpliceReplacedEdges(t *testing.T) {
 		<-h.link.commits
 
 		restart(t, h)
-		h.machine.HandleReestablish(&lnwire.ChannelReestablish{})
 		before := h.wallet.publishCount()
-		h.machine.HandleSpliceMessage(&lnwire.TxAbort{
-			ChannelID: h.machine.cfg.ChanID, Data: []byte("nah"),
-		})
-		next[*lnwire.TxAbort](t, h)
+		h.machine.HandleReestablish(&lnwire.ChannelReestablish{})
 		require.Eventually(t, func() bool {
 			return h.wallet.publishCount() > before
 		}, 5*time.Second, 10*time.Millisecond)
+		signing, _ := h.machine.Signing()
+		require.False(t, signing)
 		require.Len(t, h.bob.PendingFundings(), 1)
+		select {
+		case msg := <-h.peer.msgs:
+			t.Fatalf("sent %T", msg)
+		case <-time.After(100 * time.Millisecond):
+		}
 		lockOn(t, h, first)
 	})
 
@@ -766,6 +772,9 @@ func TestTxAbortWithoutSplice(t *testing.T) {
 	})
 	echo := next[*lnwire.TxAbort](t, h)
 	require.Equal(t, h.machine.cfg.ChanID, echo.ChannelID)
+
+	// A quiescence the peer won ends with it.
+	requireResumed(t, h)
 
 	p := newSplicePair(t)
 	var aborts atomic.Int32

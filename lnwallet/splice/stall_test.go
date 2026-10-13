@@ -8,6 +8,7 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/lightningnetwork/lnd/chainntnfs"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/fn/v2"
 	"github.com/lightningnetwork/lnd/lntypes"
@@ -524,4 +525,70 @@ func TestSpliceDisconnectedDuringReplacement(t *testing.T) {
 	}
 	require.Equal(t, leases, p.alice.wallet.leaseCount())
 	require.Len(t, p.alice.ch.PendingFundings(), 1)
+}
+
+// TestSpliceLockedTLVWhileSigning checks the peer's my_current_funding_locked
+// naming the splice while we still wait for its tx_signatures, lost on the
+// way and coming again: taken as its splice_locked, as the message would be.
+// It was dropped, and the peer doesn't send splice_locked again on that
+// connection, so our lock waited for the next one.
+func TestSpliceLockedTLVWhileSigning(t *testing.T) {
+	t.Parallel()
+
+	h := newAcceptorHarness(t)
+	s := splicePastSigning(t, h)
+	txid := s.res.Tx.TxHash()
+
+	h.machine.Stop()
+	h.machine = NewMachine(h.machine.cfg)
+	require.NoError(t, h.machine.Start())
+	t.Cleanup(h.machine.Stop)
+	h.machine.HandleReestablish(&lnwire.ChannelReestablish{
+		MyCurrentFundingLocked: fn.Some(lnwire.FundingTxidFlags{
+			Txid: txid,
+		}),
+	})
+	h.machine.HandleSpliceMessage(s.aliceTxSignatures(t, h))
+	requireResumed(t, h)
+
+	h.chain.confirm(t, txid, 6, 1, &chainntnfs.TxConfirmation{
+		BlockHeight: 900_010,
+	})
+	next[*lnwire.SpliceLocked](t, h)
+	require.Eventually(t, func() bool {
+		return h.bob.State().CurrentFundingOutpoint().Hash == txid
+	}, 5*time.Second, 10*time.Millisecond)
+}
+
+// TestSpliceCanceledWhileQuiescing checks a splice canceled while the stfu
+// exchange is under way, which our side then wins: the peer, quiescent too,
+// hears a tx_abort and the channel resumes, rather than staying quiescent
+// until the timeout disconnects it.
+func TestSpliceCanceledWhileQuiescing(t *testing.T) {
+	t.Parallel()
+
+	alice, _ := soloAlice(t)
+	alice.fund(t, 1, 5_000_000)
+	alice.link.stfuGate = make(chan struct{})
+
+	updates, err := alice.machine.Splice(Request{
+		Direction: DirectionIn, Amount: 1_000_000, FeeRate: 2_500,
+	})
+	require.NoError(t, err)
+	requireUpdates(t, updates, StatePreparing)
+	require.True(t, alice.machine.Cancel())
+	requireUpdates(t, updates, StateAborted)
+
+	close(alice.link.stfuGate)
+	select {
+	case msg := <-alice.peer.msgs:
+		require.IsType(t, &lnwire.TxAbort{}, msg)
+	case <-time.After(5 * time.Second):
+		t.Fatal("nothing sent")
+	}
+	select {
+	case <-alice.link.resumed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("quiescence never ended after the cancel")
+	}
 }

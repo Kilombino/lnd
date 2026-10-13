@@ -336,7 +336,7 @@ func (m *Machine) handleReestablish(msg *lnwire.ChannelReestablish) {
 	// our signatures and name it. It can't have signed what it doesn't
 	// have, so the splice is dropped.
 	if a := m.active; a != nil && a.phase == phaseSigning &&
-		a.ourTxSigs == nil && len(a.replaced) == 0 {
+		a.ourTxSigs == nil {
 
 		named := fn.MapOptionZ(msg.NextFunding,
 			func(f lnwire.FundingTxidFlags) bool {
@@ -387,7 +387,11 @@ func (m *Machine) handleReestablish(msg *lnwire.ChannelReestablish) {
 	}
 
 	msg.MyCurrentFundingLocked.WhenSome(func(f lnwire.FundingTxidFlags) {
-		if a != nil && a.phase == phasePending && a.txid == f.Txid {
+		// As splice_locked: also while the peer's tx_signatures,
+		// lost on the way, are still to come again, ours out.
+		if a != nil && a.txid == f.Txid &&
+			(a.phase == phasePending || a.ourTxSigs != nil) {
+
 			m.handleSpliceLocked(f.Txid)
 		}
 
