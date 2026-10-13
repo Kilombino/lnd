@@ -219,6 +219,25 @@ func (r *rpcServer) closeDestination(
 	return script, ours, true
 }
 
+// checkSpliceRanges refuses a request's amount and fee rate out of range: a
+// mistyped rate would pay the channel's balance in fees.
+func checkSpliceRanges(amount int64, satPerVByte uint64) error {
+	switch {
+	case amount < 0:
+		return status.Error(codes.InvalidArgument, "negative amount")
+
+	case amount > btcutil.MaxSatoshi:
+		return status.Error(codes.InvalidArgument,
+			"amount above the most that can exist")
+
+	case satPerVByte > maxSpliceSatPerVByte:
+		return status.Errorf(codes.InvalidArgument,
+			"fee rate above %d sat/vB", maxSpliceSatPerVByte)
+	}
+
+	return nil
+}
+
 // spliceRequest turns the RPC's request into the machine's.
 func (r *rpcServer) spliceRequest(ch *channeldb.OpenChannel,
 	direction lnrpc.SpliceDirection, amount int64, useMax bool,
@@ -229,17 +248,8 @@ func (r *rpcServer) spliceRequest(ch *channeldb.OpenChannel,
 		Amount: btcutil.Amount(amount), UseMax: useMax,
 		ForceLowFee: force,
 	}
-	if amount < 0 {
-		return req, false, status.Error(codes.InvalidArgument,
-			"negative amount")
-	}
-	if amount > btcutil.MaxSatoshi {
-		return req, false, status.Error(codes.InvalidArgument,
-			"amount above the most that can exist")
-	}
-	if satPerVByte > maxSpliceSatPerVByte {
-		return req, false, status.Errorf(codes.InvalidArgument,
-			"fee rate above %d sat/vB", maxSpliceSatPerVByte)
+	if err := checkSpliceRanges(amount, satPerVByte); err != nil {
+		return req, false, err
 	}
 
 	var err error
@@ -284,6 +294,9 @@ func (r *rpcServer) EstimateSplice(_ context.Context,
 	in *lnrpc.EstimateSpliceRequest) (*lnrpc.EstimateSpliceResponse,
 	error) {
 
+	if err := checkSpliceRanges(in.AmountSat, in.SatPerVbyte); err != nil {
+		return nil, err
+	}
 	ch, err := r.spliceChannel(in.ChannelPoint)
 	if err != nil {
 		return nil, err

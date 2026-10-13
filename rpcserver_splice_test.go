@@ -61,5 +61,12 @@ func TestSpliceRequestRanges(t *testing.T) {
 		)
 		require.ErrorContains(t, err, tc.want)
 		require.Equal(t, codes.InvalidArgument, status.Code(err))
+
+		// The estimate the same.
+		_, err = r.EstimateSplice(t.Context(),
+			&lnrpc.EstimateSpliceRequest{
+				AmountSat: tc.amount, SatPerVbyte: tc.rate,
+			})
+		require.ErrorContains(t, err, tc.want)
 	}
 }
