@@ -289,7 +289,7 @@ func TestSpliceWithheldGivesBackPlace(t *testing.T) {
 	h := newAcceptorHarness(t)
 	limits := NewLimits()
 	h.machine.cfg.Limits = limits
-	h.machine.cfg.Policy.NegotiationTimeout = 100 * time.Millisecond
+	h.machine.cfg.Policy.NegotiationTimeout = time.Second
 	s := startAliceSplice(t, h, 40_000_000, 2_500)
 	s.construct(t, h)
 	txid := s.res.Tx.TxHash()

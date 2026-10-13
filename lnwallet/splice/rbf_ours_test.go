@@ -359,6 +359,17 @@ func TestOurPart(t *testing.T) {
 		Value: 500_000 - withChange, PkScript: change,
 	}}, outs)
 
+	// The wallet's reserve for fee bumps: kept by the change at 5,000
+	// sat/kw, eaten into at a higher rate, refused there.
+	m.cfg.Reserve = func() (btcutil.Amount, error) {
+		return 490_000, nil
+	}
+	_, _, _, err = m.ourPart(addTx(499_000), 5_000)
+	require.NoError(t, err)
+	_, _, _, err = m.ourPart(addTx(499_000), 50_000)
+	require.ErrorContains(t, err, "kept for fee bumps")
+	m.cfg.Reserve = nil
+
 	// Change that would be dust at the new rate goes to the fee.
 	in.Value = 1_000_400
 	wallet.txs[in.OutPoint.Hash] = in.PrevTx

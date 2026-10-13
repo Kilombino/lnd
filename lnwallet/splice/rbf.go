@@ -281,6 +281,10 @@ func (m *Machine) ourPart(a *active, feeRate chainfee.SatPerKWeight) (
 		left := total - amount -
 			feeRate.FeeForWeight(lntypes.WeightUnit(withChange))
 		if left >= m.cfg.DustLimit(change) {
+			if err := m.keepsReserve(coins, left); err != nil {
+				return 0, nil, nil, err
+			}
+
 			return amount, coins, []interactivetx.Output{{
 				Value: left, PkScript: change,
 			}}, nil
@@ -290,8 +294,45 @@ func (m *Machine) ourPart(a *active, feeRate chainfee.SatPerKWeight) (
 		return 0, nil, nil, fmt.Errorf("our coins don't pay for "+
 			"themselves at %v", feeRate)
 	}
+	if err := m.keepsReserve(coins, 0); err != nil {
+		return 0, nil, nil, err
+	}
 
 	return amount, coins, nil, nil
+}
+
+// keepsReserve checks that the wallet keeps its reserve for fee-bumping its
+// anchor channels' closes once our part of a replacement is paid for: the
+// coins outside the splice and the change left at the peer's higher rate.
+// Our splice kept it; the replacement's fee mustn't eat it.
+func (m *Machine) keepsReserve(ours []Coin, change btcutil.Amount) error {
+	if m.cfg.Reserve == nil {
+		return nil
+	}
+	reserve, err := m.cfg.Reserve()
+	if err != nil || reserve <= 0 {
+		return err
+	}
+	coins, err := ListCoins(m.cfg.CoinSource)
+	if err != nil {
+		return err
+	}
+	spent := make(map[wire.OutPoint]bool, len(ours))
+	for _, c := range ours {
+		spent[c.OutPoint] = true
+	}
+	kept := change
+	for _, c := range coins {
+		if !spent[c.OutPoint] {
+			kept += c.Value
+		}
+	}
+	if kept < reserve {
+		return fmt.Errorf("%v would be left of the %v kept for fee "+
+			"bumps", kept, reserve)
+	}
+
+	return nil
 }
 
 // checkTxInitRbf returns why the peer's replacement is refused, or "".

@@ -366,6 +366,18 @@ func TestSelectAddFunds(t *testing.T) {
 	require.Equal(t, []Coin{big, small}, sel.Inputs)
 	require.GreaterOrEqual(t, sel.Change, reserve)
 
+	// The first coin pays without change, too little left beside it to
+	// keep the reserve; both coins with change keep it.
+	first := coin(7, p2wpkh(7), 500_460)
+	second := coin(8, p2wpkh(8), 10_000)
+	sel, err = SelectAddFunds(
+		testShape, []Coin{first, second}, 500_000, false, 253, change,
+		dustLimit, 10_050,
+	)
+	require.NoError(t, err)
+	require.Len(t, sel.Inputs, 2)
+	require.GreaterOrEqual(t, sel.Change, btcutil.Amount(10_050))
+
 	// Nothing to add.
 	_, err = SelectAddFunds(
 		testShape, all, 0, false, feeRate, change, dustLimit, 0,

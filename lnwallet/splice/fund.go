@@ -267,8 +267,10 @@ func SelectAddFunds(shape Shape, coins []Coin, amount btcutil.Amount,
 				Weight: wChange,
 			}, nil
 		}
+		// No change, the leftover to the fee: one more coin may pay
+		// for a change output that keeps the reserve.
 		if !keeps(picked, 0) {
-			break
+			continue
 		}
 
 		return &AddFunds{

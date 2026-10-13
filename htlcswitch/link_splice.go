@@ -266,8 +266,10 @@ const (
 // Taken for a commitment on the current funding, either of the waiting ones
 // failed its signature check and the channel was force closed.
 func (l *channelLink) placeCommitSig(msg *lnwire.CommitSig) commitSigPlace {
+	// Without splicing every commitment is on the current funding, and
+	// one naming another is refused by its signature check, as before.
 	txid, err := msg.FundingTxid.UnwrapOrErr(errors.New("none"))
-	if err != nil {
+	if err != nil || l.cfg.SpliceHandler == nil {
 		return commitSigCurrent
 	}
 	if txid == l.channel.ChannelState().CurrentFundingOutpoint().Hash {
