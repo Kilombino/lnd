@@ -191,8 +191,13 @@ func newTestChain() *testChain {
 }
 
 func (c *testChain) RegisterConfirmationsNtfn(txid *chainhash.Hash, _ []byte,
-	numConfs, _ uint32, _ ...chainntnfs.NotifierOption) (
+	numConfs, heightHint uint32, _ ...chainntnfs.NotifierOption) (
 	*chainntnfs.ConfirmationEvent, error) {
+
+	// As the notifier: no search from height zero.
+	if heightHint == 0 {
+		return nil, chainntnfs.ErrNoHeightHint
+	}
 
 	ev := &chainntnfs.ConfirmationEvent{
 		Confirmed:    make(chan *chainntnfs.TxConfirmation, 1),
@@ -214,7 +219,11 @@ func (c *testChain) Synced() bool {
 }
 
 func (c *testChain) RegisterSpendNtfn(op *wire.OutPoint, _ []byte,
-	_ uint32) (*chainntnfs.SpendEvent, error) {
+	heightHint uint32) (*chainntnfs.SpendEvent, error) {
+
+	if heightHint == 0 {
+		return nil, chainntnfs.ErrNoHeightHint
+	}
 
 	ch := make(chan *chainntnfs.SpendDetail, 1)
 

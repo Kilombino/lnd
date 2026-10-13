@@ -35,7 +35,7 @@ func (m *Machine) watchConfirmationOf(a *active, heightHint uint32) {
 	if a.watching {
 		return
 	}
-	a.watching = true
+	heightHint = m.heightHint(heightHint)
 	depth := uint32(6)
 	if m.cfg.Policy.LockDepth != nil {
 		peer := a.theirContribution
@@ -54,6 +54,7 @@ func (m *Machine) watchConfirmationOf(a *active, heightHint uint32) {
 			m.cfg.ChanID, txid, err)
 		return
 	}
+	a.watching = true
 
 	m.wg.Add(1)
 	go func() {
@@ -75,6 +76,23 @@ func (m *Machine) watchConfirmationOf(a *active, heightHint uint32) {
 		case <-m.quit:
 		}
 	}()
+}
+
+// heightHint returns where the chain is searched from for a transaction of
+// the splice: the height recorded at its broadcast or, that unknown (zero: a
+// crash between publishing and recording it, or the chain's height unknown
+// then), the current funding's confirmation, as the splice spends that
+// output. The notifier refuses a zero hint, and the splice then never
+// locked.
+func (m *Machine) heightHint(h uint32) uint32 {
+	if h != 0 {
+		return h
+	}
+	if h = m.cfg.Channel.State().CurrentShortChanID().BlockHeight; h != 0 {
+		return h
+	}
+
+	return 1
 }
 
 // watchWithheld watches a splice whose tx_signatures we sent and the peer
@@ -641,6 +659,7 @@ func (m *Machine) watchPendingOf(a *active, heightHint uint32) {
 		return
 	}
 	a.pendingWatched = true
+	heightHint = m.heightHint(heightHint)
 	txid := a.txid
 
 	m.wg.Add(1)

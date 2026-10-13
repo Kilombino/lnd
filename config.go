@@ -26,6 +26,7 @@ import (
 	"github.com/lightninglabs/neutrino"
 	"github.com/lightningnetwork/lnd/autopilot"
 	"github.com/lightningnetwork/lnd/build"
+	"github.com/lightningnetwork/lnd/chainntnfs"
 	"github.com/lightningnetwork/lnd/chainreg"
 	"github.com/lightningnetwork/lnd/chanbackup"
 	"github.com/lightningnetwork/lnd/channeldb"
@@ -1229,6 +1230,14 @@ func ValidateConfig(cfg Config, interceptor signal.Interceptor, fileParser,
 	if cfg.ProtocolOptions.Splice() && cfg.ProtocolOptions.NoQuiescence() {
 		return nil, mkErr("protocol.splice needs quiescence; it " +
 			"can't be set with protocol.no-quiescence")
+	}
+
+	// The hold on a peer's spliced-in coins, and the deepest lock, wait
+	// for this many confirmations; the notifier counts no further.
+	if cfg.ProtocolOptions.SplicePeerInputConfs > chainntnfs.MaxNumConfs {
+		return nil, mkErr("protocol.splice-peer-input-confs of %d is "+
+			"above %d", cfg.ProtocolOptions.SplicePeerInputConfs,
+			chainntnfs.MaxNumConfs)
 	}
 
 	// A splice negotiates while the channel is quiescent, and BOLT 2 gives

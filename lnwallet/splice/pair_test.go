@@ -18,6 +18,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightningnetwork/lnd/chainntnfs"
+	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/input"
 	"github.com/lightningnetwork/lnd/lntypes"
 	"github.com/lightningnetwork/lnd/lnwallet"
@@ -1118,4 +1119,38 @@ func TestSpliceWithheldRestart(t *testing.T) {
 	next, locked := restarted.ReestablishTLVs()
 	require.True(t, next.IsNone(), "asked for the splice's signatures")
 	require.Equal(t, u.Txid, locked.UnsafeFromSome().Txid)
+}
+
+// TestSpliceZeroBroadcastHeight checks a splice whose broadcast height was
+// never recorded, as after a crash between publishing it and recording the
+// height: a restart still watches it to its lock, from the current
+// funding's confirmation. The notifier refuses a search from height zero,
+// and the splice then never locked.
+func TestSpliceZeroBroadcastHeight(t *testing.T) {
+	t.Parallel()
+
+	p := newSplicePair(t)
+	p.alice.fund(t, 1, 5_000_000)
+	updates, err := p.alice.machine.Splice(Request{
+		Direction: DirectionIn, Amount: 1_000_000, FeeRate: 2_500,
+	})
+	require.NoError(t, err)
+	u := requireUpdates(t, updates, StatePreparing, StateNegotiating,
+		StateSigned, StateBroadcast)
+
+	p.alice.machine.Stop()
+	require.NoError(t, p.alice.ch.State().UpdateSpliceRecord(u.Txid,
+		func(r *channeldb.SpliceRecord) error {
+			r.Negotiation.BroadcastHeight = 0
+			return nil
+		}))
+	restarted := NewMachine(p.alice.machine.cfg)
+	startReestablished(t, restarted)
+	t.Cleanup(restarted.Stop)
+
+	// Alice's machine, its first registration and the restarted one's,
+	// and Bob's.
+	require.Eventually(t, func() bool {
+		return p.chain.registered(u.Txid, 6, 3)
+	}, 5*time.Second, 10*time.Millisecond)
 }

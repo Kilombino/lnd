@@ -402,12 +402,8 @@ func (m *Machine) signed() {
 		return
 	}
 
-	status := m.publish(tx)
-	if status.State == RelayRejected {
-		log.Errorf("ChannelID(%v): splice %v rejected: %v",
-			m.cfg.ChanID, a.txid, status.Reason)
-	}
-
+	// Recorded before it goes out, so a restart searches the chain from
+	// there.
 	height, _ := m.cfg.Chain.BestHeight()
 	err = m.cfg.Channel.State().UpdateSpliceRecord(a.txid,
 		func(r *channeldb.SpliceRecord) error {
@@ -420,6 +416,12 @@ func (m *Machine) signed() {
 	if err != nil {
 		log.Errorf("ChannelID(%v): unable to record broadcast: %v",
 			m.cfg.ChanID, err)
+	}
+
+	status := m.publish(tx)
+	if status.State == RelayRejected {
+		log.Errorf("ChannelID(%v): splice %v rejected: %v",
+			m.cfg.ChanID, a.txid, status.Reason)
 	}
 
 	m.update(func(a *active) { a.phase = phasePending })
