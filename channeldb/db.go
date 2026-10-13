@@ -1795,6 +1795,17 @@ func (c *ChannelStateDB) RestoreChannelShells(channelShells ...*ChannelShell) er
 				if err != nil {
 					return err
 				}
+
+				// Splice data on disk: a version that can't
+				// read it must not open the database, as
+				// after running with splicing on.
+				wrote := splice.Funding.IsSome() ||
+					len(splice.Candidates) > 0
+				if wrote {
+					if err := markSplicing(tx); err != nil {
+						return err
+					}
+				}
 			}
 		}
 
@@ -2159,6 +2170,22 @@ func OpenableDBVersions() []uint32 {
 // splicingDBVersion is the database version that marks a node that has run
 // with splicing on.
 const splicingDBVersion = 38
+
+// markSplicing moves the database to the splicing version, in tx, if it is
+// below it: for splice data written with splicing off, as a restored
+// backup's.
+func markSplicing(tx kvdb.RwTx) error {
+	meta := &Meta{}
+	if err := FetchMeta(meta, tx); err != nil {
+		return err
+	}
+	if meta.DbVersionNumber >= splicingDBVersion {
+		return nil
+	}
+	meta.DbVersionNumber = splicingDBVersion
+
+	return putMeta(meta, tx)
+}
 
 // targetVersions returns the migrations to apply: all of them with splicing
 // on, all but the splicing mark without.

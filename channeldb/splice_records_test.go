@@ -440,3 +440,44 @@ func TestSpliceHolds(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, holds)
 }
+
+// TestRestoreShellMarksSplicing checks that restoring a backup's channel
+// with splice data moves the database to the splicing version, as running
+// with splicing on does, so a version that can't read that data refuses the
+// database; one without leaves the version as it was.
+func TestRestoreShellMarksSplicing(t *testing.T) {
+	t.Parallel()
+
+	version := func(db *DB) uint32 {
+		meta, err := db.FetchMeta()
+		require.NoError(t, err)
+
+		return meta.DbVersionNumber
+	}
+
+	plainDB, err := MakeTestDB(t)
+	require.NoError(t, err)
+	before := version(plainDB)
+	require.Less(t, before, uint32(splicingDBVersion))
+	plain, err := genRandomChannelShell()
+	require.NoError(t, err)
+	require.NoError(t, plainDB.ChannelStateDB().RestoreChannelShells(plain))
+	require.Equal(t, before, version(plainDB))
+
+	splicedDB, err := MakeTestDB(t)
+	require.NoError(t, err)
+	shell, err := genRandomChannelShell()
+	require.NoError(t, err)
+	key, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	shell.Splice = &ShellSplice{Candidates: []*SpliceRecord{{
+		OutPoint:  wire.OutPoint{Hash: chainhash.Hash{7}},
+		Capacity:  2_000_000,
+		LocalKey:  keychain.KeyDescriptor{PubKey: key.PubKey()},
+		RemoteKey: key.PubKey(),
+	}}}
+	require.NoError(t, splicedDB.ChannelStateDB().RestoreChannelShells(
+		shell,
+	))
+	require.Equal(t, uint32(splicingDBVersion), version(splicedDB))
+}
