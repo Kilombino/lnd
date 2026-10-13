@@ -299,14 +299,19 @@ func (m *Machine) checkPeerOutput(out *interactivetx.Output) error {
 // once its transaction is agreed. Until our tx_signatures are out the peer
 // can't complete the transaction, so the splice is forgotten: a peer that
 // stops answering here would otherwise keep our coins leased, the channel
-// unable to splice and, for its own splice, a slot of the node's.
+// unable to splice and, for its own splice, a slot of the node's. The time
+// runs from the agreement, so a peer reconnecting doesn't get it again.
 func (m *Machine) startSigningTimeout() {
 	timeout := 2 * m.cfg.Policy.NegotiationTimeout
 	a := m.active
 	if a.timeout != nil {
 		a.timeout.Stop()
 	}
-	a.timeout = time.AfterFunc(timeout, func() {
+	left := timeout
+	if !a.agreedAt.IsZero() {
+		left = max(0, timeout-time.Since(a.agreedAt))
+	}
+	a.timeout = time.AfterFunc(left, func() {
 		m.enqueue(func() {
 			if m.active != a || a.phase != phaseSigning {
 				return
@@ -329,6 +334,17 @@ func (m *Machine) startSigningTimeout() {
 			// splice waits; a reconnection settles it.
 			if a.commitSent && !m.signsFirst() {
 				m.releaseWithheld(a)
+				return
+			}
+
+			// Restarted past the time: a tx_abort before the
+			// peer's channel_reestablish fails its link, so the
+			// splice goes then, as one never signed does.
+			m.mu.Lock()
+			reestablished := m.reestablished
+			m.mu.Unlock()
+			if !reestablished {
+				a.dropAtReestablish = true
 				return
 			}
 			m.abort(codeTimeout, "signatures took over %v",
@@ -462,6 +478,7 @@ func (m *Machine) constructionDone(res *interactivetx.Result) {
 		a.fundingIndex = res.FundingIndex
 		a.session = nil
 		a.phase = phaseSigning
+		a.agreedAt = time.Now()
 	})
 	m.startSigningTimeout()
 
@@ -480,6 +497,7 @@ func (m *Machine) constructionDone(res *interactivetx.Result) {
 			Inputs:       spliceInputs(res),
 			OursReplaced: a.oursReplaced,
 			OurOutputs:   txOutputs(a.ourOutputs),
+			AgreedAt:     a.agreedAt.Unix(),
 		},
 	}
 	if err := m.cfg.Channel.State().PutSpliceRecord(record); err != nil {

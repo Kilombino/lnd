@@ -314,6 +314,7 @@ func TestSpliceNegotiationRoundTrip(t *testing.T) {
 			BlockHeight: 901_006, TxIndex: 2, TxPosition: 1,
 		},
 		OursReplaced: true,
+		AgreedAt:     1_790_000_000,
 		OurOutputs: []*wire.TxOut{
 			{Value: 40_000, PkScript: []byte{0, 0x14, 7}},
 		},
@@ -350,6 +351,7 @@ func TestSpliceNegotiationRoundTrip(t *testing.T) {
 	require.Equal(t, uint32(901_000), got.BroadcastHeight)
 	require.True(t, got.LockedSent)
 	require.Equal(t, r.Negotiation.LockedScid, got.LockedScid)
+	require.Equal(t, r.Negotiation.AgreedAt, got.AgreedAt)
 	require.False(t, got.LockedReceived)
 	require.True(t, got.OursReplaced)
 	require.Equal(t, r.Negotiation.OurOutputs, got.OurOutputs)

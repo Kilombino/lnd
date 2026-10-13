@@ -1,6 +1,7 @@
 package splice
 
 import (
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -8,6 +9,7 @@ import (
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/lightningnetwork/lnd/channeldb"
+	"github.com/lightningnetwork/lnd/fn/v2"
 	"github.com/lightningnetwork/lnd/lntypes"
 	"github.com/lightningnetwork/lnd/lnwallet"
 	"github.com/lightningnetwork/lnd/lnwire"
@@ -119,11 +121,60 @@ func TestSpliceSigningTimeoutAcceptor(t *testing.T) {
 		m := p.alice.machine
 		if restart {
 			cfg := m.cfg
+			m.mu.Lock()
+			txid := m.active.txid
+			m.mu.Unlock()
 			m.Stop()
-			cfg.Policy.NegotiationTimeout = 100 * time.Millisecond
+
+			// The time runs from the agreement, across the
+			// restart: past it, the splice ends at once though
+			// the timeout is an hour.
+			err := p.alice.ch.State().UpdateSpliceRecord(txid,
+				func(r *channeldb.SpliceRecord) error {
+					// Recorded with the splice.
+					agreed := time.Unix(
+						r.Negotiation.AgreedAt, 0,
+					)
+					require.WithinDuration(t, time.Now(),
+						agreed, time.Minute)
+
+					r.Negotiation.AgreedAt = time.Now().Add(
+						-3 * time.Hour,
+					).Unix()
+
+					return nil
+				})
+			require.NoError(t, err)
+			// Nothing goes before the peer's
+			// channel_reestablish: a tx_abort then fails its
+			// link.
+			var early atomic.Int32
+			p.dropMu.Lock()
+			p.drop = func(n *node, msg lnwire.Message) bool {
+				if _, ok := msg.(*lnwire.TxAbort); ok &&
+					n == p.alice {
+
+					early.Add(1)
+				}
+				_, isSig := msg.(*lnwire.CommitSig)
+
+				return n == p.bob && isSig
+			}
+			p.dropMu.Unlock()
 			m = NewMachine(cfg)
 			require.NoError(t, m.Start())
 			t.Cleanup(m.Stop)
+			time.Sleep(200 * time.Millisecond)
+			require.Zero(t, early.Load())
+			m.mu.Lock()
+			require.NotNil(t, m.active)
+			m.mu.Unlock()
+
+			m.HandleReestablish(&lnwire.ChannelReestablish{
+				NextFunding: fn.Some(lnwire.FundingTxidFlags{
+					Txid: txid,
+				}),
+			})
 		}
 
 		require.Eventually(t, func() bool {

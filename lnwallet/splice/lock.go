@@ -3,9 +3,10 @@ package splice
 import (
 	"errors"
 	"fmt"
-	"github.com/btcsuite/btcd/btcutil"
 	"sort"
+	"time"
 
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightningnetwork/lnd/chainntnfs"
@@ -550,6 +551,9 @@ func restoredActive(r *channeldb.SpliceRecord) (*active, error) {
 		lockedSent:        n.LockedSent,
 		lockedReceived:    n.LockedReceived,
 		broadcastHeight:   n.BroadcastHeight,
+	}
+	if n.AgreedAt != 0 {
+		a.agreedAt = time.Unix(n.AgreedAt, 0)
 	}
 	if n.LockedSent && n.LockedScid.ToUint64() != 0 {
 		a.scid = fn.Some(n.LockedScid)

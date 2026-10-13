@@ -331,6 +331,10 @@ type active struct {
 	// commitment_signed, dropped once the peer has reestablished.
 	dropAtReestablish bool
 
+	// agreedAt is when the transaction was agreed: the signing deadline
+	// runs from it, across reconnections.
+	agreedAt time.Time
+
 	// commitSent and commitReceived record the splice's own
 	// commitment_signed each way.
 	commitSent, commitReceived bool

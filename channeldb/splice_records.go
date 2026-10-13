@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil"
@@ -129,6 +130,10 @@ type SpliceNegotiation struct {
 	// chain to tell its depth again. Zero if not known.
 	LockedScid lnwire.ShortChannelID
 
+	// AgreedAt is when the transaction was agreed, in Unix seconds: the
+	// signing deadline runs from it across restarts. Zero if not known.
+	AgreedAt int64
+
 	// Inputs describe the transaction's inputs in its order, which
 	// signing and checking the peer's signatures need after a restart.
 	Inputs []SpliceInput
@@ -168,6 +173,7 @@ const (
 	negInputsType          tlv.Type = 8
 	negOurOutputsType      tlv.Type = 9
 	negLockedScidType      tlv.Type = 11
+	negAgreedAtType        tlv.Type = 13
 )
 
 // encode serializes a negotiation as a TLV stream.
@@ -297,6 +303,12 @@ func (n *SpliceNegotiation) encode(w io.Writer) error {
 			negLockedScidType, &scid,
 		))
 	}
+	if n.AgreedAt > 0 {
+		agreed := uint64(n.AgreedAt)
+		records = append(records, tlv.MakePrimitiveRecord(
+			negAgreedAtType, &agreed,
+		))
+	}
 
 	stream, err := tlv.NewStream(records...)
 	if err != nil {
@@ -315,7 +327,7 @@ func decodeSpliceNegotiation(r io.Reader) (*SpliceNegotiation, error) {
 		ourSigs, theirSigs []byte
 		spliceInputs       []byte
 		ourOutputs         []byte
-		scid               uint64
+		scid, agreed       uint64
 	)
 	stream, err := tlv.NewStream(
 		tlv.MakePrimitiveRecord(negWeInitiatedType, &flags),
@@ -331,6 +343,7 @@ func decodeSpliceNegotiation(r io.Reader) (*SpliceNegotiation, error) {
 		tlv.MakePrimitiveRecord(negInputsType, &spliceInputs),
 		tlv.MakePrimitiveRecord(negOurOutputsType, &ourOutputs),
 		tlv.MakePrimitiveRecord(negLockedScidType, &scid),
+		tlv.MakePrimitiveRecord(negAgreedAtType, &agreed),
 	)
 	if err != nil {
 		return nil, err
@@ -344,6 +357,9 @@ func decodeSpliceNegotiation(r io.Reader) (*SpliceNegotiation, error) {
 	n.LockedSent = locked&1 != 0
 	n.LockedReceived = locked&2 != 0
 	n.LockedScid = lnwire.NewShortChanIDFromInt(scid)
+	if agreed <= math.MaxInt64 {
+		n.AgreedAt = int64(agreed)
+	}
 
 	if tx != nil {
 		n.Tx = &wire.MsgTx{}
