@@ -468,8 +468,9 @@ type channelLink struct {
 	held      []lnwire.Message
 	heldTimer *time.Timer
 
-	// peerTxSigs is set once the peer's tx_signatures has been handed to
-	// the splice machine while quiescent, until quiescence ends.
+	// peerTxSigs is set once the peer's tx_signatures or tx_abort has
+	// been handed to the splice machine while quiescent, until quiescence
+	// ends.
 	peerTxSigs bool
 
 	// peerLocked holds the splices the peer has said it locked
@@ -2149,10 +2150,14 @@ func (l *channelLink) processUpstreamMsg(ctx context.Context,
 
 	default:
 		if isSpliceMessage(msg) {
-			if _, ok := msg.(*lnwire.TxSignatures); ok &&
-				l.quiescer.IsQuiescent() {
-
-				l.peerTxSigs = true
+			// Either ends the peer's quiescence: its updates
+			// may follow at once, before our machine has ended
+			// ours.
+			switch msg.(type) {
+			case *lnwire.TxSignatures, *lnwire.TxAbort:
+				if l.quiescer.IsQuiescent() {
+					l.peerTxSigs = true
+				}
 			}
 			if locked, ok := msg.(*lnwire.SpliceLocked); ok {
 				l.notePeerLocked(locked.SpliceTxid)

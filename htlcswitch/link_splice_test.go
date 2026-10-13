@@ -1362,3 +1362,36 @@ func TestLinkAddBelowSpliceReserve(t *testing.T) {
 		t.Fatal("link didn't fail")
 	}
 }
+
+// TestLinkUpdateAfterTxAbort checks an update the peer sends right after its
+// tx_abort, its quiescence ended, before our splice machine has ended ours:
+// it waits, rather than failing the link for an update after stfu.
+func TestLinkUpdateAfterTxAbort(t *testing.T) {
+	t.Parallel()
+
+	s := newSpliceLinkHarness(t)
+	quiesce(t, s)
+	s.link.HandleChannelUpdate(&lnwire.TxAbort{
+		ChannelID: s.link.ChanID(),
+	})
+
+	amt := lnwire.NewMSatFromSatoshis(100_000)
+	var blob [lnwire.OnionPacketSize]byte
+	_, htlc, _, err := generatePayment(amt, amt, 5, blob)
+	require.NoError(t, err)
+	_, err = s.bob.AddHTLC(htlc, nil)
+	require.NoError(t, err)
+	s.link.HandleChannelUpdate(htlc)
+	commit, err := s.bob.SignNextCommitment(t.Context())
+	require.NoError(t, err)
+	s.link.HandleChannelUpdate(&lnwire.CommitSig{
+		ChanID: s.link.ChanID(), CommitSig: commit.CommitSig,
+		HtlcSigs: commit.HtlcSigs,
+	})
+	time.Sleep(100 * time.Millisecond)
+	s.requireNoFailure(t)
+
+	require.NoError(t, <-s.link.ResumeQuiescence())
+	nextSent[*lnwire.RevokeAndAck](t, s)
+	s.requireNoFailure(t)
+}
