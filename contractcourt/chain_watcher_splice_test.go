@@ -8,6 +8,7 @@ import (
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/lightningnetwork/lnd/chainio"
 	"github.com/lightningnetwork/lnd/chainntnfs"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/input"
@@ -380,6 +381,87 @@ func TestChainWatcherSpliceAfterForceCloseRestart(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("nothing published")
 	}
+}
+
+// TestChainWatcherForceCloseAfterSplice checks a force close made after a
+// splice confirmed, while it waits to lock: our commitment on the funding
+// the splice spent can't confirm, so at the next block our commitment on the
+// splice's funding is published, valid under the chain's rules, and only
+// once.
+func TestChainWatcherForceCloseAfterSplice(t *testing.T) {
+	t.Parallel()
+
+	h := newChainWatcherTestHarness(t, withRequiredConfs(1))
+	splice := pendSplice(t, h)
+
+	published := make(chan *wire.MsgTx, 2)
+	h.chainWatcher.cfg.publishTx = func(tx *wire.MsgTx, _ string) error {
+		published <- tx
+		return nil
+	}
+
+	// Read before the watcher refreshes the channel at each block.
+	state := h.aliceChannel.State()
+	fundingOutpoint := state.FundingOutpoint
+	oldCommit := state.LocalCommitment.CommitTx
+	db := state.Db
+
+	followSplice(t, h, splice)
+
+	beat := func() {
+		t.Helper()
+
+		b := &chainio.MockBlockbeat{}
+		b.On("logger").Return(log)
+		b.On("Height").Return(int32(1)).Maybe()
+		require.NoError(t, h.chainWatcher.ProcessBlock(b))
+	}
+	nothing := func(why string) {
+		t.Helper()
+
+		select {
+		case <-published:
+			t.Fatal(why)
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+
+	// No force close yet: a block publishes nothing.
+	beat()
+	nothing("published without a force close")
+
+	// The force close, on the funding the splice spent, made as the
+	// arbitrator makes it: on its own copy of the channel.
+	arbCopy, err := db.FetchChannel(fundingOutpoint)
+	require.NoError(t, err)
+	require.NoError(t, arbCopy.MarkCommitmentBroadcasted(
+		oldCommit, lntypes.Local,
+	))
+
+	beat()
+	var tx *wire.MsgTx
+	select {
+	case tx = <-published:
+	case <-time.After(5 * time.Second):
+		t.Fatal("nothing published")
+	}
+	require.Equal(t, wire.OutPoint{Hash: splice.TxHash()},
+		tx.TxIn[0].PreviousOutPoint)
+
+	prevOut := splice.TxOut[0]
+	fetcher := txscript.NewCannedPrevOutputFetcher(
+		prevOut.PkScript, prevOut.Value,
+	)
+	vm, err := txscript.NewEngine(
+		prevOut.PkScript, tx, 0, txscript.StandardVerifyFlags, nil,
+		txscript.NewTxSigHashes(tx, fetcher), prevOut.Value, fetcher,
+	)
+	require.NoError(t, err)
+	require.NoError(t, vm.Execute())
+
+	// Published: the next block doesn't sign it again.
+	beat()
+	nothing("published twice")
 }
 
 // TestChainWatcherSecondSplice checks a splice of a channel a splice moved

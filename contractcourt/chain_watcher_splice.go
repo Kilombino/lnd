@@ -239,18 +239,64 @@ func (c *chainWatcher) maybeFollowSplice(spend *chainntnfs.SpendDetail,
 
 	// We had force closed on the previous funding: that commitment can't
 	// confirm now, ours on the splice's funding can.
-	if c.cfg.chanState.HasChanStatus(channeldb.ChanStatusCommitBroadcasted) {
-		c.publishSpliceCommitment(r)
+	if c.cfg.chanState.HasChanStatus(channeldb.ChanStatusCommitBroadcasted) &&
+		c.publishSpliceCommitment(r) {
+
+		c.splicePublished = r.Txid()
 	}
 
 	return moved, true
 }
 
-// publishSpliceCommitment publishes our signed commitment on a splice's
-// funding output.
-func (c *chainWatcher) publishSpliceCommitment(r *channeldb.SpliceRecord) {
-	if c.cfg.publishTx == nil || r.LocalCommit == nil {
+// maybePublishSpliceCommitment publishes our commitment on the confirmed
+// splice the watch follows once we have force closed. A force close after
+// the splice confirmed, while it waits to lock, broadcasts our commitment on
+// the funding output the splice spent, which can never confirm, and nothing
+// else would publish one that can. Called at every block, it reads the
+// channel's status, which the arbitrator sets on its own copy; a publish
+// that failed is tried again at the next block.
+func (c *chainWatcher) maybePublishSpliceCommitment() {
+	if c.splice == nil || c.splicePublished == c.splice.txid {
 		return
+	}
+
+	chanState := c.cfg.chanState
+	if err := chanState.Refresh(); err != nil {
+		log.Errorf("ChannelPoint(%v): unable to read channel: %v",
+			chanState.FundingOutpoint, err)
+
+		return
+	}
+	if !chanState.HasChanStatus(channeldb.ChanStatusCommitBroadcasted) {
+		return
+	}
+
+	records, err := chanState.SpliceRecords()
+	if err != nil {
+		log.Errorf("ChannelPoint(%v): unable to read splices: %v",
+			chanState.FundingOutpoint, err)
+
+		return
+	}
+	for _, r := range records {
+		if r.Retired || r.Txid() != c.splice.txid {
+			continue
+		}
+		if c.publishSpliceCommitment(r) {
+			c.splicePublished = r.Txid()
+		}
+
+		return
+	}
+}
+
+// publishSpliceCommitment publishes our signed commitment on a splice's
+// funding output, reporting whether it was.
+func (c *chainWatcher) publishSpliceCommitment(
+	r *channeldb.SpliceRecord) bool {
+
+	if c.cfg.publishTx == nil || r.LocalCommit == nil {
+		return false
 	}
 
 	witness, out, err := input.GenFundingPkScript(
@@ -260,7 +306,7 @@ func (c *chainWatcher) publishSpliceCommitment(r *channeldb.SpliceRecord) {
 	if err != nil {
 		log.Errorf("ChannelPoint(%v): splice funding script: %v",
 			c.cfg.chanState.FundingOutpoint, err)
-		return
+		return false
 	}
 
 	tx, err := lnwallet.GetSignedCommitTx(lnwallet.SignedCommitTxInputs{
@@ -282,11 +328,11 @@ func (c *chainWatcher) publishSpliceCommitment(r *channeldb.SpliceRecord) {
 		log.Errorf("ChannelPoint(%v): unable to sign our commitment "+
 			"on splice %v: %v", c.cfg.chanState.FundingOutpoint,
 			r.Txid(), err)
-		return
+		return false
 	}
 
-	log.Infof("ChannelPoint(%v): splice %v confirmed after our force "+
-		"close; publishing our commitment %v on it",
+	log.Infof("ChannelPoint(%v): splice %v confirmed, and we force "+
+		"closed; publishing our commitment %v on it",
 		c.cfg.chanState.FundingOutpoint, r.Txid(), tx.TxHash())
 
 	err = c.cfg.publishTx(tx, labels.MakeLabel(
@@ -295,7 +341,11 @@ func (c *chainWatcher) publishSpliceCommitment(r *channeldb.SpliceRecord) {
 	if err != nil {
 		log.Errorf("ChannelPoint(%v): unable to publish commitment: "+
 			"%v", c.cfg.chanState.FundingOutpoint, err)
+
+		return false
 	}
+
+	return true
 }
 
 // reorgSafeDepth is how deep a splice must be before the funding output it

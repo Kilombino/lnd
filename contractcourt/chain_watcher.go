@@ -372,6 +372,11 @@ type chainWatcher struct {
 	// uses it.
 	splice *spliceWatch
 
+	// splicePublished names the splice our commitment was published on
+	// after a force close, so a block doesn't sign it again. Only the
+	// close observer uses it.
+	splicePublished chainhash.Hash
+
 	// previousSpends carries a spend of a funding output a locked splice
 	// replaced, by anything but that splice, to the close observer.
 	previousSpends chan *chainntnfs.SpendDetail
@@ -991,6 +996,7 @@ func (c *chainWatcher) closeObserver() {
 
 			spend := c.handleBlockbeat(beat)
 			if spend == nil {
+				c.maybePublishSpliceCommitment()
 				continue
 			}
 			if moved, ok := c.maybeFollowSplice(spend, spendNtfn); ok {
