@@ -827,3 +827,37 @@ func TestMessagesCrossingOurAbort(t *testing.T) {
 		require.Equal(t, !aborted, dropped, "aborted %v", aborted)
 	}
 }
+
+// TestReestablishNamesEarlierOrLocked checks the peer's next_funding naming
+// an earlier transaction of the splice, whose tx_signatures we sent: they go
+// again, never a tx_abort, which the Core Lightning port fails the channel
+// on once it signed. One naming the funding the channel has locked to since
+// is done with; a splice_locked for it, sent again, is ignored.
+func TestReestablishNamesEarlierOrLocked(t *testing.T) {
+	t.Parallel()
+
+	h := newAcceptorHarness(t)
+	first, _ := rbfPair(t, h)
+	firstTxid := first.res.Tx.TxHash()
+	h.machine.HandleReestablish(&lnwire.ChannelReestablish{
+		NextFunding: fn.Some(lnwire.FundingTxidFlags{Txid: firstTxid}),
+	})
+	sigs := next[*lnwire.TxSignatures](t, h)
+	require.Equal(t, firstTxid, sigs.TxID)
+
+	lockOn(t, h, first)
+	h.machine.HandleReestablish(&lnwire.ChannelReestablish{
+		NextFunding: fn.Some(lnwire.FundingTxidFlags{Txid: firstTxid}),
+	})
+	h.machine.HandleSpliceMessage(&lnwire.SpliceLocked{
+		ChannelID: h.machine.cfg.ChanID, SpliceTxid: firstTxid,
+	})
+	select {
+	case msg := <-h.peer.msgs:
+		t.Fatalf("sent %T", msg)
+	case <-time.After(100 * time.Millisecond):
+	}
+	h.peer.mu.Lock()
+	require.Nil(t, h.peer.disconnected)
+	h.peer.mu.Unlock()
+}

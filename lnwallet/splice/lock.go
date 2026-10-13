@@ -182,6 +182,10 @@ func (m *Machine) handleSpliceLocked(txid chainhash.Hash) {
 		m.candidateLocked(m.candidate(txid))
 		return
 
+	// For the splice the channel locked to before this one: again.
+	case txid == m.cfg.Channel.State().CurrentFundingOutpoint().Hash:
+		return
+
 	// A peer withholding its tx_signatures can still publish the splice
 	// and lock it: ours are out.
 	case a.txid != txid ||
@@ -352,7 +356,24 @@ func (m *Machine) handleReestablish(msg *lnwire.ChannelReestablish) {
 	a := m.active
 
 	msg.NextFunding.WhenSome(func(next lnwire.FundingTxidFlags) {
+		current := m.cfg.Channel.State().CurrentFundingOutpoint().Hash
 		switch {
+		// An earlier transaction of the splice: our tx_signatures
+		// for it went out, so it gets them again, never a tx_abort
+		// (the Core Lightning port fails the channel on one once it
+		// signed).
+		case a != nil && a.txid != next.Txid &&
+			m.candidate(next.Txid) != nil:
+
+			if c := m.candidate(next.Txid); c.ourTxSigs != nil {
+				m.send(c.ourTxSigs)
+			}
+
+		// The splice the channel has locked to since: it is done.
+		case next.Txid == current:
+			log.Debugf("ChannelID(%v): next_funding names the "+
+				"current funding %v", m.cfg.ChanID, current)
+
 		case a == nil || a.txid != next.Txid:
 			m.abortSent = true
 			m.send(&lnwire.TxAbort{
