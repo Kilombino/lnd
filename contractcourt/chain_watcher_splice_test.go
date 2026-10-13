@@ -93,8 +93,13 @@ func followSplice(t *testing.T, h *chainWatcherTestHarness,
 
 	h.sendSpend(splice)
 	h.waitForSpendRegistration()
-	require.Equal(t, wire.OutPoint{Hash: splice.TxHash()},
-		h.notifier.lastSpendOutpoint())
+
+	// Not necessarily the last registration: the watch on a funding
+	// output a locked splice replaced may register after it.
+	out := wire.OutPoint{Hash: splice.TxHash()}
+	require.Eventually(t, func() bool {
+		return h.notifier.hasSpend(out)
+	}, 5*time.Second, 10*time.Millisecond)
 
 	// Nothing closed, and the link stays up.
 	select {

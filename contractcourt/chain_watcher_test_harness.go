@@ -166,6 +166,20 @@ func (m *mockChainNotifier) lastSpendOutpoint() wire.OutPoint {
 	return m.spendOutpoints[len(m.spendOutpoints)-1]
 }
 
+// hasSpend reports whether a spend of outpoint has been registered.
+func (m *mockChainNotifier) hasSpend(outpoint wire.OutPoint) bool {
+	m.spendMu.Lock()
+	defer m.spendMu.Unlock()
+
+	for _, op := range m.spendOutpoints {
+		if op == outpoint {
+			return true
+		}
+	}
+
+	return false
+}
+
 // mockConfirmationEvent represents a mock confirmation event subscription.
 type mockConfirmationEvent struct {
 	txid          chainhash.Hash
@@ -201,8 +215,8 @@ func (m *mockChainNotifier) RegisterSpendNtfn(outpoint *wire.OutPoint,
 		},
 	}
 
-	m.spendEvents = append(m.spendEvents, spendEvent)
 	m.spendMu.Lock()
+	m.spendEvents = append(m.spendEvents, spendEvent)
 	m.spendOutpoints = append(m.spendOutpoints, *outpoint)
 	m.spendMu.Unlock()
 
