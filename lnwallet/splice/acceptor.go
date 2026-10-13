@@ -53,11 +53,25 @@ func (m *Machine) handleSpliceInit(msg *lnwire.SpliceInit) {
 		return
 	}
 
-	ourKey, err := m.cfg.KeyRing.DeriveNextKey(keychain.KeyFamilyMultiSig)
-	if err != nil {
-		m.abort(codeInternal, "")
+	// After every check, so that nothing refused takes a place, and
+	// before deriving a key, which the wallet stores: a peer refused at
+	// the limits, again and again, mustn't cost a key each time.
+	code := m.cfg.Limits.admit(m, m.cfg.ChanID, m.cfg.TheirNodeID, false)
+	if code != "" {
+		m.abort(code, "")
 		m.resume()
 
+		return
+	}
+	failed := func(format string, args ...interface{}) {
+		m.cfg.Limits.release(m, m.cfg.ChanID, false)
+		m.abort(codeInternal, format, args...)
+		m.resume()
+	}
+
+	ourKey, err := m.cfg.KeyRing.DeriveNextKey(keychain.KeyFamilyMultiSig)
+	if err != nil {
+		failed("")
 		return
 	}
 
@@ -67,18 +81,7 @@ func (m *Machine) handleSpliceInit(msg *lnwire.SpliceInit) {
 		ourKey, msg.FundingPubKey,
 	)
 	if err != nil {
-		m.abort(codeInternal, "%v", err)
-		m.resume()
-
-		return
-	}
-
-	// Last, so that nothing refused before takes a place.
-	code := m.cfg.Limits.admit(m, m.cfg.ChanID, m.cfg.TheirNodeID, false)
-	if code != "" {
-		m.abort(code, "")
-		m.resume()
-
+		failed("%v", err)
 		return
 	}
 	a.session = session

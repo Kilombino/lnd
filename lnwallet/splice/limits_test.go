@@ -149,8 +149,17 @@ func TestAcceptSpliceLimits(t *testing.T) {
 			}
 		}
 
-		init(h)
-		require.Contains(t, abortReason(t, h), codeTooManyAborts)
+		// Refused at the limit, again and again: no key derived for
+		// any of them.
+		keys := h.machine.cfg.KeyRing.(*testKeyRing).signer
+		derived := len(keys.Privkeys)
+		for range 5 {
+			init(h)
+			require.Contains(t, abortReason(t, h),
+				codeTooManyAborts)
+			requireResumed(t, h)
+		}
+		require.Len(t, keys.Privkeys, derived)
 	})
 }
 
