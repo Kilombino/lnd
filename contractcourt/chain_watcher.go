@@ -377,10 +377,10 @@ type chainWatcher struct {
 	// close observer uses it.
 	splicePublished chainhash.Hash
 
-	// pendingPublished names the unconfirmed splice transactions our
-	// commitment was published on after a force close. Only the close
-	// observer uses it.
-	pendingPublished map[chainhash.Hash]bool
+	// pendingSigned holds our commitments on unconfirmed splice
+	// transactions' outputs, signed once after a force close and
+	// published again at every block. Only the close observer uses it.
+	pendingSigned map[chainhash.Hash]*wire.MsgTx
 
 	// previousSpends carries a spend of a funding output a locked splice
 	// replaced, by anything but that splice, to the close observer.
@@ -1170,7 +1170,19 @@ func (c *chainWatcher) closeObserver() {
 				pendingSpend = nil
 			}
 			c.splice.confNtfn.Cancel()
+
+			// A dropped transaction of a locked splice, taken
+			// out again: the output it spent, one the lock
+			// replaced, is watched again, its watch having
+			// ended when it was spent.
+			spent := c.splice.spent
 			c.splice = nil
+			if spent != c.cfg.chanState.CurrentFundingOutpoint() &&
+				c.watchedPrevious[spent] {
+
+				delete(c.watchedPrevious, spent)
+				c.watchPreviousFundings()
+			}
 
 			spendNtfn.Cancel()
 			var err error

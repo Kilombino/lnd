@@ -6,6 +6,7 @@ import (
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightningnetwork/lnd/chainio"
@@ -718,16 +719,17 @@ func TestChainWatcherPreviousFundingRemoteClose(t *testing.T) {
 }
 
 // TestChainWatcherForceCloseUnconfirmedSplice checks a force close while a
-// splice is unconfirmed: our commitment on the splice's funding output, its
-// child, is published at the next block, valid under the chain's rules, so
-// the anchor sweep can raise the fee of both; and only once.
+// splice is unconfirmed: at every block, our commitment on the splice's
+// funding output, its child, valid under the chain's rules, so the anchor
+// sweep can raise the fee of both, and ours on the funding output the splice
+// spends, for a splice that never confirms.
 func TestChainWatcherForceCloseUnconfirmedSplice(t *testing.T) {
 	t.Parallel()
 
 	h := newChainWatcherTestHarness(t, withRequiredConfs(1))
 	splice := pendSplice(t, h)
 
-	published := make(chan *wire.MsgTx, 2)
+	published := make(chan *wire.MsgTx, 8)
 	h.chainWatcher.cfg.publishTx = func(tx *wire.MsgTx, _ string) error {
 		published <- tx
 		return nil
@@ -759,30 +761,123 @@ func TestChainWatcherForceCloseUnconfirmedSplice(t *testing.T) {
 		oldCommit, lntypes.Local,
 	))
 
-	beat()
-	var tx *wire.MsgTx
-	select {
-	case tx = <-published:
-	case <-time.After(5 * time.Second):
-		t.Fatal("nothing published")
+	// Each block: our commitment on the splice's output, its child, and
+	// ours on the funding output the splice spends, whichever gets in.
+	publishedAt := func() map[chainhash.Hash]*wire.MsgTx {
+		t.Helper()
+
+		beat()
+		got := make(map[chainhash.Hash]*wire.MsgTx)
+		for len(got) < 2 {
+			select {
+			case tx := <-published:
+				got[tx.TxHash()] = tx
+			case <-time.After(5 * time.Second):
+				t.Fatalf("published %d of 2", len(got))
+			}
+		}
+
+		return got
+	}
+	first := publishedAt()
+	require.Contains(t, first, oldCommit.TxHash())
+	var child *wire.MsgTx
+	for hash, tx := range first {
+		if hash != oldCommit.TxHash() {
+			child = tx
+		}
 	}
 	require.Equal(t, wire.OutPoint{Hash: splice.TxHash()},
-		tx.TxIn[0].PreviousOutPoint)
+		child.TxIn[0].PreviousOutPoint)
 	prevOut := splice.TxOut[0]
 	fetcher := txscript.NewCannedPrevOutputFetcher(
 		prevOut.PkScript, prevOut.Value,
 	)
 	vm, err := txscript.NewEngine(
-		prevOut.PkScript, tx, 0, txscript.StandardVerifyFlags, nil,
-		txscript.NewTxSigHashes(tx, fetcher), prevOut.Value, fetcher,
+		prevOut.PkScript, child, 0, txscript.StandardVerifyFlags, nil,
+		txscript.NewTxSigHashes(child, fetcher), prevOut.Value, fetcher,
 	)
 	require.NoError(t, err)
 	require.NoError(t, vm.Execute())
 
-	beat()
-	select {
-	case <-published:
-		t.Fatal("published twice")
-	case <-time.After(200 * time.Millisecond):
+	// Again at the next block: the splice may never confirm, its inputs
+	// double-spent, and then only ours on the old funding can.
+	again := publishedAt()
+	require.Contains(t, again, oldCommit.TxHash())
+	require.Contains(t, again, child.TxHash())
+}
+
+// TestChainWatcherDroppedSpliceReorgedOutAgain checks a dropped transaction
+// of a locked splice, confirmed on the funding output the lock replaced
+// after a reorganisation, then taken out again: that output is watched
+// again, its watch having ended when the dropped transaction spent it, and a
+// revoked commitment confirmed there is still found.
+func TestChainWatcherDroppedSpliceReorgedOutAgain(t *testing.T) {
+	t.Parallel()
+
+	h := newChainWatcherTestHarness(t, withRequiredConfs(1))
+	locked := pendSpliceOf(t, h, 100_000)
+	dropped := pendSpliceOf(t, h, 200_000)
+	oldFunding := h.aliceChannel.State().FundingOutpoint
+
+	scid := lnwire.ShortChannelID{BlockHeight: 900_000}
+	txid := locked.TxHash()
+	require.NoError(t, h.aliceChannel.LockPendingFunding(txid, scid))
+	require.NoError(t, h.bobChannel.LockPendingFunding(txid, scid))
+
+	require.NoError(t, h.chainWatcher.Stop())
+	h.notifier.perOutpoint = true
+	cfg := h.chainWatcher.cfg
+	cfg.chanState = h.aliceChannel.State()
+	w, err := newChainWatcher(cfg)
+	require.NoError(t, err)
+	require.NoError(t, w.Start())
+	t.Cleanup(func() { _ = w.Stop() })
+
+	registrations := func() int {
+		h.notifier.spendMu.Lock()
+		defer h.notifier.spendMu.Unlock()
+
+		n := 0
+		for _, op := range h.notifier.spendOutpoints {
+			if op == oldFunding {
+				n++
+			}
+		}
+
+		return n
 	}
+	spendOf := func(op wire.OutPoint, tx *wire.MsgTx) {
+		t.Helper()
+
+		var ch chan *chainntnfs.SpendDetail
+		require.Eventually(t, func() bool {
+			var ok bool
+			ch, ok = h.notifier.spendChanFor(op)
+			return ok
+		}, 5*time.Second, 10*time.Millisecond)
+		hash := tx.TxHash()
+		ch <- &chainntnfs.SpendDetail{
+			SpentOutPoint: &op, SpenderTxHash: &hash,
+			SpendingTx: tx, SpendingHeight: 900_010,
+		}
+	}
+
+	// The dropped transaction confirms in place of the locked one: the
+	// watch follows it.
+	require.Eventually(t, func() bool { return registrations() > 0 },
+		5*time.Second, 10*time.Millisecond)
+	spendOf(oldFunding, dropped)
+	droppedOut := wire.OutPoint{Hash: dropped.TxHash()}
+	require.Eventually(t, func() bool {
+		_, ok := h.notifier.spendChanFor(droppedOut)
+		return ok
+	}, 5*time.Second, 10*time.Millisecond)
+	before := registrations()
+
+	// Taken out again: the old output is watched once more.
+	h.triggerReorg(dropped, 7)
+	require.Eventually(t, func() bool {
+		return registrations() > before
+	}, 5*time.Second, 10*time.Millisecond)
 }

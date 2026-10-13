@@ -33,6 +33,11 @@ type spliceWatch struct {
 
 	// confNtfn watches the splice transaction, for a reorg taking it out.
 	confNtfn *chainntnfs.ConfirmationEvent
+
+	// spent is the funding output the splice spent: the current one, or
+	// one a locked splice replaced when a dropped transaction of it
+	// confirmed after a reorganisation.
+	spent wire.OutPoint
 }
 
 // knownSplice returns the record of the pending splice whose transaction
@@ -144,8 +149,14 @@ func (c *chainWatcher) followSplice(r *channeldb.SpliceRecord,
 	log.Infof("ChannelPoint(%v): splice %v confirmed, watching %v",
 		c.cfg.chanState.FundingOutpoint, txid, r.OutPoint)
 
+	var spent wire.OutPoint
+	if spend.SpentOutPoint != nil {
+		spent = *spend.SpentOutPoint
+	}
+
 	return spendNtfn, &spliceWatch{
 		txid: txid, outpoint: r.OutPoint, confNtfn: confNtfn,
+		spent: spent,
 	}, nil
 }
 
@@ -311,7 +322,15 @@ func (c *chainWatcher) maybeSpliceLocked() bool {
 
 	chanState := c.cfg.chanState
 	if err := chanState.Refresh(); err != nil {
-		log.Errorf("ChannelPoint(%v): unable to read channel: %v",
+		// Closed on the splice's output: the channel is gone from
+		// the open ones while its close resolves.
+		logf := log.Errorf
+		if errors.Is(err, channeldb.ErrChannelNotFound) ||
+			errors.Is(err, channeldb.ErrNoActiveChannels) {
+
+			logf = log.Debugf
+		}
+		logf("ChannelPoint(%v): unable to read channel: %v",
 			chanState.FundingOutpoint, err)
 
 		return false
@@ -391,7 +410,6 @@ func (c *chainWatcher) maybePublishSpliceCommitment() {
 		switch {
 		case r.Retired || r.LocalCommit == nil:
 		case c.splice != nil && r.Txid() != c.splice.txid:
-		case c.splice == nil && c.pendingPublished[r.Txid()]:
 		default:
 			candidates = append(candidates, r)
 		}
@@ -410,18 +428,65 @@ func (c *chainWatcher) maybePublishSpliceCommitment() {
 		return
 	}
 
+	if c.splice != nil {
+		for _, r := range candidates {
+			if c.publishSpliceCommitment(r, false) {
+				c.splicePublished = r.Txid()
+			}
+		}
+
+		return
+	}
+
+	// Unconfirmed: at every block, our commitment on each splice
+	// transaction's output, its child, and ours on the funding output
+	// they spend. Whichever can get in does: the splice may confirm,
+	// die with its inputs double-spent, or leave the mempool, and the
+	// arbitrator sends ours on the old funding only once. Each child is
+	// signed once.
 	for _, r := range candidates {
-		if !c.publishSpliceCommitment(r, c.splice == nil) {
-			continue
+		tx, ok := c.pendingSigned[r.Txid()]
+		if !ok {
+			var err error
+			tx, err = c.signSpliceCommitment(r)
+			if err != nil {
+				log.Errorf("ChannelPoint(%v): unable to sign our "+
+					"commitment on splice %v: %v",
+					chanState.FundingOutpoint, r.Txid(),
+					err)
+
+				continue
+			}
+			if c.pendingSigned == nil {
+				c.pendingSigned = make(
+					map[chainhash.Hash]*wire.MsgTx,
+				)
+			}
+			c.pendingSigned[r.Txid()] = tx
+			log.Infof("ChannelPoint(%v): splice %v unconfirmed, and "+
+				"we force closed; publishing our commitment "+
+				"%v on it", chanState.FundingOutpoint,
+				r.Txid(), tx.TxHash())
 		}
-		if c.splice != nil {
-			c.splicePublished = r.Txid()
-			continue
-		}
-		if c.pendingPublished == nil {
-			c.pendingPublished = make(map[chainhash.Hash]bool)
-		}
-		c.pendingPublished[r.Txid()] = true
+		c.publishQuietly(tx)
+	}
+	if tx, err := chanState.BroadcastedCommitment(); err == nil {
+		c.publishQuietly(tx)
+	}
+}
+
+// publishQuietly publishes a transaction that may well be refused, another
+// spending the same output in the mempool, at debug level.
+func (c *chainWatcher) publishQuietly(tx *wire.MsgTx) {
+	if c.cfg.publishTx == nil {
+		return
+	}
+	err := c.cfg.publishTx(tx, labels.MakeLabel(
+		labels.LabelTypeChannelClose, &c.cfg.chanState.ShortChannelID,
+	))
+	if err != nil {
+		log.Debugf("ChannelPoint(%v): %v not published: %v",
+			c.cfg.chanState.FundingOutpoint, tx.TxHash(), err)
 	}
 }
 
@@ -436,31 +501,7 @@ func (c *chainWatcher) publishSpliceCommitment(r *channeldb.SpliceRecord,
 		return false
 	}
 
-	witness, out, err := input.GenFundingPkScript(
-		r.LocalKey.PubKey.SerializeCompressed(),
-		r.RemoteKey.SerializeCompressed(), int64(r.Capacity),
-	)
-	if err != nil {
-		log.Errorf("ChannelPoint(%v): splice funding script: %v",
-			c.cfg.chanState.FundingOutpoint, err)
-		return false
-	}
-
-	tx, err := lnwallet.GetSignedCommitTx(lnwallet.SignedCommitTxInputs{
-		CommitTx:  r.LocalCommit.CommitTx,
-		CommitSig: r.LocalCommit.CommitSig,
-		OurKey:    r.LocalKey,
-		TheirKey:  keychain.KeyDescriptor{PubKey: r.RemoteKey},
-		SignDesc: &input.SignDescriptor{
-			KeyDesc:       r.LocalKey,
-			WitnessScript: witness,
-			Output:        out,
-			HashType: lnwallet.CommitSigHashType(
-				c.cfg.chanState.ChanType,
-			),
-			InputIndex: 0,
-		},
-	}, c.cfg.signer)
+	tx, err := c.signSpliceCommitment(r)
 	if err != nil {
 		log.Errorf("ChannelPoint(%v): unable to sign our commitment "+
 			"on splice %v: %v", c.cfg.chanState.FundingOutpoint,
@@ -492,6 +533,39 @@ func (c *chainWatcher) publishSpliceCommitment(r *channeldb.SpliceRecord,
 	}
 
 	return true
+}
+
+// signSpliceCommitment returns our commitment on a splice's funding output,
+// signed.
+func (c *chainWatcher) signSpliceCommitment(
+	r *channeldb.SpliceRecord) (*wire.MsgTx, error) {
+
+	if r.LocalCommit == nil {
+		return nil, errors.New("no commitment of ours")
+	}
+	witness, out, err := input.GenFundingPkScript(
+		r.LocalKey.PubKey.SerializeCompressed(),
+		r.RemoteKey.SerializeCompressed(), int64(r.Capacity),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return lnwallet.GetSignedCommitTx(lnwallet.SignedCommitTxInputs{
+		CommitTx:  r.LocalCommit.CommitTx,
+		CommitSig: r.LocalCommit.CommitSig,
+		OurKey:    r.LocalKey,
+		TheirKey:  keychain.KeyDescriptor{PubKey: r.RemoteKey},
+		SignDesc: &input.SignDescriptor{
+			KeyDesc:       r.LocalKey,
+			WitnessScript: witness,
+			Output:        out,
+			HashType: lnwallet.CommitSigHashType(
+				c.cfg.chanState.ChanType,
+			),
+			InputIndex: 0,
+		},
+	}, c.cfg.signer)
 }
 
 // reorgSafeDepth is how deep a splice must be before the funding output it
