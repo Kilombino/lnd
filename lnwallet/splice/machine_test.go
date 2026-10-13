@@ -45,9 +45,17 @@ type testLink struct {
 	ch         *lnwallet.LightningChannel
 	initiator  lntypes.ChannelParty
 	stfuResult lntypes.ChannelParty
-	stfuGate   chan struct{}
-	commits    chan *lnwire.CommitSig
-	resumed    chan struct{}
+
+	// lockErr, set, is LockSplice's answer once it has locked: an answer
+	// lost, the lock done all the same.
+	lockErr error
+
+	// commitAnswerLost, set, has SendSpliceCommitment send the
+	// commitment and never answer.
+	commitAnswerLost bool
+	stfuGate         chan struct{}
+	commits          chan *lnwire.CommitSig
+	resumed          chan struct{}
 
 	// mu guards initiator, which a test may change.
 	mu sync.Mutex
@@ -102,6 +110,9 @@ func (l *testLink) SendSpliceCommitment(txid chainhash.Hash) <-chan error {
 		CommitSig: sigs.CommitSig, HtlcSigs: sigs.HtlcSigs,
 		FundingTxid: fn.Some(txid),
 	}
+	if l.commitAnswerLost {
+		return make(chan error)
+	}
 
 	return done(nil)
 }
@@ -113,7 +124,12 @@ func (l *testLink) RemoveSpliceFunding(txid chainhash.Hash) <-chan error {
 func (l *testLink) LockSplice(txid chainhash.Hash,
 	scid lnwire.ShortChannelID) <-chan error {
 
-	return done(l.ch.LockPendingFunding(txid, scid))
+	err := l.ch.LockPendingFunding(txid, scid)
+	if err == nil && l.lockErr != nil {
+		err = l.lockErr
+	}
+
+	return done(err)
 }
 
 // testPeer collects what the machine sends.

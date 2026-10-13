@@ -499,6 +499,9 @@ func (m *Machine) constructionDone(res *interactivetx.Result) {
 		LocalDelta:  a.ourContribution,
 		RemoteDelta: a.theirContribution,
 	}))
+	if errors.Is(err, errStopping) {
+		return
+	}
 	if err != nil {
 		m.abort(codeInternal, "%v", err)
 		m.forget()
@@ -506,7 +509,11 @@ func (m *Machine) constructionDone(res *interactivetx.Result) {
 		return
 	}
 
-	if err := m.wait(m.cfg.Link.SendSpliceCommitment(txid)); err != nil {
+	err = m.wait(m.cfg.Link.SendSpliceCommitment(txid))
+	if errors.Is(err, errStopping) {
+		return
+	}
+	if err != nil {
 		m.abort(codeInternal, "%v", err)
 		m.forget()
 
@@ -533,9 +540,14 @@ func (m *Machine) wait(result <-chan error) error {
 	case err := <-result:
 		return err
 	case <-m.quit:
-		return errors.New("splice machine stopping")
+		return errStopping
 	}
 }
+
+// errStopping is what a link step waited for returns when the machine stops
+// first: the step may well have been done, so nothing is undone; the next
+// connection's machine carries on from what was recorded.
+var errStopping = errors.New("splice machine stopping")
 
 // txOutputs returns the outputs as transaction outputs.
 func txOutputs(outputs []interactivetx.Output) []*wire.TxOut {

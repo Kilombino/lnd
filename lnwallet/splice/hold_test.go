@@ -3,6 +3,7 @@
 package splice
 
 import (
+	"errors"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"testing"
@@ -80,4 +81,38 @@ func TestSplicePeerInputHold(t *testing.T) {
 	startReestablished(t, unheld)
 	t.Cleanup(unheld.Stop)
 	require.Zero(t, unheld.PeerInputHold())
+}
+
+// TestSpliceHoldKeptWhenLockAnswerLost checks the hold on the peer's coins
+// when the link locked the splice but its answer was an error (lost, or the
+// machine stopping): the channel is on the splice's funding, so the hold is
+// kept, in memory and on disk, rather than released for good.
+func TestSpliceHoldKeptWhenLockAnswerLost(t *testing.T) {
+	t.Parallel()
+
+	p := newSplicePair(t)
+	for _, n := range []*node{p.alice, p.bob} {
+		n.machine.cfg.Policy.PeerInputConfs = 36
+	}
+	p.bob.link.lockErr = errors.New("answer lost")
+	p.alice.fund(t, 1, 40_000_000)
+	const amount = btcutil.Amount(30_000_000)
+
+	updates, err := p.alice.machine.Splice(Request{
+		Direction: DirectionIn, Amount: amount, FeeRate: 2_500,
+	})
+	require.NoError(t, err)
+	u := requireUpdates(t, updates,
+		StatePreparing, StateNegotiating, StateSigned, StateBroadcast,
+	)
+	p.confirm(t, u.Txid)
+	require.Eventually(t, func() bool {
+		return p.bob.ch.State().CurrentFundingOutpoint().Hash == u.Txid
+	}, 5*time.Second, 10*time.Millisecond)
+
+	time.Sleep(100 * time.Millisecond)
+	require.Equal(t, amount, p.bob.machine.PeerInputHold())
+	holds, err := p.bob.ch.State().SpliceHolds()
+	require.NoError(t, err)
+	require.Len(t, holds, 1)
 }

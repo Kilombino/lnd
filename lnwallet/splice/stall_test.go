@@ -106,8 +106,12 @@ func TestSpliceSigningTimeoutAcceptor(t *testing.T) {
 			p.alice.machine.mu.Lock()
 			defer p.alice.machine.mu.Unlock()
 
+			// The restart comes once our commitment_signed is
+			// out: stopping before, the splice waits for the
+			// reestablish to be dropped.
 			a := p.alice.machine.active
-			return a != nil && a.phase == phaseSigning
+			return a != nil && a.phase == phaseSigning &&
+				a.commitSent
 		}
 		require.Eventually(t, signing, 5*time.Second,
 			10*time.Millisecond)
@@ -134,6 +138,36 @@ func TestSpliceSigningTimeoutAcceptor(t *testing.T) {
 		require.Zero(t, pending, "restart %v", restart)
 		require.Empty(t, p.alice.ch.PendingFundings())
 	}
+}
+
+// TestSpliceStopWhileSending checks a machine stopping while the link
+// sends our commitment_signed undoes nothing: the commitment may be out, the
+// peer signing first keeps the splice, so the record and our coins stay for
+// the next machine.
+func TestSpliceStopWhileSending(t *testing.T) {
+	t.Parallel()
+
+	p := newSplicePair(t)
+	p.alice.link.commitAnswerLost = true
+	p.alice.fund(t, 1, 5_000_000)
+
+	_, err := p.alice.machine.Splice(Request{
+		Direction: DirectionIn, Amount: 1_000_000, FeeRate: 2_500,
+	})
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		recs, err := p.alice.ch.State().SpliceRecords()
+		return err == nil && len(recs) == 1
+	}, 5*time.Second, 10*time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
+	p.alice.machine.Stop()
+
+	recs, err := p.alice.ch.State().SpliceRecords()
+	require.NoError(t, err)
+	require.Len(t, recs, 1)
+	require.NotZero(t, p.alice.wallet.leaseCount())
+	require.Len(t, p.alice.ch.PendingFundings(), 1)
 }
 
 // TestSpliceUnsignedAtRestart checks a splice recorded but never signed by

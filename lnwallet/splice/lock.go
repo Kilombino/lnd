@@ -207,7 +207,15 @@ func (m *Machine) maybeComplete() {
 	if err := m.wait(m.cfg.Link.LockSplice(a.txid, scid)); err != nil {
 		log.Errorf("ChannelID(%v): unable to complete splice %v: %v",
 			m.cfg.ChanID, a.txid, err)
-		m.releaseHold(a.txid)
+
+		// The hold goes only if the lock didn't happen: stopping, or
+		// the channel on the splice's funding all the same, it is
+		// the next machine's to keep.
+		locked := m.cfg.Channel.State().CurrentFundingOutpoint().Hash ==
+			a.txid
+		if !errors.Is(err, errStopping) && !locked {
+			m.releaseHold(a.txid)
+		}
 
 		return
 	}
