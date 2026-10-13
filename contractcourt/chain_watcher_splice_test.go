@@ -460,9 +460,15 @@ func TestChainWatcherForceCloseAfterSplice(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, vm.Execute())
 
-	// Published: the next block doesn't sign it again.
+	// Published: the next block sends it again, as signed then, in case
+	// the mempool dropped it.
 	beat()
-	nothing("published twice")
+	select {
+	case again := <-published:
+		require.Equal(t, tx.TxHash(), again.TxHash())
+	case <-time.After(5 * time.Second):
+		t.Fatal("not published again")
+	}
 }
 
 // TestChainWatcherSecondSplice checks a splice of a channel a splice moved

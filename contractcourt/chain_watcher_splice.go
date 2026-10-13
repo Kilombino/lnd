@@ -453,7 +453,13 @@ func (c *chainWatcher) republishOnReorg() {
 // block; the channel's status is read again, as the arbitrator sets it on its
 // own copy, and a publish that failed is tried again at the next block.
 func (c *chainWatcher) maybePublishSpliceCommitment() {
+	// Published already: again at every block, as signed then, in case
+	// the mempool dropped it; the arbitrator sends only its own.
 	if c.splice != nil && c.splicePublished == c.splice.txid {
+		if tx, ok := c.pendingSigned[c.splice.txid]; ok {
+			c.publishQuietly(tx)
+		}
+
 		return
 	}
 
@@ -568,6 +574,10 @@ func (c *chainWatcher) publishSpliceCommitment(r *channeldb.SpliceRecord,
 			r.Txid(), err)
 		return false
 	}
+	if c.pendingSigned == nil {
+		c.pendingSigned = make(map[chainhash.Hash]*wire.MsgTx)
+	}
+	c.pendingSigned[r.Txid()] = tx
 
 	state := "confirmed"
 	if unconfirmed {
