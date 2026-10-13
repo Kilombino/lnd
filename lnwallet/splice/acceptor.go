@@ -143,7 +143,12 @@ func (m *Machine) checkSpliceInit(msg *lnwire.SpliceInit) (string, string) {
 	// construction's own rule (1% of the new capacity) can be less, and
 	// the channel would then refuse the peer's commitments there.
 	// Refused here, before anything is signed.
-	reserve := state.RemoteChanCfg.ChanReserve
+	// And the construction's own, 1% of the new capacity, checked now:
+	// at tx_complete the Core Lightning port has signed its part.
+	reserve := max(
+		state.RemoteChanCfg.ChanReserve,
+		spliceReserve(state.Capacity+contribution),
+	)
 	if contribution < 0 && theirBalance+contribution < reserve {
 		return codeAboveBalance, fmt.Sprintf("leaves %v, below the "+
 			"reserve of %v", theirBalance+contribution, reserve)

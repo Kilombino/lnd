@@ -82,10 +82,18 @@ const (
 	// splice needs only a few.
 	DefaultMaxPeerAddMessages = 64
 
-	// maxExcessFee is how far beyond its share of the fee a side may
-	// pay, on top of twice its share: a side can't hand its balance to
-	// the miners and go below its reserve that way.
+	// maxExcessFee is how far beyond its share of the fee this node pays,
+	// on top of twice its share: a check of its own wallet's arithmetic.
+	// The peer's overpayment comes out of its own inputs (balances move
+	// only by the contributions, and the reserve rule holds its balance),
+	// so it isn't refused: the Core Lightning port declares its fee rate
+	// in the wrong unit and pays four times the rate it declares.
 	maxExcessFee = btcutil.Amount(1_000)
+
+	// peerWitnessSlack is how much lighter than this node's estimate a
+	// peer's input witness may be, per input: the Core Lightning port
+	// counts a P2WPKH witness as 107 weight units, this node as 109.
+	peerWitnessSlack = 2
 
 	// MaxSequence is the highest sequence an input may use: the
 	// transaction must stay replaceable.
@@ -700,6 +708,13 @@ func (s *Session) receiveOutput(m *lnwire.TxAddOutput) error {
 		if err := s.cfg.CheckPeerOutput(out); err != nil {
 			return abortf("output refused: %v", err)
 		}
+
+		// The reserve rule, which binds a side adding an output,
+		// applied now: at tx_complete the Core Lightning port has
+		// signed its part and fails the channel on a tx_abort.
+		if err := s.keepsReserve(s.cfg.Role.other()); err != nil {
+			return err
+		}
 	}
 
 	s.outputs[out.SerialID] = out
@@ -874,13 +889,28 @@ func (s *Session) Build() (*Result, error) {
 	res.Fee = in - out
 
 	// Each side's share is rounded down; the transaction as a whole must
-	// still pay the agreed feerate.
-	if res.Fee < s.cfg.FeeRate.FeeForWeight(lntypes.WeightUnit(res.Weight)) {
+	// still pay the agreed feerate, the peer's witnesses as it weighs
+	// them.
+	minWeight := lntypes.WeightUnit(res.Weight - s.peerSlack(res))
+	if res.Fee < s.cfg.FeeRate.FeeForWeight(minWeight) {
 		return nil, s.fail(abortf("fee of %d below the feerate for "+
 			"weight %d", res.Fee, res.Weight))
 	}
 
 	return res, nil
+}
+
+// peerSlack is how much lighter the peer's input witnesses may be than this
+// node's estimate.
+func (s *Session) peerSlack(res *Result) int64 {
+	var n int64
+	for _, in := range res.Inputs {
+		if !in.Shared && addedBy(in.SerialID) == s.cfg.Role.other() {
+			n++
+		}
+	}
+
+	return n * peerWitnessSlack
 }
 
 // sideWeights is the weight each side pays for, and the total.
@@ -983,6 +1013,9 @@ func (s *Session) checkAccounting(res *Result, w sideWeights) error {
 	check := func(role Role, in, out, contribution btcutil.Amount,
 		weight int64) error {
 
+		if role != s.cfg.Role {
+			weight -= s.peerSlack(res)
+		}
 		fee := s.cfg.FeeRate.FeeForWeight(lntypes.WeightUnit(weight))
 		paid := in - out - contribution
 		if paid < fee {
@@ -991,9 +1024,8 @@ func (s *Session) checkAccounting(res *Result, w sideWeights) error {
 				"(%d)", role, in, out, contribution, fee)
 		}
 
-		// Paying far more than its share would let a side move its
-		// balance to the miners, past the reserve rule below.
-		if paid > 2*fee+maxExcessFee {
+		// Ours only: the peer's overpayment is its own.
+		if role == s.cfg.Role && paid > 2*fee+maxExcessFee {
 			return abortf("the %v pays %d in fees, far more than "+
 				"its share of %d", role, paid, fee)
 		}
@@ -1013,6 +1045,25 @@ func (s *Session) checkAccounting(res *Result, w sideWeights) error {
 		Acceptor, inAcc, outAcc, s.cfg.AcceptorContribution,
 		w.acceptor,
 	)
+}
+
+// keepsReserve checks role's balance, changed by its contribution, against
+// the reserve on the new capacity.
+func (s *Session) keepsReserve(role Role) error {
+	balance := s.cfg.InitiatorBalance + s.cfg.InitiatorContribution
+	if role == Acceptor {
+		balance = s.cfg.AcceptorBalance + s.cfg.AcceptorContribution
+	}
+	if balance < 0 {
+		return abortf("the %v's contribution takes its balance below "+
+			"zero", role)
+	}
+	if reserve := s.cfg.Reserve(s.fundingValue()); balance < reserve {
+		return abortf("the %v adds an output and keeps %d, below the "+
+			"reserve of %d", role, balance, reserve)
+	}
+
+	return nil
 }
 
 // checkReserves applies the reserve rule: a side that adds an output other

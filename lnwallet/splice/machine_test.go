@@ -897,6 +897,21 @@ func TestAcceptSpliceRefused(t *testing.T) {
 		requireResumed(t, h)
 	})
 
+	// The construction's reserve, 1% of the new capacity, above the
+	// channel's own: refused at splice_init, not at tx_complete, where
+	// the Core Lightning port has signed its part.
+	t.Run("below 1% of the new capacity", func(t *testing.T) {
+		t.Parallel()
+
+		h := newAcceptorHarness(t)
+		state := h.bob.State()
+		state.RemoteChanCfg.ChanReserve = 1_000
+		balance := state.LocalCommitment.RemoteBalance.ToSatoshis()
+		init(h, -(balance - 4_000_000), 2_500)
+		require.Contains(t, abortReason(t, h), "below the reserve")
+		requireResumed(t, h)
+	})
+
 	// Contributions no amount can be, before any arithmetic on them:
 	// the extremes would overflow the balance and capacity sums.
 	for _, c := range []btcutil.Amount{

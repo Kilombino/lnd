@@ -641,9 +641,11 @@ func TestBuildRefusals(t *testing.T) {
 		p.initContrib = -(598_000 + 2_000)
 		init, acc := pair(t, p)
 		init.AddLocalOutput(Output{Value: 598_000, PkScript: p2wpkh(1)})
-		require.NoError(t, run(init, acc))
-		_, err := acc.Build()
-		requireAbort(t, err, "below the reserve")
+
+		// Refused as the output comes, before tx_complete: the Core
+		// Lightning port signs its part once tx_complete is
+		// exchanged and fails the channel on a tx_abort after.
+		requireAbort(t, run(init, acc), "below the reserve")
 	})
 
 	t.Run("a contribution below the balance", func(t *testing.T) {
@@ -651,9 +653,7 @@ func TestBuildRefusals(t *testing.T) {
 		p.initContrib = -700_000
 		init, acc := pair(t, p)
 		init.AddLocalOutput(Output{Value: 698_500, PkScript: p2wpkh(1)})
-		require.NoError(t, run(init, acc))
-		_, err := acc.Build()
-		requireAbort(t, err, "below zero")
+		requireAbort(t, run(init, acc), "below zero")
 	})
 
 	t.Run("shaped like a commitment", func(t *testing.T) {
@@ -1039,21 +1039,36 @@ func TestFeeBoundaries(t *testing.T) {
 	}
 	share := shareFor(t)
 
-	try := func(paid btcutil.Amount) error {
+	// The acceptor's check of the initiator, the peer, and the
+	// initiator's of itself.
+	try := func(paid btcutil.Amount) (error, error) {
 		p := defaultParams()
 		p.initContrib = -(300_000 + paid)
 		init, acc := pair(t, p)
 		init.AddLocalOutput(Output{Value: 300_000, PkScript: p2tr(9)})
 		require.NoError(t, run(init, acc))
-		_, err := acc.Build()
+		_, peerErr := acc.Build()
+		_, ownErr := init.Build()
 
-		return err
+		return peerErr, ownErr
 	}
 
-	require.NoError(t, try(share))
-	requireAbort(t, try(share-1), "don't cover")
-	require.NoError(t, try(2*share+maxExcessFee))
-	requireAbort(t, try(2*share+maxExcessFee+1), "far more than")
+	peer, own := try(share)
+	require.NoError(t, peer)
+	require.NoError(t, own)
+	peer, own = try(share - 1)
+	requireAbort(t, peer, "don't cover")
+	requireAbort(t, own, "don't cover")
+	peer, own = try(2*share + maxExcessFee)
+	require.NoError(t, peer)
+	require.NoError(t, own)
+
+	// Overpaying is a check of our own arithmetic only: the peer's is
+	// its own money (the Core Lightning port pays four times the rate
+	// it declares).
+	peer, own = try(2*share + maxExcessFee + 1)
+	require.NoError(t, peer)
+	requireAbort(t, own, "far more than")
 }
 
 func TestReserveOnNegativeContribution(t *testing.T) {
@@ -1207,4 +1222,52 @@ func TestAdversarialInitiatorProperty(t *testing.T) {
 	require.Positive(t, accepted, "no splice got through")
 	t.Logf("%d accepted, %d of them with the claim the peer built for "+
 		"a different one", accepted, lied)
+}
+
+// TestPeerWitnessSlack checks the peer's inputs may weigh a little less
+// than this node's estimate: the Core Lightning port counts a P2WPKH
+// witness as 107 weight units, this node as 109, and pays for 107.
+func TestPeerWitnessSlack(t *testing.T) {
+	t.Parallel()
+
+	build := func(change btcutil.Amount) (*Result, *Session, error) {
+		p := defaultParams()
+		p.initContrib = 500_000
+		init, acc := pair(t, p)
+		for i := byte(1); i <= 2; i++ {
+			wallet := prevTx(i, p2wpkh(i), 300_000)
+			init.AddLocalInput(Input{
+				OutPoint: wire.OutPoint{
+					Hash: wallet.TxHash(),
+				},
+				Value:            300_000,
+				PkScript:         p2wpkh(i),
+				Sequence:         MaxSequence,
+				MaxWitnessWeight: input.P2WKHWitnessSize,
+				PrevTx:           wallet,
+			})
+		}
+		init.AddLocalOutput(Output{Value: change, PkScript: p2wpkh(9)})
+		require.NoError(t, run(init, acc))
+		res, err := acc.Build()
+
+		return res, acc, err
+	}
+
+	// The initiator's share by this node's weights.
+	res, acc, err := build(90_000)
+	require.NoError(t, err)
+	p := defaultParams()
+	share := p.feeRate.FeeForWeight(lntypes.WeightUnit(
+		acc.weights(res).initiator,
+	))
+	slack := p.feeRate.FeeForWeight(2 * peerWitnessSlack)
+	require.Positive(t, slack)
+
+	// Paying for its witnesses as it weighs them: accepted. Less still:
+	// refused.
+	_, _, err = build(100_000 - share + slack)
+	require.NoError(t, err)
+	_, _, err = build(100_000 - share + slack + 1)
+	require.Error(t, err)
 }
