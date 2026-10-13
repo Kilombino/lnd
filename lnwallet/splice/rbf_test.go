@@ -286,6 +286,8 @@ func TestAcceptSpliceReplaced(t *testing.T) {
 		t.Parallel()
 
 		h := newAcceptorHarness(t)
+		limits := NewLimits()
+		h.machine.cfg.Limits = limits
 		first := startAliceSplice(t, h, 40_000_000, 2_500)
 		first.construct(t, h)
 		bobKey := signSplice(t, h, first, nil)
@@ -300,6 +302,12 @@ func TestAcceptSpliceReplaced(t *testing.T) {
 		})
 		next[*lnwire.TxAbort](t, h)
 		requireResumed(t, h)
+
+		// Given up, it counts against the channel's aborts.
+		limits.mu.Lock()
+		aborts := limits.recentAborts(h.machine.cfg.ChanID)
+		limits.mu.Unlock()
+		require.Equal(t, 1, aborts)
 
 		// The original is the splice again, and locks.
 		require.Len(t, h.bob.PendingFundings(), 1)
