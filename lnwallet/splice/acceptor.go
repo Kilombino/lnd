@@ -216,11 +216,9 @@ func (m *Machine) newConstruction(role interactivetx.Role,
 		CheckPeerOutput:       m.checkPeerOutput,
 		DustLimit:             m.cfg.DustLimit,
 		WitnessWeight:         peerWitnessWeight,
-		Reserve: func(c btcutil.Amount) btcutil.Amount {
-			return c / 100
-		},
-		InitiatorBalance: initBalance,
-		AcceptorBalance:  accBalance,
+		Reserve:               spliceReserve,
+		InitiatorBalance:      initBalance,
+		AcceptorBalance:       accBalance,
 	}
 	session, err := interactivetx.NewSession(cfg)
 	if err != nil {

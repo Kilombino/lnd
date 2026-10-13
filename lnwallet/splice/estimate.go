@@ -118,6 +118,8 @@ func EstimateSplice(req EstimateRequest) (*Estimate, error) {
 	if req.Available > outFee {
 		est.MaxOut = req.Available - outFee
 	}
+	keep := maxOutKeepingReserve(req.LocalBalance, req.Capacity)
+	est.MaxOut = max(0, min(est.MaxOut, keep-outFee))
 	est.Min = req.DustLimit(dest)
 
 	switch req.Direction {
@@ -139,6 +141,17 @@ func EstimateSplice(req EstimateRequest) (*Estimate, error) {
 			est.Amount = sel.Contribution
 			est.Fee = sel.Fee
 			est.Weight = sel.Weight
+
+			// With change, an output of ours: our balance must
+			// reach the reserve on the new capacity.
+			if sel.Change > 0 && !keepsSpliceReserve(
+				req.LocalBalance, req.Capacity, est.Amount,
+			) {
+				setRefusal(est, "below_min")
+				est.Min = max(est.Min, minInKeepingReserve(
+					req.LocalBalance, req.Capacity,
+				))
+			}
 		}
 		est.NewCapacity = req.Capacity + est.Amount
 		est.NewLocal = req.LocalBalance + est.Amount
@@ -170,4 +183,43 @@ func setRefusal(est *Estimate, code string) {
 	if est.RefusalCode == "" {
 		est.RefusalCode = code
 	}
+}
+
+// spliceReserve is the reserve the construction keeps, at tx_complete, for a
+// side adding an output other than the funding output or taking funds out:
+// 1% of the new capacity.
+func spliceReserve(capacity btcutil.Amount) btcutil.Amount {
+	return capacity / 100
+}
+
+// keepsSpliceReserve reports whether our balance, changed by our
+// contribution, keeps the reserve on the capacity it makes, the peer adding
+// nothing.
+func keepsSpliceReserve(balance, capacity,
+	contribution btcutil.Amount) bool {
+
+	return balance+contribution >= spliceReserve(capacity+contribution)
+}
+
+// maxOutKeepingReserve returns the most a splice of ours can take out of
+// the channel, fee included, and keep that reserve: the channel's own
+// reserve, fixed at its opening, can be below 1% of a channel grown since.
+func maxOutKeepingReserve(balance, capacity btcutil.Amount) btcutil.Amount {
+	out := max(0, (100*balance-capacity)/99)
+	for out > 0 && !keepsSpliceReserve(balance, capacity, -out) {
+		out--
+	}
+
+	return out
+}
+
+// minInKeepingReserve returns the least funds in that bring our balance to
+// that reserve.
+func minInKeepingReserve(balance, capacity btcutil.Amount) btcutil.Amount {
+	in := max(0, (capacity-100*balance)/99)
+	for !keepsSpliceReserve(balance, capacity, in) {
+		in++
+	}
+
+	return in
 }

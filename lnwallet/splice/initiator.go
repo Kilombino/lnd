@@ -254,6 +254,24 @@ func (m *Machine) prepareFunds(a *active, req Request) error {
 			return refused(codeInternal, "%v", err)
 		}
 
+		// With change, an output of ours, the construction wants
+		// our balance at the reserve on the new capacity.
+		balance := m.cfg.Channel.State().LocalCommitment.LocalBalance.
+			ToSatoshis()
+		if sel.Change > 0 && !keepsSpliceReserve(
+			balance, capacity, sel.Contribution,
+		) {
+			err := ReleaseCoins(m.cfg.Wallet, sel.Inputs)
+			if err != nil {
+				log.Errorf("ChannelID(%v): unable to release "+
+					"coins: %v", m.cfg.ChanID, err)
+			}
+
+			return refused("below_min", "%v in leaves our balance "+
+				"below the reserve of %v", sel.Contribution,
+				spliceReserve(capacity+sel.Contribution))
+		}
+
 		a.ourInputs = sel.Inputs
 		a.ourContribution = sel.Contribution
 		if sel.Change > 0 {
@@ -293,6 +311,16 @@ func (m *Machine) checkMoveOut(contribution btcutil.Amount) error {
 	if -contribution > available {
 		return refused("above_max_out", "%v out, %v available",
 			-contribution, available)
+	}
+
+	// And the reserve on the new capacity the construction keeps.
+	state := m.cfg.Channel.State()
+	keep := maxOutKeepingReserve(
+		state.LocalCommitment.LocalBalance.ToSatoshis(), state.Capacity,
+	)
+	if -contribution > keep {
+		return refused("above_max_out", "%v out, %v keeping the "+
+			"reserve on the new capacity", -contribution, keep)
 	}
 
 	return nil

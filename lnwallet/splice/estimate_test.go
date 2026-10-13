@@ -69,6 +69,43 @@ func TestEstimateSplice(t *testing.T) {
 	require.Empty(t, e.RefusalCode)
 	require.Equal(t, e.MaxOut, e.Amount)
 
+	// A channel grown since it opened: the most out keeps 1% of the new
+	// capacity, as the construction does, beyond what we can send.
+	grown := base
+	grown.Capacity, grown.LocalBalance = 10_000_000, 120_000
+	grown.Available = 110_000
+	grown.Direction, grown.FeeRate, grown.UseMax = DirectionOut, 2_500, true
+	grown.Destination = p2tr(3)
+	e, err = EstimateSplice(grown)
+	require.NoError(t, err)
+	require.Empty(t, e.RefusalCode)
+	require.Less(t, int(e.MaxOut), 110_000-int(e.Fee))
+	require.True(t, keepsSpliceReserve(
+		grown.LocalBalance, grown.Capacity, -(e.MaxOut+e.Fee),
+	))
+	grown.UseMax, grown.Amount = false, e.MaxOut+100
+	e, err = EstimateSplice(grown)
+	require.NoError(t, err)
+	require.Equal(t, "above_max_out", e.RefusalCode)
+
+	// In, with change, too little to bring our balance to it.
+	grown = base
+	grown.Capacity, grown.LocalBalance = 10_000_000, 0
+	grown.Direction, grown.FeeRate = DirectionIn, 2_500
+	grown.Amount = 50_000
+	e, err = EstimateSplice(grown)
+	require.NoError(t, err)
+	require.Equal(t, "below_min", e.RefusalCode)
+	require.Equal(t, 101_010, int(e.Min))
+	grown.Amount = e.Min
+	e, err = EstimateSplice(grown)
+	require.NoError(t, err)
+	require.Empty(t, e.RefusalCode)
+	grown.Amount = 150_000
+	e, err = EstimateSplice(grown)
+	require.NoError(t, err)
+	require.Empty(t, e.RefusalCode)
+
 	// Below dust, and below the floor.
 	req.UseMax, req.Amount = false, 100
 	e, err = EstimateSplice(req)

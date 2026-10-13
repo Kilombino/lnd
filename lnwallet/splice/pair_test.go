@@ -468,6 +468,30 @@ func TestSpliceRequestRefused(t *testing.T) {
 		require.ErrorContains(t, err, "above_max_out")
 	})
 
+	// A channel grown since it opened: its own reserve is below 1% of
+	// its capacity, which the construction keeps for a side adding an
+	// output. Refused at once, not at tx_complete.
+	t.Run("the reserve on the new capacity", func(t *testing.T) {
+		t.Parallel()
+
+		p := newSplicePair(t)
+		p.alice.ch.State().Capacity = 400 * btcutil.SatoshiPerBitcoin
+		_, err := p.alice.machine.Splice(Request{
+			Direction: DirectionOut, Amount: 200_000_000,
+			FeeRate: 2_500, Destination: p2tr(1),
+		})
+		require.ErrorContains(t, err, "above_max_out")
+
+		p.alice.ch.State().Capacity = 2000 * btcutil.SatoshiPerBitcoin
+		p.alice.fund(t, 1, 100_000_000)
+		_, err = p.alice.machine.Splice(Request{
+			Direction: DirectionIn, Amount: 50_000_000,
+			FeeRate: 2_500,
+		})
+		require.ErrorContains(t, err, "below_min")
+		require.Zero(t, p.alice.wallet.leaseCount())
+	})
+
 	t.Run("peer quiesced first", func(t *testing.T) {
 		t.Parallel()
 
