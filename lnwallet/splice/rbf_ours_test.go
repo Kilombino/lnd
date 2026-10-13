@@ -247,7 +247,11 @@ func TestReplaceOurSplice(t *testing.T) {
 		return p.alice.ch.State().CurrentFundingOutpoint().Hash == txid
 	}, 5*time.Second, 20*time.Millisecond)
 	require.Equal(t, newCapacity, p.alice.ch.State().Capacity)
-	require.Zero(t, p.alice.wallet.leaseCount())
+
+	// The coins are released just after the lock.
+	require.Eventually(t, func() bool {
+		return p.alice.wallet.leaseCount() == 0
+	}, 5*time.Second, 10*time.Millisecond)
 
 	// The user's stream follows the splice to its replacement: signed,
 	// published, locked.
@@ -303,10 +307,17 @@ func TestOurPart(t *testing.T) {
 	)
 	require.Equal(t, -(300_000 + fee), c)
 
-	// More than the channel lets go: refused before the peer hears.
-	m.cfg.Channel = &balanceOnly{available: 100_000_000}
-	_, _, _, err = m.ourPart(out, 2_000)
+	// More than the channel lets go: nothing available beyond the
+	// move-out being replaced, and the replacement's output fee at
+	// 10,000 sat/kw above the 600 its fee took: refused before the peer
+	// hears.
+	m.cfg.Channel = &balanceOnly{available: 0}
+	_, _, _, err = m.ourPart(out, 10_000)
 	require.ErrorContains(t, err, "available")
+
+	// The same at 2,000 sat/kw fits in what the move-out took.
+	_, _, _, err = m.ourPart(out, 2_000)
+	require.NoError(t, err)
 	m.cfg.Channel = &balanceOnly{available: 1_000_000_000}
 
 	// Adding 1,000,000 from a coin of 1,500,000, with change.

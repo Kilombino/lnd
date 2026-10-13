@@ -429,9 +429,9 @@ func (m *Machine) constructionDone(res *interactivetx.Result) {
 		LocalDelta:  a.ourContribution,
 		RemoteDelta: a.theirContribution,
 		Negotiation: &channeldb.SpliceNegotiation{
-			WeInitiated: a.role == interactivetx.Initiator,
-			Tx:          res.Tx,
-			FeeRate:     uint64(a.feeRate),
+			WeInitiated:  a.role == interactivetx.Initiator,
+			Tx:           res.Tx,
+			FeeRate:      uint64(a.feeRate),
 			OurInputs:    coinOutpoints(a.ourInputs),
 			Inputs:       spliceInputs(res),
 			OursReplaced: a.oursReplaced,

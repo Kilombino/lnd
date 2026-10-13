@@ -10,6 +10,7 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/lightningnetwork/lnd/chainntnfs"
+	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/fn/v2"
 	"github.com/lightningnetwork/lnd/input"
 	"github.com/lightningnetwork/lnd/lnwallet"
@@ -269,8 +270,14 @@ func TestAcceptSpliceReplaced(t *testing.T) {
 				txid
 		}, 5*time.Second, 20*time.Millisecond)
 		require.Empty(t, h.bob.PendingFundings())
-		last, err := h.bob.State().LastSplice()
-		require.NoError(t, err)
+
+		// Recorded just after the lock.
+		var last *channeldb.LastSplice
+		require.Eventually(t, func() bool {
+			var err error
+			last, err = h.bob.State().LastSplice()
+			return err == nil && last != nil
+		}, 5*time.Second, 20*time.Millisecond)
 		require.Equal(t, "locked", last.Outcome)
 		require.Equal(t, txid, last.Txid)
 	})
