@@ -305,8 +305,18 @@ func newSpliceLinkHarnessWith(t *testing.T,
 
 	t.Helper()
 
+	return newSpliceLinkHarnessReserve(t, 0, tweak)
+}
+
+// newSpliceLinkHarnessReserve is newSpliceLinkHarnessWith with each side
+// held to reserve.
+func newSpliceLinkHarnessReserve(t *testing.T, reserve btcutil.Amount,
+	tweak func(*ChannelLinkConfig)) *spliceLinkHarness {
+
+	t.Helper()
+
 	h, err := newSingleLinkTestHarness(
-		t, 5*btcutil.SatoshiPerBitcoin, 0,
+		t, 5*btcutil.SatoshiPerBitcoin, reserve,
 	)
 	require.NoError(t, err)
 
@@ -1248,4 +1258,107 @@ func TestLinkHeldBounded(t *testing.T) {
 		}
 		s.requireNoFailure(t)
 	})
+}
+
+// TestLinkReestablishPeerDoneSigning checks a reconnection on which we are
+// still signing a splice and the peer is done (its reestablish names no
+// splice: it has both tx_signatures, ours reached it and its own were lost).
+// It ends quiescence and sends its owed updates, which reach us before its
+// tx_signatures sent again: they wait for our machine to end quiescence,
+// rather than disconnecting for an update after stfu, on every reconnection
+// until the splice locked.
+func TestLinkReestablishPeerDoneSigning(t *testing.T) {
+	t.Parallel()
+
+	alice, bob, err := createMirroredChannel(
+		t, btcutil.SatoshiPerBitcoin*3, btcutil.SatoshiPerBitcoin*5,
+	)
+	require.NoError(t, err)
+
+	const added = btcutil.SatoshiPerBitcoin
+	txid := pendSplice(t, alice.channel, bob.channel, added)
+	original := alice.channel.State().FundingOutpoint.Hash
+
+	aliceHandler := &recordingSpliceHandler{
+		nextFunding: fn.Some(lnwire.FundingTxidFlags{Txid: txid}),
+		fundingLocked: fn.Some(lnwire.FundingTxidFlags{
+			Txid: original,
+		}),
+		signing: true,
+	}
+	bobHandler := &recordingSpliceHandler{
+		fundingLocked: fn.Some(lnwire.FundingTxidFlags{
+			Txid: original,
+		}),
+	}
+	failures := make(chan LinkFailureError, 1)
+	n := newTwoHopNetworkStopped(
+		t, alice.channel, bob.channel, testStartingHeight,
+		func(c *ChannelLinkConfig) {
+			c.SpliceHandler = aliceHandler
+			c.OnChannelFailure = func(_ lnwire.ChannelID,
+				_ lnwire.ShortChannelID, e LinkFailureError) {
+
+				select {
+				case failures <- e:
+				default:
+				}
+			}
+		},
+		func(c *ChannelLinkConfig) { c.SpliceHandler = bobHandler },
+	)
+	require.NoError(t, n.aliceServer.Start())
+	require.NoError(t, n.bobServer.Start())
+	require.Eventually(t, n.aliceChannelLink.quiescer.IsQuiescent,
+		5*time.Second, 20*time.Millisecond)
+
+	// Bob pays Alice at once.
+	amount := lnwire.NewMSatFromSatoshis(2_000_000)
+	htlcAmt, totalTimelock, hops := generateHops(
+		amount, testStartingHeight, n.aliceChannelLink,
+	)
+	paid := makePayment(
+		n.bobServer, n.aliceServer, n.aliceChannelLink.ShortChanID(),
+		hops, amount, htlcAmt, totalTimelock,
+	)
+	select {
+	case e := <-failures:
+		t.Fatalf("Alice's link failed: %v", e)
+	case <-time.After(time.Second):
+	}
+
+	// Bob's tx_signatures in, Alice's machine ends quiescence: the
+	// payment goes through.
+	require.NoError(t, <-n.aliceChannelLink.ResumeQuiescence())
+	_, err = paid.Wait(30 * time.Second)
+	require.NoError(t, err)
+}
+
+// TestLinkAddBelowSpliceReserve checks an add the peer can afford on the
+// current funding but not on a pending splice's, where it moved funds out:
+// refused with a warning and a disconnection, as a commitment would be,
+// rather than an error a peer fails the channel on.
+func TestLinkAddBelowSpliceReserve(t *testing.T) {
+	t.Parallel()
+
+	s := newSpliceLinkHarnessReserve(t, btcutil.SatoshiPerBitcoin, nil)
+	pendSplice(t, s.bob, s.link.channel, -3*btcutil.SatoshiPerBitcoin)
+
+	// Within Bob's balance on the current funding, 5 BTC, not above his
+	// 1 BTC reserve on the splice's, 2 BTC.
+	amt := lnwire.NewMSatFromSatoshis(btcutil.SatoshiPerBitcoin * 3 / 2)
+	var blob [lnwire.OnionPacketSize]byte
+	_, htlc, _, err := generatePayment(amt, amt, 5, blob)
+	require.NoError(t, err)
+	htlc.ChanID = s.link.ChanID()
+	s.link.HandleChannelUpdate(htlc)
+
+	select {
+	case e := <-s.failures:
+		require.Equal(t, LinkFailureDisconnect, e.FailureAction,
+			e.Error())
+		require.True(t, e.Warning)
+	case <-time.After(5 * time.Second):
+		t.Fatal("link didn't fail")
+	}
 }

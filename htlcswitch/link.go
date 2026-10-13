@@ -1187,6 +1187,16 @@ func (l *channelLink) syncChanStates(ctx context.Context) error {
 			// ends it, completing or dropping the splice.
 			if signing, who := l.cfg.SpliceHandler.Signing(); signing {
 				l.quiescer.AssumeQuiescent(who)
+
+				// The peer naming no splice is done
+				// signing, or never had it: its updates
+				// may come before its tx_signatures, sent
+				// again, or before the machine drops the
+				// splice. They wait for the end of
+				// quiescence, as after tx_signatures.
+				if remoteChanSyncMsg.NextFunding.IsNone() {
+					l.peerTxSigs = true
+				}
 			}
 			l.resendSpliceCommitSig(remoteChanSyncMsg)
 			remoteChanSyncMsg.MyCurrentFundingLocked.WhenSome(
@@ -4456,6 +4466,20 @@ func (l *channelLink) processRemoteUpdateAddHTLC(
 	// to our state machine, then add the HTLC to our "settle" list in the
 	// event that we know the preimage.
 	index, err := l.channel.ReceiveHTLC(msg)
+
+	// An add the peer can afford on the current funding but not on a
+	// pending splice's: refused with a warning and the connection
+	// dropped, the add discarded with it, as for a commitment; nothing
+	// invalid was accepted.
+	if errors.Is(err, lnwallet.ErrSpliceReserve) {
+		l.failf(LinkFailureError{
+			code:          ErrInvalidUpdate,
+			FailureAction: LinkFailureDisconnect,
+			Warning:       true,
+		}, "add below the reserve on a pending splice: %v", err)
+
+		return err
+	}
 	if err != nil {
 		l.failf(LinkFailureError{code: ErrInvalidUpdate},
 			"unable to handle upstream add HTLC: %v", err)
