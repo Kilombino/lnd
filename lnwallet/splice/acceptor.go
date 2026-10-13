@@ -312,6 +312,16 @@ func (m *Machine) startSigningTimeout() {
 				m.releaseWithheld(a)
 				return
 			}
+
+			// Signing last with our commitment out, the peer
+			// may have sent its tx_signatures: it keeps the
+			// splice then, and a tx_abort would leave us apart
+			// (the Core Lightning port fails the channel). The
+			// splice waits; a reconnection settles it.
+			if a.commitSent && !m.signsFirst() {
+				m.releaseWithheld(a)
+				return
+			}
 			m.abort(codeTimeout, "signatures took over %v",
 				timeout)
 			m.forget()
@@ -320,7 +330,7 @@ func (m *Machine) startSigningTimeout() {
 }
 
 // releaseWithheld gives back the node's place a peer's splice holds once
-// the peer withholds its tx_signatures after ours.
+// the peer withholds its tx_signatures, after ours or when it signs first.
 func (m *Machine) releaseWithheld(a *active) {
 	if a.role != interactivetx.Acceptor || a.oursReplaced ||
 		a.theirTxSigs != nil {

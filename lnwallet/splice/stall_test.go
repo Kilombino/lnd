@@ -1,7 +1,6 @@
 package splice
 
 import (
-	"strings"
 	"testing"
 	"time"
 
@@ -26,10 +25,12 @@ func dropCommitSigsFrom(p *splicePair, from *node) {
 	p.dropMu.Unlock()
 }
 
-// TestSpliceSigningTimeout checks that our splice, its transaction agreed
-// and the peer's signatures never coming, ends at the timeout: aborted, out
-// of the channel's funding set, its coins released, and the channel free to
-// splice again.
+// TestSpliceSigningTimeout checks our splice, its transaction agreed and
+// our commitment_signed out, the peer's never coming. Signing last, we can't
+// know the peer hasn't sent its tx_signatures, so the timeout drops nothing
+// (a tx_abort then leaves the two apart). A reconnection settles it: the
+// peer's channel_reestablish not naming it, the peer doesn't have it, and
+// it is dropped, out of the channel's funding set, its coins released.
 func TestSpliceSigningTimeout(t *testing.T) {
 	t.Parallel()
 
@@ -42,11 +43,24 @@ func TestSpliceSigningTimeout(t *testing.T) {
 		Direction: DirectionIn, Amount: 1_000_000, FeeRate: 2_500,
 	})
 	require.NoError(t, err)
-	u := requireUpdates(
-		t, updates, StatePreparing, StateNegotiating, StateAborted,
-	)
-	require.True(t, strings.HasPrefix(u.Reason, codeTimeout), u.Reason)
+	requireUpdates(t, updates, StatePreparing, StateNegotiating)
 
+	// Past the timeout: still there.
+	time.Sleep(500 * time.Millisecond)
+	signing := func() bool {
+		p.alice.machine.mu.Lock()
+		defer p.alice.machine.mu.Unlock()
+
+		a := p.alice.machine.active
+		return a != nil && a.phase == phaseSigning
+	}
+	require.True(t, signing())
+
+	// Reconnected, the peer naming no splice: dropped.
+	p.alice.machine.HandleReestablish(&lnwire.ChannelReestablish{
+		ChanID: p.alice.machine.cfg.ChanID,
+	})
+	requireUpdates(t, updates, StateAborted)
 	require.Eventually(t, func() bool {
 		p.alice.machine.mu.Lock()
 		defer p.alice.machine.mu.Unlock()
@@ -55,9 +69,6 @@ func TestSpliceSigningTimeout(t *testing.T) {
 	}, 2*time.Second, 10*time.Millisecond)
 	require.Zero(t, p.alice.wallet.leaseCount())
 	require.Empty(t, p.alice.ch.PendingFundings())
-	records, err := p.alice.ch.State().SpliceRecords()
-	require.NoError(t, err)
-	require.Empty(t, records)
 }
 
 // TestSpliceSigningTimeoutAcceptor checks the peer's splice stalled the same

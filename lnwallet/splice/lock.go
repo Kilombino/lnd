@@ -299,6 +299,25 @@ func (m *Machine) handleReestablish(msg *lnwire.ChannelReestablish) {
 
 		m.forget()
 	}
+
+	// A splice being signed, ours not out, that the peer's next_funding
+	// doesn't name: the peer doesn't have it, or it would be waiting for
+	// our signatures and name it. It can't have signed what it doesn't
+	// have, so the splice is dropped.
+	if a := m.active; a != nil && a.phase == phaseSigning &&
+		a.ourTxSigs == nil && len(a.replaced) == 0 {
+
+		named := fn.MapOptionZ(msg.NextFunding,
+			func(f lnwire.FundingTxidFlags) bool {
+				return f.Txid == a.txid
+			})
+		if !named {
+			log.Infof("ChannelID(%v): splice %v unknown to the "+
+				"peer on reconnecting, dropped", m.cfg.ChanID,
+				a.txid)
+			m.forget()
+		}
+	}
 	a := m.active
 
 	msg.NextFunding.WhenSome(func(next lnwire.FundingTxidFlags) {

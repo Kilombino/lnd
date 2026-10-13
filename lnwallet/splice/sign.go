@@ -73,9 +73,12 @@ func (m *Machine) maybeSendTxSignatures() {
 		return
 	}
 
-	// Signing last, the transaction is complete with ours: it must be
-	// one the backend accepts before ours leave, since after that the
-	// splice can't be dropped.
+	// Signing last, the transaction is complete with ours: tested
+	// against the backend's mempool, but not dropped if refused. The
+	// peer signed it already: it keeps it whatever we say, and the Core
+	// Lightning port fails the channel on a tx_abort once it signed, so
+	// it goes on as a splice that may not relay, to bump or to die as
+	// any stuck one.
 	if !m.signsFirst() && m.cfg.CheckMempool != nil {
 		a.ourTxSigs = sigs
 		tx, err := m.signedTx()
@@ -84,10 +87,9 @@ func (m *Machine) maybeSendTxSignatures() {
 			err = m.cfg.CheckMempool(tx)
 		}
 		if err != nil {
-			m.abort("relay_rejected", "%v", err)
-			m.forget()
-
-			return
+			log.Warnf("ChannelID(%v): splice %v not accepted by "+
+				"the mempool, signed all the same, the peer "+
+				"having signed: %v", m.cfg.ChanID, a.txid, err)
 		}
 	}
 

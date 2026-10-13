@@ -601,9 +601,12 @@ func TestSpliceInitiatorRefusesPeerContribution(t *testing.T) {
 	})
 }
 
-// TestSpliceInitiatorMempoolCheck checks that, signing last, Alice tests the
-// complete transaction against the backend before her tx_signatures leave,
-// and drops the splice if it would be refused.
+// TestSpliceInitiatorMempoolCheck checks a splice our backend's mempool
+// refuses when we sign last: the peer signed it already and keeps it, so it
+// isn't dropped (a tx_abort then would leave the two apart, and the Core
+// Lightning port fails the channel on it). It goes on, both keeping it, the
+// peer not marked; a splice that doesn't relay is bumped or dies as any
+// stuck one.
 func TestSpliceInitiatorMempoolCheck(t *testing.T) {
 	t.Parallel()
 
@@ -617,24 +620,17 @@ func TestSpliceInitiatorMempoolCheck(t *testing.T) {
 		Direction: DirectionIn, Amount: 1_000_000, FeeRate: 2_500,
 	})
 	require.NoError(t, err)
-	u := requireUpdates(t, updates,
-		StatePreparing, StateNegotiating, StateAborted,
+	requireUpdates(t, updates,
+		StatePreparing, StateNegotiating, StateSigned, StateBroadcast,
 	)
-	require.Contains(t, u.Reason, "relay_rejected")
-	require.Empty(t, p.alice.wallet.publishedTxs())
-	require.Zero(t, p.alice.wallet.leaseCount())
-	require.Empty(t, p.alice.ch.PendingFundings())
-
-	// Bob signed first and can't forget the splice until one of its
-	// inputs is spent: Alice could still complete and publish it. He
-	// keeps it and marks her.
+	require.Len(t, p.alice.ch.PendingFundings(), 1)
 	require.Eventually(t, func() bool {
-		done := make(chan bool)
-		p.bob.machine.enqueue(func() { done <- p.bob.machine.misbehaved })
-		return <-done
+		return len(p.bob.ch.PendingFundings()) == 1
 	}, 5*time.Second, 10*time.Millisecond)
-	require.Len(t, p.bob.ch.PendingFundings(), 1)
-	require.Empty(t, p.bob.wallet.publishedTxs())
+
+	done := make(chan bool)
+	p.bob.machine.enqueue(func() { done <- p.bob.machine.misbehaved })
+	require.False(t, <-done)
 }
 
 // TestSpliceOutRecheckedWhenQuiescent checks that a splice-out is checked
