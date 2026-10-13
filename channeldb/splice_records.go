@@ -124,6 +124,11 @@ type SpliceNegotiation struct {
 	// LockedSent and LockedReceived record splice_locked each way.
 	LockedSent, LockedReceived bool
 
+	// LockedScid is the splice's short channel id, recorded with
+	// LockedSent: a restart completes the lock without waiting for the
+	// chain to tell its depth again. Zero if not known.
+	LockedScid lnwire.ShortChannelID
+
 	// Inputs describe the transaction's inputs in its order, which
 	// signing and checking the peer's signatures need after a restart.
 	Inputs []SpliceInput
@@ -162,6 +167,7 @@ const (
 	negLockedType          tlv.Type = 7
 	negInputsType          tlv.Type = 8
 	negOurOutputsType      tlv.Type = 9
+	negLockedScidType      tlv.Type = 11
 )
 
 // encode serializes a negotiation as a TLV stream.
@@ -286,6 +292,11 @@ func (n *SpliceNegotiation) encode(w io.Writer) error {
 			negOurOutputsType, &outputs,
 		))
 	}
+	if scid := n.LockedScid.ToUint64(); scid != 0 {
+		records = append(records, tlv.MakePrimitiveRecord(
+			negLockedScidType, &scid,
+		))
+	}
 
 	stream, err := tlv.NewStream(records...)
 	if err != nil {
@@ -304,6 +315,7 @@ func decodeSpliceNegotiation(r io.Reader) (*SpliceNegotiation, error) {
 		ourSigs, theirSigs []byte
 		spliceInputs       []byte
 		ourOutputs         []byte
+		scid               uint64
 	)
 	stream, err := tlv.NewStream(
 		tlv.MakePrimitiveRecord(negWeInitiatedType, &flags),
@@ -318,6 +330,7 @@ func decodeSpliceNegotiation(r io.Reader) (*SpliceNegotiation, error) {
 		tlv.MakePrimitiveRecord(negLockedType, &locked),
 		tlv.MakePrimitiveRecord(negInputsType, &spliceInputs),
 		tlv.MakePrimitiveRecord(negOurOutputsType, &ourOutputs),
+		tlv.MakePrimitiveRecord(negLockedScidType, &scid),
 	)
 	if err != nil {
 		return nil, err
@@ -330,6 +343,7 @@ func decodeSpliceNegotiation(r io.Reader) (*SpliceNegotiation, error) {
 	n.OursReplaced = flags&2 != 0
 	n.LockedSent = locked&1 != 0
 	n.LockedReceived = locked&2 != 0
+	n.LockedScid = lnwire.NewShortChanIDFromInt(scid)
 
 	if tx != nil {
 		n.Tx = &wire.MsgTx{}

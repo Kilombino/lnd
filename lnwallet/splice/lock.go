@@ -117,6 +117,7 @@ func (m *Machine) reachedDepth(txid chainhash.Hash,
 	err := m.cfg.Channel.State().UpdateSpliceRecord(txid,
 		func(r *channeldb.SpliceRecord) error {
 			r.Negotiation.LockedSent = true
+			r.Negotiation.LockedScid = scid
 			return nil
 		})
 	if err != nil {
@@ -384,6 +385,12 @@ func (m *Machine) handleReestablish(msg *lnwire.ChannelReestablish) {
 			m.cfg.ResendAnnouncement()
 		}
 	})
+
+	// Both splice_locked recorded before a restart, the lock not done:
+	// done now, its short channel id recorded with ours.
+	if a := m.active; a != nil && a.phase == phasePending {
+		m.maybeComplete()
+	}
 }
 
 // restore rebuilds the splice in progress from the channel's records after a
@@ -543,6 +550,9 @@ func restoredActive(r *channeldb.SpliceRecord) (*active, error) {
 		lockedSent:        n.LockedSent,
 		lockedReceived:    n.LockedReceived,
 		broadcastHeight:   n.BroadcastHeight,
+	}
+	if n.LockedSent && n.LockedScid.ToUint64() != 0 {
+		a.scid = fn.Some(n.LockedScid)
 	}
 	for _, op := range n.OurInputs {
 		a.ourInputs = append(a.ourInputs, Coin{OutPoint: op})

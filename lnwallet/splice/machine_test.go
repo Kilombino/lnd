@@ -53,9 +53,12 @@ type testLink struct {
 	// commitAnswerLost, set, has SendSpliceCommitment send the
 	// commitment and never answer.
 	commitAnswerLost bool
-	stfuGate         chan struct{}
-	commits          chan *lnwire.CommitSig
-	resumed          chan struct{}
+
+	// lockFail, set, has LockSplice fail without locking.
+	lockFail atomic.Bool
+	stfuGate chan struct{}
+	commits  chan *lnwire.CommitSig
+	resumed  chan struct{}
 
 	// mu guards initiator, which a test may change.
 	mu sync.Mutex
@@ -124,6 +127,9 @@ func (l *testLink) RemoveSpliceFunding(txid chainhash.Hash) <-chan error {
 func (l *testLink) LockSplice(txid chainhash.Hash,
 	scid lnwire.ShortChannelID) <-chan error {
 
+	if l.lockFail.Load() {
+		return done(errors.New("unable to lock"))
+	}
 	err := l.ch.LockPendingFunding(txid, scid)
 	if err == nil && l.lockErr != nil {
 		err = l.lockErr

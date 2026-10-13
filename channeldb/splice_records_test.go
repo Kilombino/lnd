@@ -310,7 +310,10 @@ func TestSpliceNegotiationRoundTrip(t *testing.T) {
 		OurTxSignatures: ourSigs,
 		BroadcastHeight: 901_000,
 		LockedSent:      true,
-		OursReplaced:    true,
+		LockedScid: lnwire.ShortChannelID{
+			BlockHeight: 901_006, TxIndex: 2, TxPosition: 1,
+		},
+		OursReplaced: true,
 		OurOutputs: []*wire.TxOut{
 			{Value: 40_000, PkScript: []byte{0, 0x14, 7}},
 		},
@@ -346,6 +349,7 @@ func TestSpliceNegotiationRoundTrip(t *testing.T) {
 	require.Nil(t, got.TheirTxSignatures)
 	require.Equal(t, uint32(901_000), got.BroadcastHeight)
 	require.True(t, got.LockedSent)
+	require.Equal(t, r.Negotiation.LockedScid, got.LockedScid)
 	require.False(t, got.LockedReceived)
 	require.True(t, got.OursReplaced)
 	require.Equal(t, r.Negotiation.OurOutputs, got.OurOutputs)

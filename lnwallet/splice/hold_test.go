@@ -4,13 +4,14 @@ package splice
 
 import (
 	"errors"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	"github.com/lightningnetwork/lnd/channeldb"
 	"testing"
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/lightningnetwork/lnd/chainntnfs"
+	"github.com/lightningnetwork/lnd/channeldb"
+	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/stretchr/testify/require"
 )
 
@@ -115,4 +116,49 @@ func TestSpliceHoldKeptWhenLockAnswerLost(t *testing.T) {
 	holds, err := p.bob.ch.State().SpliceHolds()
 	require.NoError(t, err)
 	require.Len(t, holds, 1)
+}
+
+// TestSpliceLockAfterRestart checks a splice both sides sent splice_locked
+// for, the lock itself not done before a restart: the restarted machine
+// locks it once reestablished, from the short channel id recorded with
+// ours, without waiting for the chain to tell its depth again.
+func TestSpliceLockAfterRestart(t *testing.T) {
+	t.Parallel()
+
+	p := newSplicePair(t)
+	p.bob.link.lockFail.Store(true)
+	p.alice.fund(t, 1, 40_000_000)
+
+	updates, err := p.alice.machine.Splice(Request{
+		Direction: DirectionIn, Amount: 30_000_000, FeeRate: 2_500,
+	})
+	require.NoError(t, err)
+	u := requireUpdates(t, updates,
+		StatePreparing, StateNegotiating, StateSigned, StateBroadcast,
+	)
+	p.confirm(t, u.Txid)
+	requireUpdates(t, updates, StateLocked)
+
+	require.Eventually(t, func() bool {
+		recs, err := p.bob.ch.State().SpliceRecords()
+		if err != nil || len(recs) != 1 {
+			return false
+		}
+		n := recs[0].Negotiation
+
+		return n.LockedSent && n.LockedReceived
+	}, 5*time.Second, 10*time.Millisecond)
+	p.bob.machine.Stop()
+	require.NotEqual(t, u.Txid,
+		p.bob.ch.State().CurrentFundingOutpoint().Hash)
+
+	p.bob.link.lockFail.Store(false)
+	restarted := NewMachine(p.bob.machine.cfg)
+	startReestablished(t, restarted)
+	t.Cleanup(restarted.Stop)
+	require.Eventually(t, func() bool {
+		return p.bob.ch.State().CurrentFundingOutpoint().Hash == u.Txid
+	}, 5*time.Second, 10*time.Millisecond)
+	require.Equal(t, lnwire.ShortChannelID{BlockHeight: 900_006, TxIndex: 2},
+		p.bob.ch.State().CurrentShortChanID())
 }
