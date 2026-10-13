@@ -307,9 +307,11 @@ func (m *Machine) startSigningTimeout() {
 	if a.timeout != nil {
 		a.timeout.Stop()
 	}
+	// Never more than the timeout, a clock set back since the agreement
+	// notwithstanding.
 	left := timeout
 	if !a.agreedAt.IsZero() {
-		left = max(0, timeout-time.Since(a.agreedAt))
+		left = min(timeout, max(0, timeout-time.Since(a.agreedAt)))
 	}
 	a.timeout = time.AfterFunc(left, func() {
 		m.enqueue(func() {

@@ -454,6 +454,21 @@ func TestSpliceWithheldGivesBackPlace(t *testing.T) {
 	m.mu.Lock()
 	require.NotNil(t, m.active)
 	m.mu.Unlock()
+
+	// The agreement an hour ahead, as with a clock set back since: no
+	// more than the timeout all the same.
+	m.Stop()
+	require.NoError(t, h.bob.State().UpdateSpliceRecord(txid,
+		func(r *channeldb.SpliceRecord) error {
+			r.Negotiation.AgreedAt = time.Now().Add(time.Hour).Unix()
+			return nil
+		}))
+	again := NewMachine(cfg)
+	require.NoError(t, again.Start())
+	t.Cleanup(again.Stop)
+	require.Equal(t, 1, placed())
+	require.Eventually(t, func() bool { return placed() == 0 },
+		4*time.Second, 10*time.Millisecond)
 }
 
 // TestSpliceDisconnectedDuringReplacement checks the connection ending while
