@@ -164,10 +164,31 @@ func TestSpliceUnsignedAtRestart(t *testing.T) {
 			return nil
 		}))
 
+	// Nothing goes out before the peer's channel_reestablish: a
+	// tx_abort first fails its link.
+	fromAlice := make(chan lnwire.Message, 8)
+	p.dropMu.Lock()
+	p.drop = func(n *node, msg lnwire.Message) bool {
+		if n == p.alice {
+			fromAlice <- msg
+		}
+
+		return true
+	}
+	p.dropMu.Unlock()
+
 	m := NewMachine(cfg)
 	require.NoError(t, m.Start())
 	t.Cleanup(m.Stop)
+	select {
+	case msg := <-fromAlice:
+		t.Fatalf("%T sent before channel_reestablish", msg)
+	case <-time.After(200 * time.Millisecond):
+	}
 
+	m.HandleReestablish(&lnwire.ChannelReestablish{
+		ChanID: m.cfg.ChanID,
+	})
 	require.Eventually(t, func() bool {
 		m.mu.Lock()
 		defer m.mu.Unlock()

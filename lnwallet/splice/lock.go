@@ -290,8 +290,13 @@ func (m *Machine) HandleReestablish(msg *lnwire.ChannelReestablish) {
 // a next_funding we don't know, and treats my_current_funding_locked naming
 // the pending splice as its splice_locked.
 func (m *Machine) handleReestablish(msg *lnwire.ChannelReestablish) {
-	// A splice still negotiating can't survive the disconnection.
-	if m.active != nil && m.active.phase == phaseNegotiating {
+	// A splice still negotiating can't survive the disconnection, nor
+	// one restored without our commitment_signed. Dropped without a
+	// tx_abort of its own, which before the peer's channel_reestablish
+	// fails its link: a next_funding naming it gets one below.
+	if m.active != nil && (m.active.phase == phaseNegotiating ||
+		m.active.dropAtReestablish) {
+
 		m.forget()
 	}
 	a := m.active
@@ -436,16 +441,9 @@ func (m *Machine) restore() error {
 	// Our commitment_signed for it was never saved: we stopped between
 	// recording the splice and signing. Nothing of it is signed, and
 	// the channel can't take a commitment batch without ours, so it is
-	// dropped now.
+	// dropped once the peer has reestablished.
 	case !a.commitSent:
-		m.enqueue(func() {
-			if m.active != a {
-				return
-			}
-			m.abort(codeInternal, "splice not signed before a "+
-				"restart")
-			m.forget()
-		})
+		a.dropAtReestablish = true
 
 	// Neither side's signatures: the peer has until the timeout to go on
 	// with it after reconnecting.

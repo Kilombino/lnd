@@ -327,6 +327,10 @@ type active struct {
 	// ourInputs are the wallet coins we put in.
 	ourInputs []Coin
 
+	// dropAtReestablish marks a splice restored without our
+	// commitment_signed, dropped once the peer has reestablished.
+	dropAtReestablish bool
+
 	// commitSent and commitReceived record the splice's own
 	// commitment_signed each way.
 	commitSent, commitReceived bool
