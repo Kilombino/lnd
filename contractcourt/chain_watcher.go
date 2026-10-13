@@ -377,6 +377,11 @@ type chainWatcher struct {
 	// close observer uses it.
 	splicePublished chainhash.Hash
 
+	// pendingPublished names the unconfirmed splice transactions our
+	// commitment was published on after a force close. Only the close
+	// observer uses it.
+	pendingPublished map[chainhash.Hash]bool
+
 	// previousSpends carries a spend of a funding output a locked splice
 	// replaced, by anything but that splice, to the close observer.
 	previousSpends chan *chainntnfs.SpendDetail

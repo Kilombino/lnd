@@ -716,3 +716,73 @@ func TestChainWatcherPreviousFundingRemoteClose(t *testing.T) {
 		channeldb.ChanStatusFundingSpentUnknown,
 	))
 }
+
+// TestChainWatcherForceCloseUnconfirmedSplice checks a force close while a
+// splice is unconfirmed: our commitment on the splice's funding output, its
+// child, is published at the next block, valid under the chain's rules, so
+// the anchor sweep can raise the fee of both; and only once.
+func TestChainWatcherForceCloseUnconfirmedSplice(t *testing.T) {
+	t.Parallel()
+
+	h := newChainWatcherTestHarness(t, withRequiredConfs(1))
+	splice := pendSplice(t, h)
+
+	published := make(chan *wire.MsgTx, 2)
+	h.chainWatcher.cfg.publishTx = func(tx *wire.MsgTx, _ string) error {
+		published <- tx
+		return nil
+	}
+	state := h.aliceChannel.State()
+	fundingOutpoint := state.FundingOutpoint
+	oldCommit := state.LocalCommitment.CommitTx
+	db := state.Db
+
+	beat := func() {
+		t.Helper()
+
+		b := &chainio.MockBlockbeat{}
+		b.On("logger").Return(log)
+		b.On("Height").Return(int32(1)).Maybe()
+		require.NoError(t, h.chainWatcher.ProcessBlock(b))
+	}
+
+	beat()
+	select {
+	case <-published:
+		t.Fatal("published without a force close")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	arbCopy, err := db.FetchChannel(fundingOutpoint)
+	require.NoError(t, err)
+	require.NoError(t, arbCopy.MarkCommitmentBroadcasted(
+		oldCommit, lntypes.Local,
+	))
+
+	beat()
+	var tx *wire.MsgTx
+	select {
+	case tx = <-published:
+	case <-time.After(5 * time.Second):
+		t.Fatal("nothing published")
+	}
+	require.Equal(t, wire.OutPoint{Hash: splice.TxHash()},
+		tx.TxIn[0].PreviousOutPoint)
+	prevOut := splice.TxOut[0]
+	fetcher := txscript.NewCannedPrevOutputFetcher(
+		prevOut.PkScript, prevOut.Value,
+	)
+	vm, err := txscript.NewEngine(
+		prevOut.PkScript, tx, 0, txscript.StandardVerifyFlags, nil,
+		txscript.NewTxSigHashes(tx, fetcher), prevOut.Value, fetcher,
+	)
+	require.NoError(t, err)
+	require.NoError(t, vm.Execute())
+
+	beat()
+	select {
+	case <-published:
+		t.Fatal("published twice")
+	case <-time.After(200 * time.Millisecond):
+	}
+}
