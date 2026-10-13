@@ -1042,6 +1042,15 @@ func (lc *LightningChannel) restorePendingFundings() error {
 // reserve checks on each pending splice's funding, where both balances move
 // by the splice's contributions. ours and theirs are the balances before the
 // commitment fee; the initial balances are the commitment chain tip's.
+// ErrSpliceReserve is ErrBelowChanReserve on a pending splice's funding
+// only: a peer checking what it can afford against the current funding,
+// as the Core Lightning port does for a fee update, can send a commitment
+// that keeps the reserve there and not on the splice's, where its balance
+// is lower. Refused all the same; the link disconnects rather than force
+// closing, as nothing invalid was accepted.
+var ErrSpliceReserve = fmt.Errorf("%w on a pending splice",
+	ErrBelowChanReserve)
+
 func (lc *LightningChannel) checkPendingFundingBalances(ours,
 	theirs, ourInitial, theirInitial lnwire.MilliSatoshi,
 	commitWeight lntypes.WeightUnit, feePerKw chainfee.SatPerKWeight,
@@ -1083,11 +1092,11 @@ func (lc *LightningChannel) checkPendingFundingBalances(ours,
 		switch {
 		case ob < oi && ob < ourReserve:
 			return fmt.Errorf("%w: our balance below chan reserve "+
-				"on splice %v", ErrBelowChanReserve, p.txid())
+				"on splice %v", ErrSpliceReserve, p.txid())
 
 		case tb < ti && tb < theirReserve:
 			return fmt.Errorf("%w: their balance below chan "+
-				"reserve on splice %v", ErrBelowChanReserve,
+				"reserve on splice %v", ErrSpliceReserve,
 				p.txid())
 		}
 	}

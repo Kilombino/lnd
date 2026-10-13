@@ -17,6 +17,7 @@ import (
 	"github.com/lightningnetwork/lnd/fn/v2"
 	"github.com/lightningnetwork/lnd/input"
 	"github.com/lightningnetwork/lnd/keychain"
+	"github.com/lightningnetwork/lnd/lnwallet/chainfee"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/stretchr/testify/require"
 )
@@ -1378,4 +1379,39 @@ func TestSpliceObsoleteAfterRestart(t *testing.T) {
 	alice2, err = restartChannel(alice2)
 	require.NoError(t, err)
 	require.True(t, alice2.IsObsoleteFunding(txid))
+}
+
+// TestSpliceReserveOnCandidateOnly checks a commitment that keeps the
+// reserve on the current funding but not on a pending splice's, where the
+// opener's balance is lower: the opener raising its fee after moving most of
+// its balance out, having checked only the current funding, as the Core
+// Lightning port does. Refused with ErrSpliceReserve, which the link answers
+// with a disconnection rather than a force close.
+func TestSpliceReserveOnCandidateOnly(t *testing.T) {
+	t.Parallel()
+
+	alice, bob, err := CreateTestChannels(t, spliceChanTypes["anchors"])
+	require.NoError(t, err)
+
+	// Alice, the opener, moves out all but a little above the reserve
+	// Bob holds her to.
+	reserve := bob.channelState.RemoteChanCfg.ChanReserve
+	balance := alice.channelState.LocalCommitment.LocalBalance.ToSatoshis()
+	keys := newSpliceKeys(t, alice, bob)
+	txid := chainhash.Hash{0x77}
+	addSplice(t, alice, bob, keys, txid, -(balance - reserve - 20_000), 0)
+	exchangeSpliceCommitments(t, alice, bob, txid)
+
+	// Her own check, against the current funding only, as the port's.
+	alice.channelState.LocalChanCfg.ChanReserve = 0
+	alice.channelState.RemoteChanCfg.ChanReserve = 0
+	fee := alice.channelState.LocalCommitment.FeePerKw * 20
+	require.NoError(t, alice.UpdateFee(chainfee.SatPerKWeight(fee)))
+	require.NoError(t, bob.ReceiveUpdateFee(chainfee.SatPerKWeight(fee)))
+	commit, err := alice.SignNextCommitment(ctxb)
+	require.NoError(t, err)
+
+	err = bob.ReceiveNewCommitmentBatch(commit.CommitSigs, commit.SpliceSigs)
+	require.ErrorIs(t, err, ErrSpliceReserve)
+	require.ErrorIs(t, err, ErrBelowChanReserve)
 }

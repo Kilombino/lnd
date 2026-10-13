@@ -4666,6 +4666,20 @@ func (l *channelLink) processRemoteCommitSig(ctx context.Context,
 		PartialSig: msg.PartialSig,
 		AuxSigBlob: auxSigBlob,
 	}, spliceSigs)
+	// A commitment that keeps the reserve on the current funding but not
+	// on a pending splice's: a peer that checks what it can afford
+	// against the current funding sends it in good faith. Refused, and
+	// the connection dropped with a warning, the update discarded with
+	// it; nothing invalid was accepted, so no force close.
+	if errors.Is(err, lnwallet.ErrSpliceReserve) {
+		l.failf(LinkFailureError{
+			code:          ErrInvalidCommitment,
+			FailureAction: LinkFailureDisconnect,
+			Warning:       true,
+		}, "commitment below the reserve on a pending splice: %v", err)
+
+		return err
+	}
 	if err != nil {
 		// If we were unable to reconstruct their proposed commitment,
 		// then we'll examine the type of error. If it's an

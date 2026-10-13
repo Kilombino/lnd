@@ -845,6 +845,20 @@ func TestAcceptSpliceRefused(t *testing.T) {
 		requireResumed(t, h)
 	})
 
+	// Leaving less than the reserve the peer is held to: refused before
+	// anything is signed, though 1% of the new capacity would allow it.
+	t.Run("below the peer's reserve", func(t *testing.T) {
+		t.Parallel()
+
+		h := newAcceptorHarness(t)
+		state := h.bob.State()
+		balance := state.LocalCommitment.RemoteBalance.ToSatoshis()
+		reserve := state.RemoteChanCfg.ChanReserve
+		init(h, -(balance - reserve + 1), 2_500)
+		require.Contains(t, abortReason(t, h), "below the reserve")
+		requireResumed(t, h)
+	})
+
 	// Contributions no amount can be, before any arithmetic on them:
 	// the extremes would overflow the balance and capacity sums.
 	for _, c := range []btcutil.Amount{

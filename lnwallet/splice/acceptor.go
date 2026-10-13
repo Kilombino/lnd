@@ -138,6 +138,17 @@ func (m *Machine) checkSpliceInit(msg *lnwire.SpliceInit) (string, string) {
 			-contribution, theirBalance)
 	}
 
+	// What the peer keeps must stay at the reserve it is held to, which
+	// every commitment on the new funding is checked against: the
+	// construction's own rule (1% of the new capacity) can be less, and
+	// the channel would then refuse the peer's commitments there.
+	// Refused here, before anything is signed.
+	reserve := state.RemoteChanCfg.ChanReserve
+	if contribution < 0 && theirBalance+contribution < reserve {
+		return codeAboveBalance, fmt.Sprintf("leaves %v, below the "+
+			"reserve of %v", theirBalance+contribution, reserve)
+	}
+
 	capacity := state.Capacity + contribution
 	if contribution > 0 && m.cfg.Policy.MaxChannelSize > 0 &&
 		capacity > m.cfg.Policy.MaxChannelSize {
