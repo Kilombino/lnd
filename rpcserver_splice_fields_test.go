@@ -166,6 +166,48 @@ func TestSpliceBalances(t *testing.T) {
 	confs = 0
 	_, b = spliceBalances(out, confirmations, ours)
 	require.Zero(t, b)
+
+	// Dead: its coins are the wallet's again.
+	in.Negotiation.Dead = true
+	a, _ = spliceBalances(in, confirmations, ours)
+	require.Zero(t, a)
+}
+
+// TestShownSplice checks the splice transaction shown for a channel, and
+// whose coins are counted once: one that can still confirm before a dead
+// one, then the highest fee rate; never a retired one.
+func TestShownSplice(t *testing.T) {
+	t.Parallel()
+
+	rec := func(tag byte, rate uint64,
+		dead, retired bool) *channeldb.SpliceRecord {
+
+		return &channeldb.SpliceRecord{
+			OutPoint: wire.OutPoint{Hash: chainhash.Hash{tag}},
+			Retired:  retired,
+			Negotiation: &channeldb.SpliceNegotiation{
+				FeeRate: rate, Dead: dead,
+			},
+		}
+	}
+	require.Nil(t, shownSplice(nil))
+
+	low, high := rec(1, 2_500, false, false), rec(2, 5_000, false, false)
+	require.Equal(t, high, shownSplice([]*channeldb.SpliceRecord{low, high}))
+
+	deadHigh := rec(3, 9_000, true, false)
+	require.Equal(t, low, shownSplice(
+		[]*channeldb.SpliceRecord{deadHigh, low},
+	))
+	require.Equal(t, low, shownSplice(
+		[]*channeldb.SpliceRecord{low, deadHigh},
+	))
+	require.Equal(t, deadHigh, shownSplice(
+		[]*channeldb.SpliceRecord{deadHigh, rec(4, 1, false, true)},
+	))
+
+	ps := rpcPendingSplice(deadHigh)
+	require.True(t, ps.Dead)
 }
 
 // TestSpliceOverdue checks when a peer is late with the steps after a

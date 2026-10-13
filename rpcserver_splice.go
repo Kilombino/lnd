@@ -508,16 +508,13 @@ func (r *rpcServer) addSpliceFields(ch *channeldb.OpenChannel,
 		rpcsLog.Errorf("ChannelPoint(%v): unable to read splices: %v",
 			ch.FundingOutpoint, err)
 	}
-	// A splice the peer replaced has a record per transaction: the
-	// latest, at the highest fee rate, is the one shown. What we can
-	// count on is the least on any of them.
-	var latest *channeldb.SpliceRecord
+	// A splice the peer replaced has a record per transaction: one is
+	// shown (shownSplice). What we can count on is the least on any of
+	// them.
+	latest := shownSplice(records)
 	for _, rec := range records {
 		if rec.Retired {
 			continue
-		}
-		if latest == nil || spliceFeeRate(rec) >= spliceFeeRate(latest) {
-			latest = rec
 		}
 		if rec.LocalCommit != nil {
 			local := int64(rec.LocalCommit.LocalBalance.ToSatoshis())
@@ -691,7 +688,8 @@ func spliceBalances(rec *channeldb.SpliceRecord, confirmations func() uint32,
 	ourOutputs func(*wire.MsgTx, uint32) btcutil.Amount) (btcutil.Amount,
 	btcutil.Amount) {
 
-	if rec.Retired || !spliceWentOut(rec) {
+	// A dead one's coins are the wallet's again.
+	if rec.Retired || !spliceWentOut(rec) || rec.Negotiation.Dead {
 		return 0, 0
 	}
 
@@ -718,6 +716,31 @@ func setSpliceDepth(ps *lnrpc.PendingSplice, confs, lockDepth uint32) {
 	}
 }
 
+// shownSplice returns the record of the splice transaction shown for a
+// channel: of those not retired, one that can still confirm before a dead
+// one, then the highest fee rate, the latest.
+func shownSplice(records []*channeldb.SpliceRecord) *channeldb.SpliceRecord {
+	dead := func(r *channeldb.SpliceRecord) bool {
+		return r.Negotiation != nil && r.Negotiation.Dead
+	}
+	var shown *channeldb.SpliceRecord
+	for _, rec := range records {
+		switch {
+		case rec.Retired:
+		case shown == nil:
+			shown = rec
+		case dead(shown) != dead(rec):
+			if dead(shown) {
+				shown = rec
+			}
+		case spliceFeeRate(rec) >= spliceFeeRate(shown):
+			shown = rec
+		}
+	}
+
+	return shown
+}
+
 // rpcPendingSplice describes a pending splice from its record.
 func rpcPendingSplice(rec *channeldb.SpliceRecord) *lnrpc.PendingSplice {
 	ps := &lnrpc.PendingSplice{
@@ -742,6 +765,7 @@ func rpcPendingSplice(rec *channeldb.SpliceRecord) *lnrpc.PendingSplice {
 	ps.BroadcastHeight = n.BroadcastHeight
 	ps.WeLocked = n.LockedSent
 	ps.PeerLocked = n.LockedReceived
+	ps.Dead = n.Dead
 
 	switch {
 	case n.LockedSent:
@@ -791,11 +815,13 @@ func (r *rpcServer) addSpliceBalances(channels []*channeldb.OpenChannel,
 			continue
 		}
 
-		var least lnwire.MilliSatoshi
-		for _, rec := range records {
-			if rec.Retired {
-				continue
-			}
+		// The splice's coins once: every transaction of a replaced
+		// splice spends them. None for one the backend refused, its
+		// coins the wallet's again.
+		if rec := shownSplice(records); rec != nil &&
+			r.spliceRelay(ch, rec.Txid()).State !=
+				splice.RelayRejected {
+
 			recIn, recToWallet := spliceBalances(
 				rec, func() uint32 {
 					return r.spliceConfirmations(rec)
@@ -803,6 +829,13 @@ func (r *rpcServer) addSpliceBalances(channels []*channeldb.OpenChannel,
 			)
 			in += recIn
 			toWallet += recToWallet
+		}
+
+		var least lnwire.MilliSatoshi
+		for _, rec := range records {
+			if rec.Retired {
+				continue
+			}
 			if rec.LocalCommit != nil {
 				local := ch.LocalCommitment.LocalBalance
 				cand := rec.LocalCommit.LocalBalance
