@@ -142,6 +142,12 @@ type SpliceNegotiation struct {
 	// started (WeInitiated is then false: the peer built it).
 	OursReplaced bool
 
+	// Dead is set once one of the transaction's inputs was spent
+	// elsewhere, deep enough: it can never confirm. Its funding stays in
+	// the channel's set, signed for, as the peer's does, until another
+	// transaction of the splice locks or the channel closes.
+	Dead bool
+
 	// OurOutputs are the outputs this node added: change, or the
 	// destination of funds moved out.
 	OurOutputs []*wire.TxOut
@@ -187,6 +193,9 @@ func (n *SpliceNegotiation) encode(w io.Writer) error {
 	}
 	if n.OursReplaced {
 		flags |= 2
+	}
+	if n.Dead {
+		flags |= 4
 	}
 	records = append(records, tlv.MakePrimitiveRecord(
 		negWeInitiatedType, &flags,
@@ -354,6 +363,7 @@ func decodeSpliceNegotiation(r io.Reader) (*SpliceNegotiation, error) {
 
 	n.WeInitiated = flags&1 != 0
 	n.OursReplaced = flags&2 != 0
+	n.Dead = flags&4 != 0
 	n.LockedSent = locked&1 != 0
 	n.LockedReceived = locked&2 != 0
 	n.LockedScid = lnwire.NewShortChanIDFromInt(scid)

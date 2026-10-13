@@ -546,11 +546,23 @@ func TestAcceptSpliceReplacedEdges(t *testing.T) {
 		h.chain.confirm(t, elsewhere.TxHash(), deadDepth, 1,
 			&chainntnfs.TxConfirmation{})
 
+		// The original is the splice again; the replacement is
+		// recorded dead but stays in the funding set, signed for, as
+		// the peer's does, until the original's lock retires it.
 		require.Eventually(t, func() bool {
-			return len(h.bob.PendingFundings()) == 1
+			h.machine.mu.Lock()
+			defer h.machine.mu.Unlock()
+
+			a := h.machine.active
+			return a != nil && a.txid == first.res.Tx.TxHash()
 		}, 5*time.Second, 10*time.Millisecond)
-		require.Equal(t, first.res.Tx.TxHash(),
-			h.bob.PendingFundings()[0].OutPoint.Hash)
+		require.Len(t, h.bob.PendingFundings(), 2)
+		recs, err := h.bob.State().SpliceRecords()
+		require.NoError(t, err)
+		for _, r := range recs {
+			require.Equal(t, r.Txid() == second.res.Tx.TxHash(),
+				r.Negotiation.Dead)
+		}
 		lockOn(t, h, first)
 	})
 

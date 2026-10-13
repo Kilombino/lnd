@@ -438,7 +438,8 @@ func (m *Machine) ensurePending() {
 }
 
 // dropCandidate drops an earlier transaction of the splice that can no
-// longer confirm: one of its inputs was spent elsewhere.
+// longer confirm, one of its inputs spent elsewhere: no longer followed,
+// recorded dead, its funding left in the channel's set (see spliceDead).
 func (m *Machine) dropCandidate(c *active) {
 	a := m.active
 	kept := a.replaced[:0]
@@ -450,7 +451,7 @@ func (m *Machine) dropCandidate(c *active) {
 	m.mu.Lock()
 	a.replaced = kept
 	m.mu.Unlock()
-	m.removeFunding(c.txid)
+	m.markDead(c.txid)
 	log.Infof("ChannelID(%v): splice candidate %v can no longer confirm",
 		m.cfg.ChanID, c.txid)
 }
@@ -481,17 +482,17 @@ func spends(a *active, op wire.OutPoint) bool {
 
 // fallBackTo makes an earlier transaction of the splice the splice again:
 // the latest is dead, op having been spent elsewhere. Candidates spending
-// op go too.
+// op are dead too; each stays in the channel's funding set (see spliceDead).
 func (m *Machine) fallBackTo(prev *active, op wire.OutPoint) {
 	a := m.active
-	m.removeFunding(a.txid)
+	m.markDead(a.txid)
 
 	var kept []*active
 	for _, c := range a.replaced {
 		switch {
 		case c == prev:
 		case spends(c, op):
-			m.removeFunding(c.txid)
+			m.markDead(c.txid)
 		default:
 			kept = append(kept, c)
 		}

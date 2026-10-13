@@ -829,9 +829,12 @@ func TestSpliceRebroadcast(t *testing.T) {
 }
 
 // TestSpliceDead checks a splice one of whose inputs another transaction
-// spends: at 6 confirmations of that spend both sides drop it from the
-// channel and record it as dead, the starter hears why; at 144 it leaves the
-// starter's wallet and its coins are released.
+// spends: at 6 confirmations of that spend both sides record it as dead, the
+// starter hears why, and both keep its funding in the channel's set, signed
+// for, so neither side's commitment batch falls short of the other's (the
+// Core Lightning port fails the channel on that); after a restart it is
+// still dead and not followed; at 144 it leaves the starter's wallet and its
+// coins are released.
 func TestSpliceDead(t *testing.T) {
 	t.Parallel()
 
@@ -857,12 +860,28 @@ func TestSpliceDead(t *testing.T) {
 	require.Contains(t, u.Reason, "dead")
 	for _, n := range []*node{p.alice, p.bob} {
 		require.Eventually(t, func() bool {
-			return len(n.ch.PendingFundings()) == 0
+			last, err := n.ch.State().LastSplice()
+			return err == nil && last != nil &&
+				last.Outcome == "dead"
 		}, 5*time.Second, 10*time.Millisecond)
-		last, err := n.ch.State().LastSplice()
+		require.Len(t, n.ch.PendingFundings(), 1)
+		recs, err := n.ch.State().SpliceRecords()
 		require.NoError(t, err)
-		require.Equal(t, "dead", last.Outcome)
+		require.Len(t, recs, 1)
+		require.True(t, recs[0].Negotiation.Dead)
+		n.machine.mu.Lock()
+		require.Nil(t, n.machine.active)
+		n.machine.mu.Unlock()
+		require.Equal(t, "pending", n.machine.spliceable())
 	}
+
+	// After a restart: still dead, nothing followed.
+	restarted := NewMachine(p.bob.machine.cfg)
+	startReestablished(t, restarted)
+	t.Cleanup(restarted.Stop)
+	restarted.mu.Lock()
+	require.Nil(t, restarted.active)
+	restarted.mu.Unlock()
 
 	// Deep enough: out of the wallet.
 	p.chain.confirm(t, conflict.TxHash(), forgetDepth, 2,

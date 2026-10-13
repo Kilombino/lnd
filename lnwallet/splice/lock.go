@@ -411,8 +411,10 @@ func (m *Machine) restore() error {
 	// it, the latest paying the highest fee rate.
 	var attempts []*active
 	for _, r := range records {
+		// A dead one can't confirm: nothing to follow, though its
+		// funding stays in the channel's set.
 		n := r.Negotiation
-		if r.Retired || n == nil || n.Tx == nil {
+		if r.Retired || n == nil || n.Tx == nil || n.Dead {
 			continue
 		}
 		a, err := restoredActive(r)
@@ -797,8 +799,11 @@ func (m *Machine) waitDepth(txid chainhash.Hash, script []byte,
 }
 
 // spliceDead gives up on a splice one of whose inputs another transaction
-// spent: it leaves the channel's funding set, and its coins and wallet trace
-// wait for forgetDead.
+// spent: recorded dead, its coins and wallet trace waiting for forgetDead.
+// Its funding stays in the channel's set, signed for, until the channel
+// closes: the peer keeps it as well (the Core Lightning port drops a
+// splice's funding only when another locks), and a commitment batch short
+// of it fails the peer's channel.
 func (m *Machine) spliceDead(txid, conflict chainhash.Hash,
 	op wire.OutPoint) {
 
@@ -834,11 +839,7 @@ func (m *Machine) spliceDead(txid, conflict chainhash.Hash,
 		tx = a.res.Tx
 	}
 	m.dead[txid] = deadSplice{tx: tx, inputs: a.ourInputs}
-
-	if err := m.wait(m.cfg.Link.RemoveSpliceFunding(txid)); err != nil {
-		log.Errorf("ChannelID(%v): unable to drop dead splice %v: %v",
-			m.cfg.ChanID, txid, err)
-	}
+	m.markDead(txid)
 
 	reason := fmt.Sprintf("dead: an input was spent by %v", conflict)
 	log.Warnf("ChannelID(%v): splice %v is %v", m.cfg.ChanID, txid,
@@ -847,6 +848,23 @@ func (m *Machine) spliceDead(txid, conflict chainhash.Hash,
 	m.notify("dead", txid, reason, false)
 	m.report(Update{State: StateAborted, Txid: txid, Reason: reason})
 	m.setActive(nil)
+}
+
+// markDead records a transaction of the splice as dead. Its funding stays
+// in the channel's set: see spliceDead.
+func (m *Machine) markDead(txid chainhash.Hash) {
+	err := m.cfg.Channel.State().UpdateSpliceRecord(txid,
+		func(r *channeldb.SpliceRecord) error {
+			if r.Negotiation != nil {
+				r.Negotiation.Dead = true
+			}
+
+			return nil
+		})
+	if err != nil {
+		log.Errorf("ChannelID(%v): unable to record splice %v dead: %v",
+			m.cfg.ChanID, txid, err)
+	}
 }
 
 // forgetDead takes a dead splice out of the wallet, so the coins it spent
