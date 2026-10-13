@@ -481,3 +481,53 @@ type balanceOnly struct {
 func (b *balanceOnly) AvailableBalance() lnwire.MilliSatoshi {
 	return b.available
 }
+
+// TestReplaceOurLargeMoveOut checks that the peer's replacement of our
+// move-out of most of our balance is joined: the move-out already taken on
+// the splice being replaced isn't counted against it a second time.
+func TestReplaceOurLargeMoveOut(t *testing.T) {
+	t.Parallel()
+
+	p := newSplicePair(t)
+	amount := p.alice.ch.AvailableBalance().ToSatoshis() * 6 / 10
+	updates, err := p.alice.machine.Splice(Request{
+		Direction: DirectionOut, Amount: amount, FeeRate: 2_500,
+		Destination: p2tr(9),
+	})
+	require.NoError(t, err)
+	requireUpdates(t, updates, StatePreparing, StateNegotiating,
+		StateSigned, StateBroadcast)
+
+	fromAlice := make(chan lnwire.Message, 64)
+	p.dropMu.Lock()
+	p.drop = func(from *node, msg lnwire.Message) bool {
+		if from == p.alice {
+			fromAlice <- msg
+			return true
+		}
+
+		return false
+	}
+	p.dropMu.Unlock()
+	p.alice.link.mu.Lock()
+	p.alice.link.initiator = lntypes.Remote
+	p.alice.link.mu.Unlock()
+
+	p.alice.machine.HandleSpliceMessage(&lnwire.TxInitRbf{
+		ChannelID:                 p.alice.machine.cfg.ChanID,
+		LockTime:                  p.chain.height,
+		FeeRatePerKw:              3_000,
+		FundingOutputContribution: fn.Some(btcutil.Amount(-5_000)),
+	})
+	select {
+	case msg := <-fromAlice:
+		abort, refused := msg.(*lnwire.TxAbort)
+		if refused {
+			t.Fatalf("replacement refused: %s", abort.Data)
+		}
+		require.IsType(t, &lnwire.TxAckRbf{}, msg)
+
+	case <-time.After(5 * time.Second):
+		t.Fatal("no answer")
+	}
+}

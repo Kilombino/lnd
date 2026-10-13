@@ -205,7 +205,19 @@ func (m *Machine) ourPart(a *active, feeRate chainfee.SatPerKWeight) (
 			interactivetx.OutputWeight(out.PkScript),
 		))
 		ours := -(out.Value + fee)
+
+		// What we can send is the least on any funding, the splice
+		// being replaced among them, where this move-out is already
+		// taken: it moves the same funds, so that much is added back.
+		// The session's balance and reserve checks still apply.
 		available := m.cfg.Channel.AvailableBalance().ToSatoshis()
+		movedOut := -a.ourContribution
+		for _, c := range a.replaced {
+			if -c.ourContribution > movedOut {
+				movedOut = -c.ourContribution
+			}
+		}
+		available += movedOut
 		if -ours > available {
 			return 0, nil, nil, fmt.Errorf("moving %v out of %v "+
 				"available", -ours, available)
