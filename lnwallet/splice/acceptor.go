@@ -299,9 +299,17 @@ func (m *Machine) startSigningTimeout() {
 	}
 	a.timeout = time.AfterFunc(timeout, func() {
 		m.enqueue(func() {
-			if m.active != a || a.phase != phaseSigning ||
-				a.ourTxSigs != nil {
+			if m.active != a || a.phase != phaseSigning {
+				return
+			}
 
+			// Ours are out and the peer's haven't come: the
+			// splice is kept, as the peer could publish it,
+			// but it gives back its place for the peer's
+			// splices, which a peer withholding its signatures
+			// would otherwise hold for good.
+			if a.ourTxSigs != nil {
+				m.releaseWithheld(a)
 				return
 			}
 			m.abort(codeTimeout, "signatures took over %v",
@@ -309,6 +317,20 @@ func (m *Machine) startSigningTimeout() {
 			m.forget()
 		})
 	})
+}
+
+// releaseWithheld gives back the node's place a peer's splice holds once
+// the peer withholds its tx_signatures after ours.
+func (m *Machine) releaseWithheld(a *active) {
+	if a.role != interactivetx.Acceptor || a.oursReplaced ||
+		a.theirTxSigs != nil {
+
+		return
+	}
+	log.Warnf("ChannelID(%v): peer withholds its tx_signatures for "+
+		"splice %v; its place for the peer's splices given back",
+		m.cfg.ChanID, a.txid)
+	m.cfg.Limits.release(m, m.cfg.ChanID, false)
 }
 
 // startTimeout ends a negotiation that doesn't finish in time. A new

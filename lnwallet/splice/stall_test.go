@@ -5,10 +5,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/lntypes"
+	"github.com/lightningnetwork/lnd/lnwallet"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/stretchr/testify/require"
 )
@@ -274,4 +276,65 @@ func TestSpliceDisconnected(t *testing.T) {
 		require.Len(t, p.alice.ch.PendingFundings(), 1)
 		require.Equal(t, 1, p.alice.wallet.leaseCount())
 	})
+}
+
+// TestSpliceWithheldGivesBackPlace checks a peer's splice whose tx_signatures
+// the peer withholds after ours: kept, as the peer could publish it, but its
+// place for the peer's splices given back at the timeout; after a restart,
+// taken again for the peer to send them, and given back again at the
+// timeout.
+func TestSpliceWithheldGivesBackPlace(t *testing.T) {
+	t.Parallel()
+
+	h := newAcceptorHarness(t)
+	limits := NewLimits()
+	h.machine.cfg.Limits = limits
+	h.machine.cfg.Policy.NegotiationTimeout = 100 * time.Millisecond
+	s := startAliceSplice(t, h, 40_000_000, 2_500)
+	s.construct(t, h)
+	txid := s.res.Tx.TxHash()
+
+	bobCommit := <-h.link.commits
+	var bobKey *btcec.PublicKey
+	for _, f := range h.bob.PendingFundings() {
+		if f.OutPoint.Hash == txid {
+			bobKey = f.LocalKey.PubKey
+		}
+	}
+	require.NoError(t, h.alice.AddPendingFunding(
+		s.pendingFunding(h, bobKey),
+	))
+	require.NoError(t, h.alice.ReceiveSpliceCommitment(txid,
+		&lnwallet.CommitSigs{
+			CommitSig: bobCommit.CommitSig,
+			HtlcSigs:  bobCommit.HtlcSigs,
+		}))
+	aliceSigs, err := h.alice.SignSpliceCommitment(t.Context(), txid)
+	require.NoError(t, err)
+	h.machine.SpliceCommitReceived(txid,
+		h.bob.ReceiveSpliceCommitment(txid, aliceSigs))
+	next[*lnwire.TxSignatures](t, h)
+
+	placed := func() int {
+		limits.mu.Lock()
+		defer limits.mu.Unlock()
+
+		return len(limits.pending)
+	}
+	require.Eventually(t, func() bool { return placed() == 0 },
+		5*time.Second, 10*time.Millisecond)
+	require.Len(t, h.bob.PendingFundings(), 1)
+
+	cfg := h.machine.cfg
+	h.machine.Stop()
+	cfg.Policy.NegotiationTimeout = 300 * time.Millisecond
+	m := NewMachine(cfg)
+	require.NoError(t, m.Start())
+	t.Cleanup(m.Stop)
+	require.Equal(t, 1, placed())
+	require.Eventually(t, func() bool { return placed() == 0 },
+		5*time.Second, 10*time.Millisecond)
+	m.mu.Lock()
+	require.NotNil(t, m.active)
+	m.mu.Unlock()
 }

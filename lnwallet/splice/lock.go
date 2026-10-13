@@ -427,6 +427,12 @@ func (m *Machine) restore() error {
 		}
 		m.watchWithheld()
 
+		// The peer's may come once it reconnects; if not by the
+		// timeout, the place it holds is given back.
+		if a.phase == phaseSigning {
+			m.startSigningTimeout()
+		}
+
 	// Our commitment_signed for it was never saved: we stopped between
 	// recording the splice and signing. Nothing of it is signed, and
 	// the channel can't take a commitment batch without ours, so it is
