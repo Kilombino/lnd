@@ -4,6 +4,7 @@ package splice
 
 import (
 	"github.com/btcsuite/btcd/wire"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -738,4 +739,36 @@ func TestReplacementWithoutContribution(t *testing.T) {
 		return a != nil && len(a.replaced) == 1 &&
 			a.theirContribution == 0
 	}, 5*time.Second, 10*time.Millisecond)
+}
+
+// TestTxAbortWithoutSplice checks a tx_abort for a splice we don't have is
+// echoed, as BOLT 2 asks (the Core Lightning port waits for the echo), and
+// that two idle nodes of ours stop after one echo each way rather than
+// echoing each other for good.
+func TestTxAbortWithoutSplice(t *testing.T) {
+	t.Parallel()
+
+	h := newAcceptorHarness(t)
+	h.machine.HandleSpliceMessage(&lnwire.TxAbort{
+		ChannelID: h.machine.cfg.ChanID, Data: []byte("gone"),
+	})
+	echo := next[*lnwire.TxAbort](t, h)
+	require.Equal(t, h.machine.cfg.ChanID, echo.ChannelID)
+
+	p := newSplicePair(t)
+	var aborts atomic.Int32
+	p.dropMu.Lock()
+	p.drop = func(_ *node, msg lnwire.Message) bool {
+		if _, ok := msg.(*lnwire.TxAbort); ok {
+			aborts.Add(1)
+		}
+
+		return false
+	}
+	p.dropMu.Unlock()
+	p.alice.machine.HandleSpliceMessage(&lnwire.TxAbort{
+		ChannelID: p.alice.machine.cfg.ChanID,
+	})
+	time.Sleep(500 * time.Millisecond)
+	require.Equal(t, int32(2), aborts.Load())
 }

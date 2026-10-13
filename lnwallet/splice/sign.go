@@ -457,9 +457,16 @@ func (m *Machine) handleTxAbort(msg *lnwire.TxAbort) {
 	}
 
 	switch {
+	// One we no longer have, or never had: echoed all the same, the Core
+	// Lightning port waiting for the echo and taking nothing else until
+	// it comes. Our echo counts as sent, so the peer's echo of it, from
+	// a node in the same state, ends the exchange rather than echoing
+	// again.
 	case a == nil:
 		log.Debugf("ChannelID(%v): tx_abort without a splice: %v",
 			m.cfg.ChanID, reason)
+		m.abortSent = true
+		m.send(&lnwire.TxAbort{ChannelID: m.cfg.ChanID})
 
 	case a.phase == phasePending || a.ourTxSigs != nil:
 		log.Errorf("ChannelID(%v): peer aborted splice %v after our "+
