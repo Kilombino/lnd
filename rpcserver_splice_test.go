@@ -3,7 +3,11 @@ package lnd
 import (
 	"testing"
 
+	"github.com/btcsuite/btcd/btcutil"
+	"github.com/lightningnetwork/lnd/lnrpc"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"gopkg.in/macaroon-bakery.v2/bakery"
 )
 
@@ -32,4 +36,30 @@ func TestSplicePermissions(t *testing.T) {
 		perms["/lnrpc.Lightning/SpliceChannel"])
 	require.ElementsMatch(t, perms["/lnrpc.Lightning/CloseChannel"],
 		perms["/lnrpc.Lightning/SpliceChannel"])
+}
+
+// TestSpliceRequestRanges checks the request's amount and fee rate are
+// refused out of range before anything else is looked at: a mistyped rate
+// would pay the channel's balance in fees.
+func TestSpliceRequestRanges(t *testing.T) {
+	t.Parallel()
+
+	r := &rpcServer{}
+	for _, tc := range []struct {
+		amount int64
+		rate   uint64
+		want   string
+	}{
+		{amount: -1, want: "negative amount"},
+		{amount: btcutil.MaxSatoshi + 1, want: "most that can exist"},
+		{amount: 100_000, rate: maxSpliceSatPerVByte + 1,
+			want: "fee rate above"},
+	} {
+		_, _, err := r.spliceRequest(
+			nil, lnrpc.SpliceDirection_SPLICE_IN, tc.amount, false,
+			tc.rate, 0, "", false,
+		)
+		require.ErrorContains(t, err, tc.want)
+		require.Equal(t, codes.InvalidArgument, status.Code(err))
+	}
 }

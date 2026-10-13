@@ -124,6 +124,11 @@ func (r *rpcServer) spliceStatus(
 	return spliceStatusOK, m
 }
 
+// maxSpliceSatPerVByte is the highest fee rate a splice may ask for, as the
+// dashboard and the mobile API cap it: a mistyped rate would otherwise pay
+// the channel's balance in fees.
+const maxSpliceSatPerVByte = 10_000
+
 // spliceFeeRate returns the fee rate a request asks for: a rate, or a
 // confirmation target (6 when neither is given).
 func (r *rpcServer) spliceFeeRate(satPerVByte uint64,
@@ -223,6 +228,14 @@ func (r *rpcServer) spliceRequest(ch *channeldb.OpenChannel,
 	if amount < 0 {
 		return req, false, status.Error(codes.InvalidArgument,
 			"negative amount")
+	}
+	if amount > btcutil.MaxSatoshi {
+		return req, false, status.Error(codes.InvalidArgument,
+			"amount above the most that can exist")
+	}
+	if satPerVByte > maxSpliceSatPerVByte {
+		return req, false, status.Errorf(codes.InvalidArgument,
+			"fee rate above %d sat/vB", maxSpliceSatPerVByte)
 	}
 
 	var err error
