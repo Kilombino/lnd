@@ -1349,3 +1349,33 @@ func TestSpliceLockRetiresSibling(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, known.RemoteTail)
 }
+
+// TestSpliceObsoleteAfterRestart checks that a splice transaction dropped at
+// the lock, a replacement that lost, is still obsolete after a restart: the
+// peer's batch signed before it locked, or retransmitted, may name it, and
+// a member for a funding neither pending nor obsolete fails the batch.
+func TestSpliceObsoleteAfterRestart(t *testing.T) {
+	t.Parallel()
+
+	alice, bob, first := splicedPair(t, 100_000_000, 0)
+	keys := newSpliceKeys(t, alice, bob)
+	second := chainhash.Hash{0x5d}
+	addSplice(t, alice, bob, keys, second, 90_000_000, 0)
+	exchangeSpliceCommitments(t, alice, bob, second)
+
+	scid := lnwire.ShortChannelID{BlockHeight: 900_000, TxIndex: 1}
+	require.NoError(t, alice.LockPendingFunding(first, scid))
+	require.True(t, alice.IsObsoleteFunding(second))
+
+	alice, err := restartChannel(alice)
+	require.NoError(t, err)
+	require.True(t, alice.IsObsoleteFunding(second))
+
+	// A dropped one too.
+	alice2, bob2, txid := splicedPair(t, 0, -40_000_000)
+	_ = bob2
+	require.NoError(t, alice2.RemovePendingFunding(txid))
+	alice2, err = restartChannel(alice2)
+	require.NoError(t, err)
+	require.True(t, alice2.IsObsoleteFunding(txid))
+}

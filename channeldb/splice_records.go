@@ -829,12 +829,13 @@ func retireSpliceRecord(chanBucket kvdb.RwBucket,
 	if err != nil {
 		return false, err
 	}
-	unsigned := r.Negotiation != nil &&
-		r.Negotiation.OurTxSignatures == nil
-	if r.RemoteTail == nil || unsigned {
+	if r.RemoteTail == nil {
 		return false, deleteSpliceRecord(chanBucket, txid)
 	}
 
+	// Its commitments were exchanged: the peer may still name it in a
+	// batch, signed before it learnt, retransmitted after a restart, so
+	// it is remembered either way.
 	dropped, err := chanBucket.CreateBucketIfNotExists(spliceDroppedBucket)
 	if err != nil {
 		return false, err
@@ -851,12 +852,57 @@ func retireSpliceRecord(chanBucket kvdb.RwBucket,
 		return false, err
 	}
 
+	// Without our tx_signatures it can't confirm: nothing to log.
+	unsigned := r.Negotiation != nil &&
+		r.Negotiation.OurTxSignatures == nil
+	if unsigned {
+		return false, deleteSpliceRecord(chanBucket, txid)
+	}
+
 	r.Retired = true
 	r.LocalCommit, r.SpliceSig, r.RemoteTipSig = nil, nil, nil
 	r.LocalDelta, r.RemoteDelta = 0, 0
 	r.Negotiation = nil
 
 	return true, putSpliceRecord(chanBucket, r)
+}
+
+// DroppedSplices returns the txids of the splice transactions the channel
+// dropped once their commitments were exchanged.
+func (c *OpenChannel) DroppedSplices() ([]chainhash.Hash, error) {
+	c.RLock()
+	defer c.RUnlock()
+
+	var txids []chainhash.Hash
+	err := kvdb.View(c.Db.backend, func(tx kvdb.RTx) error {
+		chanBucket, err := fetchChanBucket(
+			tx, c.IdentityPub, &c.FundingOutpoint, c.ChainHash,
+		)
+		if err != nil {
+			return err
+		}
+		dropped := chanBucket.NestedReadBucket(spliceDroppedBucket)
+		if dropped == nil {
+			return nil
+		}
+
+		return dropped.ForEach(func(k, _ []byte) error {
+			var txid chainhash.Hash
+			copy(txid[:], k)
+			txids = append(txids, txid)
+
+			return nil
+		})
+	}, func() {
+		txids = nil
+	})
+	if errors.Is(err, ErrNoActiveChannels) ||
+		errors.Is(err, ErrChannelNotFound) {
+
+		return nil, nil
+	}
+
+	return txids, err
 }
 
 // DroppedSplice returns what the channel keeps of a splice transaction it

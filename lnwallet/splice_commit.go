@@ -1266,11 +1266,22 @@ func (lc *LightningChannel) loadObsoleteFundings() error {
 	if err != nil {
 		return err
 	}
+	if lc.obsoleteFundings == nil {
+		lc.obsoleteFundings = make(map[chainhash.Hash]bool)
+	}
 	for _, f := range prev {
-		if lc.obsoleteFundings == nil {
-			lc.obsoleteFundings = make(map[chainhash.Hash]bool)
-		}
 		lc.obsoleteFundings[f.OutPoint.Hash] = true
+	}
+
+	// The splice transactions dropped once their commitments were
+	// exchanged: a batch the peer signed before learning it, or
+	// retransmits after a restart, may still name one.
+	dropped, err := lc.channelState.DroppedSplices()
+	if err != nil {
+		return err
+	}
+	for _, txid := range dropped {
+		lc.obsoleteFundings[txid] = true
 	}
 
 	return nil
