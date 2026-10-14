@@ -19,6 +19,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightningnetwork/lnd/chainntnfs"
 	"github.com/lightningnetwork/lnd/channeldb"
+	"github.com/lightningnetwork/lnd/fn/v2"
 	"github.com/lightningnetwork/lnd/input"
 	"github.com/lightningnetwork/lnd/lntypes"
 	"github.com/lightningnetwork/lnd/lnwallet"
@@ -1084,26 +1085,55 @@ func (s *wrongDigestSigner) SignOutputRaw(tx *wire.MsgTx,
 	return s.MockSigner.SignOutputRaw(tx, desc)
 }
 
-// TestSpliceOwnSharedSignatureChecked checks that our shared input
-// signature is checked against the shared input's digest before our
-// tx_signatures leave: a signer that signs another digest stops the splice
-// while it can still be dropped.
+// TestSpliceOwnSharedSignatureChecked checks our own signature on the shared
+// input is checked before it leaves: a signer making a wrong one never gets
+// ours out. Bob's tx_signatures are in by then (Alice puts in more, so Bob
+// signs first): the splice is kept and the connection dropped, not aborted,
+// which Bob would take for Alice abandoning a splice he signed, and close the
+// channel for. With the signer working again, the next reestablish, Bob's
+// naming the splice, has Alice sign.
 func TestSpliceOwnSharedSignatureChecked(t *testing.T) {
 	t.Parallel()
 
 	p := newSplicePair(t)
 	p.alice.fund(t, 1, 5_000_000)
 	p.alice.machine.cfg.Signer = &wrongDigestSigner{p.alice.signer}
+	bobCloses := make(chan bool, 4)
+	p.bob.machine.enqueue(func() {
+		p.bob.machine.cfg.Close = func(force bool) { bobCloses <- force }
+	})
 
 	updates, err := p.alice.machine.Splice(Request{
 		Direction: DirectionIn, Amount: 1_000_000, FeeRate: 2_500,
 	})
 	require.NoError(t, err)
-	u := requireUpdates(t, updates, StatePreparing, StateNegotiating,
-		StateAborted)
-	require.Contains(t, u.Reason, codeInternal)
+	requireUpdates(t, updates, StatePreparing, StateNegotiating)
+	require.Eventually(t, func() bool {
+		p.alice.peer.mu.Lock()
+		defer p.alice.peer.mu.Unlock()
+
+		return p.alice.peer.disconnected != nil
+	}, 5*time.Second, 10*time.Millisecond)
+	select {
+	case <-bobCloses:
+		t.Fatal("Bob closed the channel")
+	case u := <-updates:
+		t.Fatalf("splice update %v: %v", u.State, u.Reason)
+	case <-time.After(300 * time.Millisecond):
+	}
+	held, _ := p.bob.machine.Disowned()
+	require.False(t, held)
 	require.Empty(t, p.alice.wallet.publishedTxs())
-	require.Zero(t, p.alice.wallet.leaseCount())
+
+	txid := p.bob.ch.PendingFundings()[0].OutPoint.Hash
+	p.alice.machine.enqueue(func() {
+		p.alice.machine.cfg.Signer = p.alice.signer
+	})
+	p.alice.machine.HandleReestablish(&lnwire.ChannelReestablish{
+		NextFunding: fn.Some(lnwire.FundingTxidFlags{Txid: txid}),
+	})
+	u := requireUpdates(t, updates, StateSigned, StateBroadcast)
+	require.Equal(t, txid, u.Txid)
 }
 
 // TestSpliceWithheldRestart checks a restart of the side that locked a

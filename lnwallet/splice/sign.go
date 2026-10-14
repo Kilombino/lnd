@@ -44,6 +44,28 @@ func (m *Machine) handleCommitReceived(txid [32]byte, err error) {
 	m.maybeSendTxSignatures()
 }
 
+// signingFailed handles a failure to sign or record our tx_signatures. Before
+// the peer's, the splice is aborted, which is safe: nobody can publish it.
+// After the peer's, a tx_abort would read as the peer's own abandoning the
+// splice after signing it, and the peer, a Lightning Fork node too, would
+// close the channel for it: the splice is kept, still being signed, and the
+// connection dropped, so the peer's channel_reestablish, naming the splice,
+// has us try again, at each reconnection, until we can (a remote signer
+// back, say).
+func (m *Machine) signingFailed(err error) {
+	if m.active.theirTxSigs == nil {
+		m.abort(codeInternal, "%v", err)
+		m.forget()
+
+		return
+	}
+
+	log.Errorf("ChannelID(%v): unable to sign splice %v, the peer's "+
+		"tx_signatures in; trying again on reconnecting: %v",
+		m.cfg.ChanID, m.active.txid, err)
+	m.cfg.Peer.Disconnect(fmt.Errorf("unable to sign splice: %w", err))
+}
+
 // signsFirst reports whether we send tx_signatures first.
 func (m *Machine) signsFirst() bool {
 	a := m.active
@@ -68,9 +90,7 @@ func (m *Machine) maybeSendTxSignatures() {
 
 	sigs, err := m.ourTxSignatures()
 	if err != nil {
-		m.abort(codeInternal, "%v", err)
-		m.forget()
-
+		m.signingFailed(err)
 		return
 	}
 
@@ -105,9 +125,7 @@ func (m *Machine) maybeSendTxSignatures() {
 			return nil
 		})
 	if err != nil {
-		m.abort(codeInternal, "%v", err)
-		m.forget()
-
+		m.signingFailed(err)
 		return
 	}
 	m.update(func(a *active) { a.ourTxSigs = sigs })
