@@ -1242,13 +1242,15 @@ func TestAcceptSpliceAborts(t *testing.T) {
 		})
 
 	// After ours, the peer's not in: as the Core Lightning port does in
-	// its normal course. Echoed, quiescence ended, the splice kept, the
-	// peer not marked: it waits for the echo and takes nothing else.
+	// its normal course, waiting for the echo and taking nothing else.
+	// Its user's abort: it drops the splice, and so do we, out of the
+	// funding set (our batches would never match its again), the
+	// transaction still watched as a dropped one. The peer isn't marked.
 	t.Run("after our signatures", func(t *testing.T) {
 		t.Parallel()
 
 		h := newAcceptorHarness(t)
-		splicePastSigning(t, h)
+		s := splicePastSigning(t, h)
 
 		h.machine.HandleSpliceMessage(&lnwire.TxAbort{
 			ChannelID: h.machine.cfg.ChanID, Data: []byte("user"),
@@ -1259,8 +1261,38 @@ func TestAcceptSpliceAborts(t *testing.T) {
 		done := make(chan bool)
 		h.machine.enqueue(func() { done <- h.machine.misbehaved })
 		require.False(t, <-done)
-		require.Len(t, h.bob.PendingFundings(), 1)
+		require.Empty(t, h.bob.PendingFundings())
+		_, err := h.bob.State().DroppedSplice(s.res.Tx.TxHash())
+		require.NoError(t, err)
+		signing, _ := h.machine.Signing()
+		require.False(t, signing)
 	})
+
+	// Answering the next_funding of our reestablish, the port keeping the
+	// splice (its user's signatures still missing): kept too.
+	t.Run("after our signatures, answering our reestablish",
+		func(t *testing.T) {
+			t.Parallel()
+
+			h := newAcceptorHarness(t)
+			splicePastSigning(t, h)
+			h.machine.Stop()
+			h.machine = NewMachine(h.machine.cfg)
+			require.NoError(t, h.machine.Start())
+			t.Cleanup(h.machine.Stop)
+			named, _ := h.machine.ReestablishTLVs()
+			require.True(t, named.IsSome())
+			h.machine.HandleReestablish(&lnwire.ChannelReestablish{})
+
+			h.machine.HandleSpliceMessage(&lnwire.TxAbort{
+				ChannelID: h.machine.cfg.ChanID,
+				Data:      []byte("next_funding_txid not recognized"),
+			})
+			echo := next[*lnwire.TxAbort](t, h)
+			require.Empty(t, echo.Data)
+			requireResumed(t, h)
+			require.Len(t, h.bob.PendingFundings(), 1)
+		})
 
 	// After both: an abort the peer may not send. Marked, and the
 	// connection dropped with a warning.

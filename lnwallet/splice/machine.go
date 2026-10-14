@@ -427,6 +427,10 @@ type Machine struct {
 	reestablished bool
 	lockedTold    chainhash.Hash
 
+	// namedNext is the splice transaction our channel_reestablish named
+	// in next_funding on this connection. Under mu.
+	namedNext chainhash.Hash
+
 	// sigsResent is the splice transaction whose tx_signatures the link
 	// sent again on reconnecting, before anything else: not sent twice.
 	// Under mu.

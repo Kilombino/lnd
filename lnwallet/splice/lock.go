@@ -289,6 +289,7 @@ func (m *Machine) ReestablishTLVs() (fn.Option[lnwire.FundingTxidFlags],
 		next = fn.Some(lnwire.FundingTxidFlags{
 			Txid: a.txid, RetransmitFlags: flags,
 		})
+		m.namedNext = a.txid
 
 	case a.phase == phasePending && a.lockedSent:
 		locked = fn.Some(lnwire.FundingTxidFlags{Txid: a.txid})

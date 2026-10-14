@@ -478,11 +478,15 @@ func (m *Machine) handleTxAbort(msg *lnwire.TxAbort) {
 		m.resume()
 
 	// After our tx_signatures, the peer's not in: the Core Lightning port
-	// aborts there in its normal course (its user's signatures missing,
-	// or a next_funding it can't take yet), waiting for the echo and
-	// taking nothing else until it comes. Echoed, quiescence ended, the
-	// splice kept and watched, as it holds ours and could still publish
-	// it; nothing held against the peer.
+	// aborts there in its normal course, waiting for the echo and taking
+	// nothing else until it comes. Echoed, and nothing held against the
+	// peer. Answering the next_funding of our reestablish on this
+	// connection (its user's signatures still missing), the port keeps
+	// the splice, and so do we: our batches must still name it. Its
+	// user's abort, it drops the splice, and so do we, its funding out of
+	// our set, or our batches never matched again and a close stayed
+	// refused: the transaction, signed by us, is still watched as a
+	// dropped one, and followed if the peer publishes it after all.
 	case (a.phase == phasePending || a.ourTxSigs != nil) &&
 		a.theirTxSigs == nil:
 
@@ -490,7 +494,19 @@ func (m *Machine) handleTxAbort(msg *lnwire.TxAbort) {
 			"tx_signatures, before its own: %v", m.cfg.ChanID,
 			a.txid, reason)
 		m.send(&lnwire.TxAbort{ChannelID: m.cfg.ChanID})
-		m.resume()
+
+		m.mu.Lock()
+		named := m.namedNext == a.txid
+		m.mu.Unlock()
+		if named {
+			m.resume()
+			return
+		}
+		m.update(func(a *active) {
+			a.abortReason = reason
+			a.reasonFromPeer = true
+		})
+		m.forget()
 
 	// Its tx_signatures in too: an abort it may not send. Marked, and the
 	// connection dropped with a warning, which also ends the port's wait
