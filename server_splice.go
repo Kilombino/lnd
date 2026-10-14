@@ -82,6 +82,21 @@ type utxoDetailer interface {
 	GetUtxoDetails(op *wire.OutPoint) (*wire.TxOut, uint32, bool, error)
 }
 
+// baseWallet returns the wallet a remote signer's wraps (rpcwallet's
+// RPCKeyRing), whose chain methods the splice checks use; any other as it
+// is. Without it, a node with a remote signer refused every peer coin and
+// read every splice as unconfirmed.
+func baseWallet(w lnwallet.WalletController) lnwallet.WalletController {
+	type wrapper interface {
+		UnwrapWalletController() lnwallet.WalletController
+	}
+	if u, ok := w.(wrapper); ok {
+		return u.UnwrapWalletController()
+	}
+
+	return w
+}
+
 // confirmedOutputTimeout bounds the backend's answer about a peer's coin:
 // the channel is quiescent while the peer's splice is negotiated, and a
 // stalled backend would hold it so.
@@ -92,7 +107,7 @@ var confirmedOutputTimeout = 10 * time.Second
 func (c *spliceChain) ConfirmedOutput(op wire.OutPoint) (*wire.TxOut, uint32,
 	bool, error) {
 
-	d, ok := c.wallet.(utxoDetailer)
+	d, ok := baseWallet(c.wallet).(utxoDetailer)
 	if !ok {
 		return nil, 0, false, errors.New("backend can't check " +
 			"unspent outputs")
@@ -138,7 +153,7 @@ func (c *spliceChain) Synced() bool {
 	// tip, and that tip isn't so old that the backend is the one behind.
 	// Its own IsSynced also wants a tip under two hours old, which a slow
 	// day on this chain fails.
-	if w, ok := c.wallet.(syncedWallet); ok {
+	if w, ok := baseWallet(c.wallet).(syncedWallet); ok {
 		base := w.InternalWallet()
 		synced := base.SyncedTo()
 
