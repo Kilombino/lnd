@@ -1336,6 +1336,8 @@ func TestLinkReestablishPeerDoneSigning(t *testing.T) {
 	require.NoError(t, n.bobServer.Start())
 	require.Eventually(t, n.aliceChannelLink.quiescer.IsQuiescent,
 		5*time.Second, 20*time.Millisecond)
+	require.Eventually(t, n.bobChannelLink.EligibleToForward,
+		5*time.Second, 20*time.Millisecond)
 
 	// Bob pays Alice at once.
 	amount := lnwire.NewMSatFromSatoshis(2_000_000)
