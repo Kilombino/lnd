@@ -169,6 +169,25 @@ func newSplicePair(t *testing.T) *splicePair {
 					continue
 				}
 				txid := sig.FundingTxid.UnsafeFromSome()
+
+				// As the link holds it (commitSigWait): a
+				// splice's commitment_signed reaching us
+				// before its funding is added waits for it,
+				// and what follows from the peer with it.
+				added := func() bool {
+					for _, f := range to.ch.PendingFundings() {
+						if f.OutPoint.Hash == txid {
+							return true
+						}
+					}
+
+					return false
+				}
+				for i := 0; i < 500 && !added() &&
+					to.machine.Constructing(); i++ {
+
+					time.Sleep(10 * time.Millisecond)
+				}
 				err := to.ch.ReceiveSpliceCommitment(
 					txid, &lnwallet.CommitSigs{
 						CommitSig: sig.CommitSig,
