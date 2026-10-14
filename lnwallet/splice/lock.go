@@ -100,9 +100,9 @@ func (m *Machine) heightHint(h uint32) uint32 {
 // it to its lock if it does. The search starts at the current funding's
 // confirmation: the splice spends that output.
 func (m *Machine) watchWithheld() {
-	m.watchConfirmation(
-		m.cfg.Channel.State().CurrentShortChanID().BlockHeight,
-	)
+	height := m.cfg.Channel.State().CurrentShortChanID().BlockHeight
+	m.watchConfirmation(height)
+	m.watchInputsOf(m.active, height)
 }
 
 // reachedDepth sends splice_locked once the splice is deep enough.
@@ -766,9 +766,28 @@ func (m *Machine) watchPendingOf(a *active, heightHint uint32) {
 	m.wg.Add(1)
 	go m.rebroadcastUntilConfirmed(txid, a.fundingScript, heightHint)
 
+	m.watchInputsOf(a, heightHint)
+}
+
+// watchInputsOf watches a transaction of the splice's inputs for a spend
+// by another, once: also one whose tx_signatures the peer withheld, which it
+// can still publish and which its inputs can kill. The search starts no
+// later than the negotiation (the transaction's locktime): a conflicting
+// spend confirmed while it was signed isn't found from the broadcast on by
+// a backend without a full index.
+func (m *Machine) watchInputsOf(a *active, heightHint uint32) {
+	if a == nil || a.inputsWatched || a.res == nil {
+		return
+	}
+	a.inputsWatched = true
+	if lt := a.res.Tx.LockTime; lt > 0 && lt < heightHint {
+		heightHint = lt
+	}
+	heightHint = m.heightHint(heightHint)
+
 	for _, in := range a.res.Inputs {
 		m.wg.Add(1)
-		go m.watchInput(txid, in.OutPoint, in.PkScript, heightHint)
+		go m.watchInput(a.txid, in.OutPoint, in.PkScript, heightHint)
 	}
 }
 
@@ -865,8 +884,19 @@ func (m *Machine) watchInput(txid chainhash.Hash, op wire.OutPoint,
 		// The splice itself. Declared dead before, a reorganisation
 		// took the conflicting spend out and put it in: followed
 		// again.
+		// Watched until reorg-safe: taken out again and a conflicting
+		// spend confirmed instead, the splice is dead after all.
 		if *spend.SpenderTxHash == txid {
 			m.enqueue(func() { m.revive(txid) })
+
+			_, reorged := m.waitDepth(
+				txid, spend.SpendingTx.TxOut[0].PkScript,
+				forgetDepth, uint32(spend.SpendingHeight),
+			)
+			if reorged {
+				continue
+			}
+
 			return
 		}
 

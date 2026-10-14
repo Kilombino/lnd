@@ -898,9 +898,15 @@ func TestSpliceDead(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, recs, 1)
 		require.True(t, recs[0].Negotiation.Dead)
-		n.machine.mu.Lock()
-		require.Nil(t, n.machine.active)
-		n.machine.mu.Unlock()
+		// Cleared just after the outcome is recorded; never asserted
+		// holding the machine's lock, which a failing assertion's
+		// cleanup would wait on for good.
+		require.Eventually(t, func() bool {
+			n.machine.mu.Lock()
+			defer n.machine.mu.Unlock()
+
+			return n.machine.active == nil
+		}, 5*time.Second, 10*time.Millisecond)
 		require.Equal(t, "pending", n.machine.spliceable())
 	}
 
@@ -1267,4 +1273,39 @@ func TestSpliceDeadRevived(t *testing.T) {
 	}
 	p.confirm(t, u.Txid)
 	p.requireMoved(t, u.Txid, capacity+1_000_000)
+}
+
+// TestSpliceReorgedOutThenDead checks a splice seen spending its input, then
+// reorganised out with a conflicting spend of that input confirming instead:
+// recorded dead, as if the conflict had come first. The input's watch ended
+// at the splice's own spend, and nothing noticed.
+func TestSpliceReorgedOutThenDead(t *testing.T) {
+	t.Parallel()
+
+	p := newSplicePair(t)
+	c := p.alice.fund(t, 1, 5_000_000)
+	updates, err := p.alice.machine.Splice(Request{
+		Direction: DirectionIn, Amount: 1_000_000, FeeRate: 2_500,
+	})
+	require.NoError(t, err)
+	u := requireUpdates(t, updates, StatePreparing, StateNegotiating,
+		StateSigned, StateBroadcast)
+	spliceTx, err := p.alice.wallet.FetchTx(u.Txid)
+	require.NoError(t, err)
+
+	p.chain.spend(t, c.OutPoint, spliceTx, 2)
+	require.Eventually(t, func() bool {
+		return p.chain.registered(u.Txid, forgetDepth, 2)
+	}, 5*time.Second, 10*time.Millisecond)
+	p.chain.reorg(t, u.Txid, forgetDepth)
+
+	conflict := wire.NewMsgTx(2)
+	conflict.AddTxIn(&wire.TxIn{PreviousOutPoint: c.OutPoint})
+	conflict.AddTxOut(&wire.TxOut{Value: 4_000_000, PkScript: p2tr(3)})
+	p.chain.spend(t, c.OutPoint, conflict, 2)
+	p.chain.confirm(t, conflict.TxHash(), deadDepth, 2,
+		&chainntnfs.TxConfirmation{})
+
+	u = requireUpdates(t, updates, StateAborted)
+	require.Contains(t, u.Reason, "dead")
 }

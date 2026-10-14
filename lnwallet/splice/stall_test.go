@@ -734,3 +734,25 @@ func TestSpliceStfuUnanswered(t *testing.T) {
 		require.Zero(t, alice.wallet.leaseCount())
 	}
 }
+
+// TestWithheldInputsWatched checks a splice whose tx_signatures the peer
+// withheld, ours out, restored after a restart: its inputs are watched, so a
+// conflicting spend makes it dead. It was watched for its confirmation only.
+func TestWithheldInputsWatched(t *testing.T) {
+	t.Parallel()
+
+	h := newAcceptorHarness(t)
+	s := splicePastSigning(t, h)
+
+	h.machine.Stop()
+	h.machine = NewMachine(h.machine.cfg)
+	require.NoError(t, h.machine.Start())
+	t.Cleanup(h.machine.Stop)
+
+	require.Eventually(t, func() bool {
+		h.chain.mu.Lock()
+		defer h.chain.mu.Unlock()
+
+		return len(h.chain.spends[s.coin.OutPoint]) > 0
+	}, 5*time.Second, 10*time.Millisecond)
+}

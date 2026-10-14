@@ -331,6 +331,10 @@ type active struct {
 	// ourInputs are the wallet coins we put in.
 	ourInputs []Coin
 
+	// inputsWatched is set once the transaction's inputs are watched for
+	// a spend by another.
+	inputsWatched bool
+
 	// dropAtReestablish marks a splice restored without our
 	// commitment_signed, dropped once the peer has reestablished.
 	dropAtReestablish bool
