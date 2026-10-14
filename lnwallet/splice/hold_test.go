@@ -192,6 +192,12 @@ func TestLockComing(t *testing.T) {
 	sync(func(a *active) { a.lockedReceived = true })
 	require.True(t, h.machine.LockComing(chainhash.Hash{}))
 
+	// On the splice's funding: the lock is in, the machine's own steps
+	// after it aside.
+	scid := lnwire.ShortChannelID{BlockHeight: 900_006, TxIndex: 1}
+	require.NoError(t, h.bob.LockPendingFunding(txid, scid))
+	require.False(t, h.machine.LockComing(chainhash.Hash{}))
+
 	sync(func(a *active) { a.lockDone = true })
 	require.False(t, h.machine.LockComing(txid))
 }

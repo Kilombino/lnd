@@ -1538,6 +1538,17 @@ func TestLinkUpdateAfterPeerLockBeforeOurs(t *testing.T) {
 
 	require.NoError(t, <-s.link.LockSplice(txid, scid))
 	s.requireNoFailure(t)
+
+	// Taken up once our lock is in, the machine's say aside: Bob's
+	// commitment gets our revocation.
+	commit, err := s.bob.SignNextCommitment(t.Context())
+	require.NoError(t, err)
+	s.link.HandleChannelUpdate(&lnwire.CommitSig{
+		ChanID: s.link.ChanID(), CommitSig: commit.CommitSig,
+		HtlcSigs: commit.HtlcSigs,
+	})
+	nextSent[*lnwire.RevokeAndAck](t, s)
+	s.requireNoFailure(t)
 }
 
 // TestLinkTxSignaturesPastHeldUpdates checks a reconnection on which we are

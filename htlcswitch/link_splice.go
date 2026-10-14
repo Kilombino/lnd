@@ -571,5 +571,12 @@ func (l *channelLink) awaitingLock() bool {
 		return true
 	}
 
+	// Locked already, nothing pending: the machine's own bookkeeping
+	// after the lock may still be under way, and the held messages are
+	// replayed now, not at the held timeout.
+	if len(l.channel.PendingFundings()) == 0 {
+		return false
+	}
+
 	return l.cfg.SpliceHandler.LockComing(chainhash.Hash{})
 }

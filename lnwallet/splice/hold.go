@@ -48,6 +48,11 @@ func (m *Machine) LockComing(txid chainhash.Hash) bool {
 		return false
 	}
 
+	// On its funding already: the lock reached the link.
+	if m.cfg.Channel.State().CurrentFundingOutpoint().Hash == a.txid {
+		return false
+	}
+
 	return a.lockedReceived || a.txid == txid
 }
 
