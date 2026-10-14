@@ -162,3 +162,36 @@ func TestSpliceLockAfterRestart(t *testing.T) {
 	require.Equal(t, lnwire.ShortChannelID{BlockHeight: 900_006, TxIndex: 2},
 		p.bob.ch.State().CurrentShortChanID())
 }
+
+// TestLockComing checks when the splice's lock is on its way to the link,
+// which then holds the peer's updates for it: ours sent and the peer's in,
+// or ours sent and the peer's just received for this transaction.
+func TestLockComing(t *testing.T) {
+	t.Parallel()
+
+	h := newAcceptorHarness(t)
+	s := startAliceSplice(t, h, 40_000_000, 2_500)
+	s.construct(t, h)
+	signSplice(t, h, s, nil)
+	txid := s.res.Tx.TxHash()
+
+	sync := func(f func(a *active)) {
+		done := make(chan struct{})
+		h.machine.enqueue(func() {
+			h.machine.update(f)
+			close(done)
+		})
+		<-done
+	}
+	require.False(t, h.machine.LockComing(txid))
+
+	sync(func(a *active) { a.lockedSent = true })
+	require.True(t, h.machine.LockComing(txid))
+	require.False(t, h.machine.LockComing(chainhash.Hash{}))
+
+	sync(func(a *active) { a.lockedReceived = true })
+	require.True(t, h.machine.LockComing(chainhash.Hash{}))
+
+	sync(func(a *active) { a.lockDone = true })
+	require.False(t, h.machine.LockComing(txid))
+}

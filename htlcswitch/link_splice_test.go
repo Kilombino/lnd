@@ -31,6 +31,14 @@ type recordingSpliceHandler struct {
 	constructing  bool
 	signing       bool
 	txSigs        *lnwire.TxSignatures
+	lockComing    bool
+}
+
+func (h *recordingSpliceHandler) LockComing(chainhash.Hash) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	return h.lockComing
 }
 
 func (h *recordingSpliceHandler) TxSignaturesFor(
@@ -1489,4 +1497,43 @@ func TestLinkReestablishTxSignaturesFirst(t *testing.T) {
 	}, 10*time.Second, 20*time.Millisecond)
 	sigs, add := order()
 	require.Less(t, sigs, add)
+}
+
+// TestLinkUpdateAfterPeerLockBeforeOurs checks the peer's add right after
+// its splice_locked, which completed our lock still on its way to the link:
+// covered by the peer's balance on the splice's funding, not on the old one.
+// It waits for our lock, rather than being refused with an error the Core
+// Lightning port fails the channel on.
+func TestLinkUpdateAfterPeerLockBeforeOurs(t *testing.T) {
+	t.Parallel()
+
+	s := newSpliceLinkHarness(t)
+	s.handler.mu.Lock()
+	s.handler.lockComing = true
+	s.handler.mu.Unlock()
+
+	// Bob splices in 3 BTC and has locked on his side.
+	txid := pendSplice(
+		t, s.bob, s.link.channel, 3*btcutil.SatoshiPerBitcoin,
+	)
+	scid := lnwire.ShortChannelID{BlockHeight: 900_000, TxIndex: 1}
+	require.NoError(t, s.bob.LockPendingFunding(txid, scid))
+	s.link.HandleChannelUpdate(&lnwire.SpliceLocked{
+		ChannelID: s.link.ChanID(), SpliceTxid: txid,
+	})
+
+	// More than his 5 BTC before the splice.
+	amt := lnwire.NewMSatFromSatoshis(6 * btcutil.SatoshiPerBitcoin)
+	var blob [lnwire.OnionPacketSize]byte
+	_, htlc, _, err := generatePayment(amt, amt, 5, blob)
+	require.NoError(t, err)
+	_, err = s.bob.AddHTLC(htlc, nil)
+	require.NoError(t, err)
+	htlc.ChanID = s.link.ChanID()
+	s.link.HandleChannelUpdate(htlc)
+	time.Sleep(100 * time.Millisecond)
+	s.requireNoFailure(t)
+
+	require.NoError(t, <-s.link.LockSplice(txid, scid))
+	s.requireNoFailure(t)
 }

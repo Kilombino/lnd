@@ -62,6 +62,13 @@ type SpliceHandler interface {
 	// Safe from any goroutine.
 	Signing() (bool, lntypes.ChannelParty)
 
+	// LockComing reports whether a splice's lock is on its way to the
+	// link: both splice_locked are in, or ours is and txid, the one the
+	// peer just sent, completes it. The peer, locked on its side, may
+	// send updates its new balance covers at once. Safe from any
+	// goroutine.
+	LockComing(txid chainhash.Hash) bool
+
 	// TxSignaturesFor returns our tx_signatures for the splice
 	// transaction the peer's next_funding names, if they went out: the
 	// link resends them on reconnecting before anything else, and the
@@ -532,4 +539,37 @@ func (l *channelLink) notePeerLocked(txid chainhash.Hash) {
 		l.peerLocked = make(map[chainhash.Hash]struct{})
 	}
 	l.peerLocked[txid] = struct{}{}
+
+	// Its splice_locked completing ours: the lock is on its way, and the
+	// peer's updates wait for it (lockAwaited).
+	if l.cfg.SpliceHandler != nil && l.cfg.SpliceHandler.LockComing(txid) {
+		l.lockAwaited = txid
+	}
+}
+
+// awaitingLock reports whether the peer's updates wait for a splice's lock
+// to reach the link: the peer, locked on its side, sends updates its new
+// balance covers, which the old funding's refused, an error the peer fails
+// the channel on.
+func (l *channelLink) awaitingLock() bool {
+	if l.cfg.SpliceHandler == nil {
+		return false
+	}
+	if l.lockAwaited != (chainhash.Hash{}) {
+		current := l.channel.ChannelState().CurrentFundingOutpoint().Hash
+		pending := false
+		for _, f := range l.channel.PendingFundings() {
+			if f.OutPoint.Hash == l.lockAwaited {
+				pending = true
+			}
+		}
+		if current == l.lockAwaited || !pending {
+			l.lockAwaited = chainhash.Hash{}
+		}
+	}
+	if l.lockAwaited != (chainhash.Hash{}) {
+		return true
+	}
+
+	return l.cfg.SpliceHandler.LockComing(chainhash.Hash{})
 }

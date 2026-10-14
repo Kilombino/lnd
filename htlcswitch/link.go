@@ -473,6 +473,10 @@ type channelLink struct {
 	// ends.
 	peerTxSigs bool
 
+	// lockAwaited is the splice whose lock the peer's splice_locked
+	// completed, on its way to the link: the peer's updates wait for it.
+	lockAwaited chainhash.Hash
+
 	// peerLocked holds the splices the peer has said it locked
 	// (splice_locked, or my_current_funding_locked on reconnecting), as
 	// the link handed them to the splice machine: the peer's next
@@ -2058,6 +2062,13 @@ func (l *channelLink) processUpstreamMsg(ctx context.Context,
 		l.stfuFailf("update received after stfu: %T", msg)
 
 		return false
+	}
+
+	// A splice's lock on its way: the peer's updates wait for it.
+	if _, ok := msg.(*lnwire.CommitSig); !ok &&
+		msg.MsgType().IsChannelUpdate() && l.awaitingLock() {
+
+		return true
 	}
 
 	// Nothing but the announced commitment_signed messages may come

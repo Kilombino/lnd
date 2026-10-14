@@ -34,6 +34,23 @@ func (m *Machine) Signing() (bool, lntypes.ChannelParty) {
 	return true, lntypes.Remote
 }
 
+// LockComing reports whether the splice's lock is on its way to the link:
+// both splice_locked are in, or ours is and the peer's for txid, just
+// received, completes it. The peer, locked on its side, may send updates its
+// new balance covers before our lock reaches the link. Safe from any
+// goroutine.
+func (m *Machine) LockComing(txid chainhash.Hash) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	a := m.active
+	if a == nil || a.lockDone || !a.lockedSent {
+		return false
+	}
+
+	return a.lockedReceived || a.txid == txid
+}
+
 // Constructing reports whether a splice's transaction is being negotiated,
 // or agreed and not yet added to the channel's fundings: a commitment_signed
 // naming a funding the channel doesn't have may be its own. Safe from any
