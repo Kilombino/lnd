@@ -139,6 +139,9 @@ type SpliceNegotiation struct {
 	// reconnection, it is given up on a while after that.
 	SignFailedAt int64
 
+	// SignFailures counts our failures to sign it since SignFailedAt.
+	SignFailures uint32
+
 	// Inputs describe the transaction's inputs in its order, which
 	// signing and checking the peer's signatures need after a restart.
 	Inputs []SpliceInput
@@ -194,6 +197,7 @@ const (
 	negLockedScidType      tlv.Type = 11
 	negAgreedAtType        tlv.Type = 13
 	negSignFailedAtType    tlv.Type = 15
+	negSignFailuresType    tlv.Type = 17
 )
 
 // encode serializes a negotiation as a TLV stream.
@@ -341,6 +345,11 @@ func (n *SpliceNegotiation) encode(w io.Writer) error {
 			negSignFailedAtType, &failed,
 		))
 	}
+	if n.SignFailures > 0 {
+		records = append(records, tlv.MakePrimitiveRecord(
+			negSignFailuresType, &n.SignFailures,
+		))
+	}
 
 	stream, err := tlv.NewStream(records...)
 	if err != nil {
@@ -378,6 +387,7 @@ func decodeSpliceNegotiation(r io.Reader) (*SpliceNegotiation, error) {
 		tlv.MakePrimitiveRecord(negLockedScidType, &scid),
 		tlv.MakePrimitiveRecord(negAgreedAtType, &agreed),
 		tlv.MakePrimitiveRecord(negSignFailedAtType, &signFailed),
+		tlv.MakePrimitiveRecord(negSignFailuresType, &n.SignFailures),
 	)
 	if err != nil {
 		return nil, err

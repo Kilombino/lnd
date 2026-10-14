@@ -713,6 +713,7 @@ func restoredActive(r *channeldb.SpliceRecord) (*active, error) {
 	if n.SignFailedAt != 0 {
 		a.signFailedAt = time.Unix(n.SignFailedAt, 0)
 	}
+	a.signFailures = n.SignFailures
 	if n.LockedSent && n.LockedScid.ToUint64() != 0 {
 		a.scid = fn.Some(n.LockedScid)
 	}

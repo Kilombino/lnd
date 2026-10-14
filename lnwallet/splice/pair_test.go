@@ -1399,8 +1399,8 @@ func TestSpliceDeadRevivedAfterRestart(t *testing.T) {
 
 // TestSpliceSigningFailsForGood checks a failure to sign after the peer's
 // tx_signatures that never ends: retried at each reconnection, then, a day
-// after the first failure (recorded, so it survives reconnections), force
-// closed, our tx_signatures never out. An old agreement alone doesn't count:
+// after the first failure and at the fifth attempt (both recorded, so they
+// survive reconnections), force closed, our tx_signatures never out. An old agreement alone doesn't count:
 // a node down for days would close at its first transient failure.
 func TestSpliceSigningFailsForGood(t *testing.T) {
 	t.Parallel()
@@ -1447,12 +1447,21 @@ func TestSpliceSigningFailsForGood(t *testing.T) {
 	case <-time.After(300 * time.Millisecond):
 	}
 
-	// Failing for over a day: force closed.
+	// Failing for over a day, but only a few attempts (offline in
+	// between): not yet. At the fifth: force closed.
 	p.alice.machine.enqueue(func() {
 		p.alice.machine.active.signFailedAt = time.Now().Add(
 			-signingGiveUp - time.Minute,
 		)
 	})
+	for i := 3; i < signingGiveUpAttempts; i++ {
+		retry()
+		select {
+		case <-closes:
+			t.Fatalf("closed at attempt %d", i)
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
 	retry()
 	select {
 	case force := <-closes:

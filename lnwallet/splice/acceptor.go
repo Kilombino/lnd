@@ -162,9 +162,9 @@ func (m *Machine) checkSpliceInit(msg *lnwire.SpliceInit) (string, string) {
 	// Refused here, before anything is signed.
 	// And the construction's own, 1% of the new capacity, checked now:
 	// at tx_complete the Core Lightning port has signed its part.
+	_, theirReserve := state.Reserves()
 	reserve := max(
-		state.RemoteChanCfg.ChanReserve,
-		spliceReserve(state.Capacity+contribution),
+		theirReserve, spliceReserve(state.Capacity+contribution),
 	)
 	if contribution < 0 && theirBalance+contribution < reserve {
 		return codeAboveBalance, fmt.Sprintf("leaves %v, below the "+

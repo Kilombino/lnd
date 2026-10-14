@@ -70,24 +70,30 @@ func (m *Machine) signingFailed(err error) {
 	// the agreement, or a node down for days would close at its first
 	// transient failure).
 	a := m.active
-	if a.signFailedAt.IsZero() {
-		now := time.Now()
-		m.update(func(a *active) { a.signFailedAt = now })
-		err := m.cfg.Channel.State().UpdateSpliceRecord(a.txid,
-			func(r *channeldb.SpliceRecord) error {
-				if r.Negotiation != nil {
-					r.Negotiation.SignFailedAt = now.Unix()
-				}
-
-				return nil
-			})
-		if err != nil {
-			log.Errorf("ChannelID(%v): unable to record the "+
-				"failure to sign splice %v: %v", m.cfg.ChanID,
-				a.txid, err)
+	now := time.Now()
+	m.update(func(a *active) {
+		if a.signFailedAt.IsZero() {
+			a.signFailedAt = now
 		}
+		a.signFailures++
+	})
+	werr := m.cfg.Channel.State().UpdateSpliceRecord(a.txid,
+		func(r *channeldb.SpliceRecord) error {
+			if r.Negotiation != nil {
+				r.Negotiation.SignFailedAt = a.signFailedAt.Unix()
+				r.Negotiation.SignFailures = a.signFailures
+			}
+
+			return nil
+		})
+	if werr != nil {
+		log.Errorf("ChannelID(%v): unable to record the failure to "+
+			"sign splice %v: %v", m.cfg.ChanID, a.txid, werr)
 	}
-	if time.Since(a.signFailedAt) > signingGiveUp && m.cfg.Close != nil {
+	// A day since the first, and a few attempts: not two transient
+	// failures with a long time offline between them.
+	if time.Since(a.signFailedAt) > signingGiveUp &&
+		a.signFailures >= signingGiveUpAttempts && m.cfg.Close != nil {
 
 		log.Errorf("ChannelID(%v): unable to sign splice %v for over "+
 			"%v; force closing: %v", m.cfg.ChanID, a.txid,
@@ -106,6 +112,10 @@ func (m *Machine) signingFailed(err error) {
 // signingGiveUp is how long after our first failure to sign a splice, the
 // peer's tx_signatures in, we keep failing before force closing.
 const signingGiveUp = 24 * time.Hour
+
+// signingGiveUpAttempts is how many failed attempts to sign, one per
+// reconnection, come before giving up.
+const signingGiveUpAttempts = 5
 
 // signsFirst reports whether we send tx_signatures first.
 func (m *Machine) signsFirst() bool {
@@ -726,9 +736,15 @@ func (m *Machine) watchDisownedDeadline(a *active) {
 			// Reorganised out, it no longer spares the channel.
 			for {
 				select {
-				case <-conf.Confirmed:
+				case _, ok := <-conf.Confirmed:
+					if !ok {
+						return
+					}
 					confirmed.Store(true)
-				case <-conf.NegativeConf:
+				case _, ok := <-conf.NegativeConf:
+					if !ok {
+						return
+					}
 					confirmed.Store(false)
 				case <-m.quit:
 					return

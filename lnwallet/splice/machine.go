@@ -355,6 +355,9 @@ type active struct {
 	// tx_signatures in (SignFailedAt in the record).
 	signFailedAt time.Time
 
+	// signFailures counts those failures (SignFailures in the record).
+	signFailures uint32
+
 	// inputsWatched is set once the transaction's inputs are watched for
 	// a spend by another.
 	inputsWatched bool
