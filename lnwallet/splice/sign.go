@@ -477,10 +477,29 @@ func (m *Machine) handleTxAbort(msg *lnwire.TxAbort) {
 		// A quiescence the peer won ends with it: it ends its own.
 		m.resume()
 
+	// After our tx_signatures, the peer's not in: the Core Lightning port
+	// aborts there in its normal course (its user's signatures missing,
+	// or a next_funding it can't take yet), waiting for the echo and
+	// taking nothing else until it comes. Echoed, quiescence ended, the
+	// splice kept and watched, as it holds ours and could still publish
+	// it; nothing held against the peer.
+	case (a.phase == phasePending || a.ourTxSigs != nil) &&
+		a.theirTxSigs == nil:
+
+		log.Warnf("ChannelID(%v): peer aborted splice %v after our "+
+			"tx_signatures, before its own: %v", m.cfg.ChanID,
+			a.txid, reason)
+		m.send(&lnwire.TxAbort{ChannelID: m.cfg.ChanID})
+		m.resume()
+
+	// Its tx_signatures in too: an abort it may not send. Marked, and the
+	// connection dropped with a warning, which also ends the port's wait
+	// for an echo.
 	case a.phase == phasePending || a.ourTxSigs != nil:
-		log.Errorf("ChannelID(%v): peer aborted splice %v after our "+
+		log.Errorf("ChannelID(%v): peer aborted splice %v after both "+
 			"tx_signatures: %v", m.cfg.ChanID, a.txid, reason)
 		m.setMisbehaved()
+		m.warnAndDisconnect("tx_abort after both tx_signatures")
 
 	default:
 		log.Infof("ChannelID(%v): peer aborted the splice: %v",

@@ -1241,6 +1241,9 @@ func TestAcceptSpliceAborts(t *testing.T) {
 			require.Empty(t, records)
 		})
 
+	// After ours, the peer's not in: as the Core Lightning port does in
+	// its normal course. Echoed, quiescence ended, the splice kept, the
+	// peer not marked: it waits for the echo and takes nothing else.
 	t.Run("after our signatures", func(t *testing.T) {
 		t.Parallel()
 
@@ -1248,13 +1251,34 @@ func TestAcceptSpliceAborts(t *testing.T) {
 		splicePastSigning(t, h)
 
 		h.machine.HandleSpliceMessage(&lnwire.TxAbort{
-			ChannelID: h.machine.cfg.ChanID,
+			ChannelID: h.machine.cfg.ChanID, Data: []byte("user"),
 		})
-		require.Eventually(t, func() bool {
-			done := make(chan bool)
-			h.machine.enqueue(func() { done <- h.machine.misbehaved })
-			return <-done
-		}, 5*time.Second, 10*time.Millisecond)
+		echo := next[*lnwire.TxAbort](t, h)
+		require.Empty(t, echo.Data)
+		requireResumed(t, h)
+		done := make(chan bool)
+		h.machine.enqueue(func() { done <- h.machine.misbehaved })
+		require.False(t, <-done)
+		require.Len(t, h.bob.PendingFundings(), 1)
+	})
+
+	// After both: an abort the peer may not send. Marked, and the
+	// connection dropped with a warning.
+	t.Run("after both signatures", func(t *testing.T) {
+		t.Parallel()
+
+		h := newAcceptorHarness(t)
+		s := splicePastSigning(t, h)
+		h.machine.HandleSpliceMessage(s.aliceTxSignatures(t, h))
+		requireResumed(t, h)
+
+		h.machine.HandleSpliceMessage(&lnwire.TxAbort{
+			ChannelID: h.machine.cfg.ChanID, Data: []byte("no"),
+		})
+		requireDisconnected(t, h)
+		done := make(chan bool)
+		h.machine.enqueue(func() { done <- h.machine.misbehaved })
+		require.True(t, <-done)
 		require.Len(t, h.bob.PendingFundings(), 1)
 	})
 
