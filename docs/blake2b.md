@@ -577,13 +577,13 @@ neither. Treated as a close, the new funding output would no longer be
 watched; treated as a lost commitment, lnd would start a recovery that sweeps
 the wrong outputs.
 
-From the next release, a spend is a cooperative close only if this node sent
-or received a shutdown for the channel (both closers record it before signing
-anything). A channel restored from a static backup has no record of that, so
-for it the spend must also pay this node's wallet and create no P2WSH output
-(a splice always creates one, the channel's new funding output). A spend that
-is neither shaped like a commitment nor such a close leaves the channel open
-but flagged `ChanStatusFundingSpentUnknown`:
+From `0.21.4-beta-blake2b.19`, a spend is a cooperative close only if this
+node sent or received a shutdown for the channel (both closers record it
+before signing anything). A channel restored from a static backup has no
+record of that, so for it the spend must also pay this node's wallet and
+create no P2WSH output (a splice always creates one, the channel's new
+funding output). A spend that is neither shaped like a commitment nor such
+a close leaves the channel open but flagged `ChanStatusFundingSpentUnknown`:
 
 - `lncli pendingchannels` lists it under `waiting_close_channels`, with
   `ChanStatusFundingSpentUnknown` in `chan_status_flags` and no closing

@@ -231,6 +231,13 @@ scripts/native-ubuntu.sh build
 systemctl --user restart lightning-fork)
 ```
 
+With the web dashboard (section 6), update it too, so its screens match
+the new lnd:
+
+```sh
+scripts/native-ubuntu.sh dashboard
+```
+
 ## 6. The web dashboard
 
 The dashboard is the Lightning Fork app you would see on Umbrel: balances,
