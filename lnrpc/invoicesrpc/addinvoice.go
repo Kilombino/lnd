@@ -98,6 +98,10 @@ type AddInvoiceConfig struct {
 	QueryBlindedRoutes func(lnwire.MilliSatoshi) ([]*route.Route, error)
 }
 
+// MaxMetadataLength is the most payment metadata an invoice can carry: what a
+// single BOLT 11 tagged field holds (1023 five-bit groups), in bytes.
+const MaxMetadataLength = 1023 * 5 / 8
+
 // AddInvoiceData contains the required data to create a new invoice.
 type AddInvoiceData struct {
 	// An optional memo to attach along with the invoice. Used for record
@@ -156,6 +160,11 @@ type AddInvoiceData struct {
 	// RouteHints are optional route hints that can each be individually
 	// used to assist in reaching the invoice's destination.
 	RouteHints [][]zpay32.HopHint
+
+	// Metadata is optional payment metadata (BOLT 11 field m) that the payer
+	// sends back with the payment. An invoice that carries it also sets the
+	// payment_metadata feature bit, as BOLT 11 asks.
+	Metadata []byte
 }
 
 // BlindedPathConfig holds the configuration values required for blinded path
@@ -487,6 +496,19 @@ func AddInvoice(ctx context.Context, cfg *AddInvoiceConfig,
 		invoiceFeatures = cfg.GenAmpInvoiceFeatures()
 	} else {
 		invoiceFeatures = cfg.GenInvoiceFeatures()
+	}
+	if len(invoice.Metadata) > 0 {
+		if len(invoice.Metadata) > MaxMetadataLength {
+			return nil, nil, fmt.Errorf("payment metadata too long: %d "+
+				"bytes, at most %d", len(invoice.Metadata),
+				MaxMetadataLength)
+		}
+		options = append(options, zpay32.Metadata(invoice.Metadata))
+
+		// The vector may be shared with every other invoice: set the bit on
+		// a copy.
+		invoiceFeatures = invoiceFeatures.Clone()
+		invoiceFeatures.Set(lnwire.PaymentMetadataOptional)
 	}
 	options = append(options, zpay32.Features(invoiceFeatures))
 

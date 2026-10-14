@@ -267,6 +267,7 @@ func (s *server) addBridgeHoldInvoice(ctx context.Context,
 		Expiry:      int64(req.Expiry.Seconds()),
 		CltvExpiry:  uint64(req.CLTVDelta),
 		HodlInvoice: true,
+		Metadata:    req.Metadata,
 
 		// The preimage is deliberately absent: it belongs to whoever
 		// issued the invoice on the other chain, and the entire point

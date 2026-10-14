@@ -92,11 +92,12 @@ func (r *Remote) AddHoldInvoice(ctx context.Context, req node.HoldInvoice) (
 
 	resp, err := r.invoices.AddHoldInvoice(
 		ctx, &invoicesrpc.AddHoldInvoiceRequest{
-			Memo:       req.Memo,
-			Hash:       req.Hash[:],
-			ValueMsat:  int64(req.AmountMsat),
-			CltvExpiry: uint64(req.CLTVDelta),
-			Expiry:     int64(req.Expiry.Seconds()),
+			Memo:            req.Memo,
+			Hash:            req.Hash[:],
+			ValueMsat:       int64(req.AmountMsat),
+			CltvExpiry:      uint64(req.CLTVDelta),
+			Expiry:          int64(req.Expiry.Seconds()),
+			PaymentMetadata: req.Metadata,
 		},
 	)
 	if err != nil {

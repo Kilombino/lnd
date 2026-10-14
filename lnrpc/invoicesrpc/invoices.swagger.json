@@ -326,6 +326,11 @@
         "private": {
           "type": "boolean",
           "description": "Whether this invoice should include routing hints for private channels."
+        },
+        "payment_metadata": {
+          "type": "string",
+          "format": "byte",
+          "description": "Payment metadata (BOLT 11 field m) to put on the invoice: the payer sends\nit back with the payment. Setting it also sets the payment_metadata feature\nbit (49), as BOLT 11 asks of an invoice that carries one. Lightning Fork\nonly: stock LND ignores the field, and the number is kept clear of\nupstream's."
         }
       }
     },
