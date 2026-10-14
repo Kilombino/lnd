@@ -155,6 +155,36 @@ func (c *OpenChannel) LockSplice(l SpliceLock) error {
 	return nil
 }
 
+// chainDustLimit is the chain's dust limit, which the Core Lightning port
+// takes for the reserve floor of a channel it opened.
+const chainDustLimit = btcutil.Amount(546)
+
+// SpliceReserve returns both sides' channel reserve once the channel has been
+// spliced, as BOLT 2 has it for a channel whose capacity both sides funded
+// and as the Core Lightning port sets it at each lock: 1% of the capacity,
+// or the dust limit if more (the chain's for a channel the peer opened, ours
+// for one we did). False for a channel never spliced, which keeps those of
+// its opening.
+//
+// The port's channel process reads the reserves when it starts (each
+// connection, and after each tx_abort exchange), not at the lock: the link
+// applies them at the same moments (LightningChannel.ApplySpliceReserves), so
+// both sides hold each other to the same.
+func (c *OpenChannel) SpliceReserve() (btcutil.Amount, bool) {
+	c.RLock()
+	defer c.RUnlock()
+
+	if c.spliceFunding.IsNone() {
+		return 0, false
+	}
+	dust := chainDustLimit
+	if c.IsInitiator {
+		dust = c.LocalChanCfg.DustLimit
+	}
+
+	return max(c.Capacity/100, dust), true
+}
+
 // applySpliceLock sets a splice lock's fields on a channel.
 func applySpliceLock(c *OpenChannel, l SpliceLock) {
 	c.spliceFunding = fn.Some(l.Funding)

@@ -1310,6 +1310,10 @@ func (p *Brontide) loadActiveChannels(chans []*channeldb.OpenChannel) (
 				"state machine: %w", err)
 		}
 
+		// A spliced channel's reserves, as the peer reads them when
+		// its channel process starts with this connection.
+		lnChan.ApplySpliceReserves()
+
 		chanPoint := dbChan.FundingOutpoint
 
 		chanID := lnwire.NewChanIDFromOutPoint(chanPoint)

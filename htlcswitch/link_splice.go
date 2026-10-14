@@ -477,6 +477,17 @@ func (l *channelLink) HoldUpdates() <-chan error {
 	})
 }
 
+// ApplySpliceReserves sets a spliced channel's reserves to those after its
+// splices, on the link's goroutine: the peer's channel process reads them
+// anew after a tx_abort exchange.
+func (l *channelLink) ApplySpliceReserves() <-chan error {
+	return l.runSpliceReq(func(context.Context) error {
+		l.channel.ApplySpliceReserves()
+
+		return nil
+	})
+}
+
 // holdSpliceUpdates holds our updates, once. Adds are disabled, unless a
 // close disabled them already, which the release then leaves as it is.
 func (l *channelLink) holdSpliceUpdates() {
@@ -583,6 +594,7 @@ type SpliceLink interface {
 	LockSplice(txid chainhash.Hash, scid lnwire.ShortChannelID) <-chan error
 	RemoveSpliceFunding(txid chainhash.Hash) <-chan error
 	HoldUpdates() <-chan error
+	ApplySpliceReserves() <-chan error
 }
 
 // A compile time check that the link can splice.

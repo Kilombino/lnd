@@ -457,3 +457,53 @@ func TestSpliceFundingCopy(t *testing.T) {
 	require.Equal(t, lock.Funding.OutPoint, clone.CurrentFundingOutpoint())
 	require.Equal(t, fn.Some(lock.Funding), clone.SpliceFundingInfo())
 }
+
+// TestSpliceReserve checks the reserves of a spliced channel: none for one
+// never spliced, which keeps those of its opening; 1% of the capacity after
+// a splice, or the dust limit if more (ours, for a channel we opened). A
+// lock itself changes neither side's stored reserve: the peer's channel
+// process keeps what it started with until it restarts.
+func TestSpliceReserve(t *testing.T) {
+	t.Parallel()
+
+	fullDB, err := MakeTestDB(t)
+	require.NoError(t, err)
+	cdb := fullDB.ChannelStateDB()
+
+	channel := createTestChannel(t, cdb, openChannelOption(),
+		func(p *testChannelParams) {
+			p.channel.IsInitiator = true
+			p.channel.LocalChanCfg.DustLimit = 354
+			p.channel.LocalChanCfg.ChanReserve = 20_000
+			p.channel.RemoteChanCfg.ChanReserve = 20_000
+		})
+	_, ok := channel.SpliceReserve()
+	require.False(t, ok)
+
+	require.NoError(t, channel.LockSplice(
+		testSpliceLock(t, 0x71, 3_000_000),
+	))
+	reserve, ok := channel.SpliceReserve()
+	require.True(t, ok)
+	require.Equal(t, btcutil.Amount(30_000), reserve)
+	require.Equal(t, btcutil.Amount(20_000), channel.LocalChanCfg.ChanReserve)
+	require.Equal(t, btcutil.Amount(20_000), channel.RemoteChanCfg.ChanReserve)
+
+	// Read back.
+	fetched, err := cdb.FetchChannel(channel.FundingOutpoint)
+	require.NoError(t, err)
+	reserve, ok = fetched.SpliceReserve()
+	require.True(t, ok)
+	require.Equal(t, btcutil.Amount(30_000), reserve)
+
+	// Below the dust limit: ours, as we opened the channel; the chain's
+	// had the peer.
+	require.NoError(t, channel.LockSplice(
+		testSpliceLock(t, 0x72, 20_000),
+	))
+	reserve, _ = channel.SpliceReserve()
+	require.Equal(t, btcutil.Amount(354), reserve)
+	channel.IsInitiator = false
+	reserve, _ = channel.SpliceReserve()
+	require.Equal(t, chainDustLimit, reserve)
+}

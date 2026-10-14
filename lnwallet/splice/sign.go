@@ -480,6 +480,11 @@ func (m *Machine) handleTxAbort(msg *lnwire.TxAbort) {
 	a := m.active
 	reason := printable(msg.Data)
 
+	// A tx_abort exchange, the peer's or the echo of ours: the Core
+	// Lightning port's channel process restarts after it, reading a
+	// spliced channel's reserves anew, and the link does the same.
+	m.applyReserves()
+
 	// The peer's answer to ours, as BOLT 2 asks of it.
 	if m.abortSent {
 		m.abortSent = false
@@ -565,6 +570,18 @@ func (m *Machine) handleTxAbort(msg *lnwire.TxAbort) {
 		})
 		m.send(&lnwire.TxAbort{ChannelID: m.cfg.ChanID})
 		m.forget()
+	}
+}
+
+// applyReserves has the link set a spliced channel's reserves anew.
+func (m *Machine) applyReserves() {
+	select {
+	case err := <-m.cfg.Link.ApplySpliceReserves():
+		if err != nil {
+			log.Debugf("ChannelID(%v): unable to apply the splice "+
+				"reserves: %v", m.cfg.ChanID, err)
+		}
+	case <-m.quit:
 	}
 }
 

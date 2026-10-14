@@ -1568,3 +1568,22 @@ func (lc *LightningChannel) spliceAnchorResolutions(local, remote,
 
 	return all, nil
 }
+
+// ApplySpliceReserves sets a spliced channel's reserves, both sides', to
+// those after its splices (channeldb.OpenChannel.SpliceReserve), as the Core
+// Lightning port's channel process reads them when it starts: at each
+// connection, and after each tx_abort exchange. Not at a lock: the process
+// running then keeps what it started with, and so does this channel until
+// one of those. A channel never spliced keeps those of its opening.
+func (lc *LightningChannel) ApplySpliceReserves() {
+	reserve, ok := lc.channelState.SpliceReserve()
+	if !ok {
+		return
+	}
+
+	lc.Lock()
+	defer lc.Unlock()
+
+	lc.channelState.LocalChanCfg.ChanReserve = reserve
+	lc.channelState.RemoteChanCfg.ChanReserve = reserve
+}

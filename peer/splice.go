@@ -367,6 +367,16 @@ func (p *Brontide) stopSpliceMachines() {
 	}
 }
 
+// ApplySpliceReserves implements splice.Link.
+func (s *spliceLinkProxy) ApplySpliceReserves() <-chan error {
+	l, err := s.link()
+	if err != nil {
+		return errChan(err)
+	}
+
+	return l.ApplySpliceReserves()
+}
+
 // HoldUpdates implements splice.Link.
 func (s *spliceLinkProxy) HoldUpdates() <-chan error {
 	l, err := s.link()

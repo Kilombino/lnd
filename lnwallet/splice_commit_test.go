@@ -1557,3 +1557,32 @@ func TestSpliceChanSyncOweRevocationAndCommitment(t *testing.T) {
 		CommitSig: main.CommitSig, HtlcSigs: main.HtlcSigs,
 	}, spliceSigs))
 }
+
+// TestApplySpliceReserves checks a spliced channel's reserves: unchanged at
+// the lock, as the peer's running channel process keeps what it started
+// with; then, applied on both sides as their processes start again, 1% of
+// the new capacity for each, the same on both sides. A channel never spliced
+// keeps those of its opening.
+func TestApplySpliceReserves(t *testing.T) {
+	t.Parallel()
+
+	const added = btcutil.Amount(100_000_000)
+	alice, bob, txid := splicedPair(t, added, 0)
+	before := alice.channelState.LocalChanCfg.ChanReserve
+
+	alice.ApplySpliceReserves()
+	require.Equal(t, before, alice.channelState.LocalChanCfg.ChanReserve)
+
+	scid := lnwire.ShortChannelID{BlockHeight: 900_100, TxIndex: 4}
+	require.NoError(t, alice.LockPendingFunding(txid, scid))
+	require.NoError(t, bob.LockPendingFunding(txid, scid))
+	require.Equal(t, before, alice.channelState.LocalChanCfg.ChanReserve)
+
+	alice.ApplySpliceReserves()
+	bob.ApplySpliceReserves()
+	want := alice.channelState.Capacity / 100
+	for _, lc := range []*LightningChannel{alice, bob} {
+		require.Equal(t, want, lc.channelState.LocalChanCfg.ChanReserve)
+		require.Equal(t, want, lc.channelState.RemoteChanCfg.ChanReserve)
+	}
+}

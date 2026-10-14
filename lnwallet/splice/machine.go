@@ -60,6 +60,10 @@ type Link interface {
 	// HoldUpdates stops our updates on the channel until a splice locks:
 	// no HTLC forwarded into it, no update_fee.
 	HoldUpdates() <-chan error
+
+	// ApplySpliceReserves sets a spliced channel's reserves to those
+	// after its splices, as the peer's process reads them anew.
+	ApplySpliceReserves() <-chan error
 }
 
 // Channel is the channel's state machine as the machine reads it.
