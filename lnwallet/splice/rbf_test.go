@@ -901,3 +901,35 @@ func TestPeerSpliceInitWhilePreparing(t *testing.T) {
 	require.Nil(t, h.peer.disconnected)
 	h.peer.mu.Unlock()
 }
+
+// TestReplacementPayingLessKept checks a replacement of the peer's at a
+// higher rate that pays less in total, having fewer inputs: kept as a
+// candidate, not answered with a tx_abort once tx_complete is exchanged,
+// which the Core Lightning port, having signed its part then, fails the
+// channel on. It won't relay; whichever transaction confirms is followed.
+func TestReplacementPayingLessKept(t *testing.T) {
+	t.Parallel()
+
+	h := newAcceptorHarness(t)
+	first := startAliceSplice(t, h, 40_000_000, 2_500)
+	first.construct(t, h)
+	bobKey := signSplice(t, h, first, nil)
+
+	extra := coin(79, first.coin.PkScript, 1_000_000)
+	second := replaceAliceSpliceWith(t, h, first, bobKey, 2_600,
+		[]Coin{extra})
+	second.construct(t, h)
+	signSplice(t, h, second, bobKey)
+
+	third := replaceAliceSplice(t, h, second, bobKey, 2_700)
+	third.construct(t, h)
+	require.Less(t, int64(third.res.Fee), int64(second.res.Fee))
+	signSplice(t, h, third, bobKey)
+
+	h.machine.mu.Lock()
+	txid, replaced := h.machine.active.txid, len(h.machine.active.replaced)
+	h.machine.mu.Unlock()
+	require.Equal(t, third.res.Tx.TxHash(), txid)
+	require.Equal(t, 2, replaced)
+	require.Len(t, h.bob.PendingFundings(), 3)
+}

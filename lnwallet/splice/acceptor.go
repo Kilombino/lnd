@@ -462,16 +462,23 @@ func (m *Machine) advanceConstruction() {
 		m.constructionFailed(err)
 		return
 	}
+	// A replacement is the peer's to build, and the Core Lightning port
+	// has signed its part once tx_complete is exchanged, failing the
+	// channel on a tx_abort now. One paying less in total than the
+	// transaction it replaces is kept as a candidate: it won't relay,
+	// and dies when the other confirms.
 	if err := m.checkReplacementFee(res); err != nil {
-		m.abort(codeFeeBelowFloor, "%v", err)
-		m.forget()
-
-		return
+		log.Warnf("ChannelID(%v): peer's replacement kept, though: %v",
+			m.cfg.ChanID, err)
 	}
+
+	// The transaction it replaces again: nothing new to sign. Dropped
+	// with the connection, not a tx_abort; the peer's next_funding naming
+	// it gets our tx_signatures for it again.
 	if m.candidate(res.Tx.TxHash()) != nil {
-		m.abort(codeRbfUnsupported, "replacement is the transaction "+
-			"it replaces")
 		m.forget()
+		m.warnAndDisconnect("replacement is the transaction it " +
+			"replaces")
 
 		return
 	}
