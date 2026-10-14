@@ -1398,6 +1398,96 @@ func TestAcceptSpliceAborts(t *testing.T) {
 		}
 	})
 
+	// The earlier transaction never confirming (too low a fee, which the
+	// peer can't bump while the disowned one is ours): force closed
+	// disownedHoldBlocks after its broadcast, not held for good.
+	t.Run("a replacement, the earlier never confirming", func(t *testing.T) {
+		t.Parallel()
+
+		h := newAcceptorHarness(t)
+		splicePastSigning(t, h)
+		closes := make(chan bool, 4)
+		h.machine.cfg.Close = func(force bool) { closes <- force }
+		h.chain.mu.Lock()
+		start := h.chain.height
+		h.chain.mu.Unlock()
+		h.machine.enqueue(func() {
+			h.machine.active.replaced = append(
+				h.machine.active.replaced, &active{
+					txid:            chainhash.Hash{9},
+					broadcastHeight: start + 10,
+				},
+			)
+		})
+		h.machine.HandleSpliceMessage(&lnwire.TxAbort{
+			ChannelID: h.machine.cfg.ChanID, Data: []byte("user"),
+		})
+		next[*lnwire.TxAbort](t, h)
+		requireResumed(t, h)
+		require.Eventually(t, func() bool {
+			h.chain.mu.Lock()
+			defer h.chain.mu.Unlock()
+
+			return len(h.chain.epochs) > 0
+		}, 5*time.Second, 10*time.Millisecond)
+
+		for i := 0; i < disownedHoldBlocks+9; i++ {
+			h.chain.mine()
+			time.Sleep(2 * time.Millisecond)
+		}
+		select {
+		case <-closes:
+			t.Fatal("closed before the deadline")
+		case <-time.After(200 * time.Millisecond):
+		}
+		h.chain.mine()
+		select {
+		case force := <-closes:
+			require.True(t, force)
+		case <-time.After(5 * time.Second):
+			t.Fatal("no close at the deadline")
+		}
+	})
+
+	// The earlier transaction the splice again by the deadline (its
+	// confirmation adopted it): nothing closed.
+	t.Run("a replacement, the earlier adopted in time", func(t *testing.T) {
+		t.Parallel()
+
+		h := newAcceptorHarness(t)
+		splicePastSigning(t, h)
+		closes := make(chan bool, 4)
+		h.machine.cfg.Close = func(force bool) { closes <- force }
+		earlier := &active{txid: chainhash.Hash{9}}
+		h.machine.enqueue(func() {
+			h.machine.active.replaced = append(
+				h.machine.active.replaced, earlier,
+			)
+		})
+		h.machine.HandleSpliceMessage(&lnwire.TxAbort{
+			ChannelID: h.machine.cfg.ChanID, Data: []byte("user"),
+		})
+		next[*lnwire.TxAbort](t, h)
+		requireResumed(t, h)
+		require.Eventually(t, func() bool {
+			h.chain.mu.Lock()
+			defer h.chain.mu.Unlock()
+
+			return len(h.chain.epochs) > 0
+		}, 5*time.Second, 10*time.Millisecond)
+		h.machine.enqueue(func() { h.machine.setActive(earlier) })
+
+		for i := 0; i < disownedHoldBlocks+1; i++ {
+			h.chain.mine()
+			time.Sleep(2 * time.Millisecond)
+		}
+		select {
+		case <-closes:
+			t.Fatal("closed, the earlier transaction adopted")
+		case <-time.After(300 * time.Millisecond):
+		}
+	})
+
 	// The replacement of a transaction signed both ways, disowned: the
 	// peer keeps the earlier one, which locks in time, the disowned one
 	// with it. Updates held, nothing closed.

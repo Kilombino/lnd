@@ -348,6 +348,9 @@ type active struct {
 	// holds ours, but no longer being signed (Disowned in the record).
 	disowned bool
 
+	// deadlineWatched is set once watchDisownedDeadline runs for it.
+	deadlineWatched bool
+
 	// inputsWatched is set once the transaction's inputs are watched for
 	// a spend by another.
 	inputsWatched bool

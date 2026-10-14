@@ -611,6 +611,8 @@ func (m *Machine) closeDisowned() {
 		log.Warnf("ChannelID(%v): the peer disowned splice %v; "+
 			"updates held until an earlier transaction of it "+
 			"locks", m.cfg.ChanID, a.txid)
+		m.watchDisownedDeadline(a)
+
 		return
 	}
 	if m.cfg.Close == nil {
@@ -626,6 +628,83 @@ func (m *Machine) closeDisowned() {
 		"the channel can take no update; closing it %v", m.cfg.ChanID,
 		a.txid, how)
 	m.cfg.Close(force)
+}
+
+// disownedHoldBlocks is how long a channel waits, held, for an earlier
+// transaction of a disowned splice to confirm, from its broadcast.
+const disownedHoldBlocks = 144
+
+// watchDisownedDeadline force closes a channel held for a disowned splice
+// whose earlier transactions none has confirmed disownedHoldBlocks after the
+// latest was published: one paying too little to confirm, which the peer
+// can't bump while the disowned one is ours (its tx_init_rbf refused), would
+// hold the channel for good. Force closed, as a cooperative close waits for
+// a splice not locked; our commitments on every funding are current. Once
+// per splice and connection; the deadline is from the record, the same at
+// every connection.
+func (m *Machine) watchDisownedDeadline(a *active) {
+	if a.deadlineWatched || m.cfg.Close == nil {
+		return
+	}
+	a.deadlineWatched = true
+
+	var from uint32
+	for _, c := range a.replaced {
+		from = max(from, c.broadcastHeight)
+	}
+	// Not recorded: from now.
+	if from == 0 {
+		h, err := m.cfg.Chain.BestHeight()
+		if err != nil {
+			log.Errorf("ChannelID(%v): unable to read the chain's "+
+				"height: %v", m.cfg.ChanID, err)
+			return
+		}
+		from = h
+	}
+	deadline := from + disownedHoldBlocks
+
+	epochs, err := m.cfg.Chain.RegisterBlockEpochNtfn(nil)
+	if err != nil {
+		log.Errorf("ChannelID(%v): unable to watch blocks: %v",
+			m.cfg.ChanID, err)
+		return
+	}
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		defer epochs.Cancel()
+
+		for {
+			select {
+			case epoch, ok := <-epochs.Epochs:
+				if !ok {
+					return
+				}
+				if uint32(epoch.Height) < deadline {
+					continue
+				}
+				m.enqueue(func() {
+					if m.active != a || !a.disowned ||
+						len(a.replaced) == 0 {
+
+						return
+					}
+					log.Warnf("ChannelID(%v): no earlier "+
+						"transaction of disowned splice "+
+						"%v confirmed by height %v; "+
+						"force closing", m.cfg.ChanID,
+						a.txid, deadline)
+					m.cfg.Close(true)
+				})
+
+				return
+
+			case <-m.quit:
+				return
+			}
+		}
+	}()
 }
 
 // printable returns the peer's text as printable ASCII, at most 160 bytes.
