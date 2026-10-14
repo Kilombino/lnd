@@ -54,6 +54,19 @@ func (p *Brontide) spliceUnlocked(chanID lnwire.ChannelID) bool {
 	return ok && m.Busy()
 }
 
+// spliceYields cancels a splice of ours still waiting for quiescence when
+// the peer, knowing nothing of it, sends shutdown, and reports whether
+// nothing then bars the close: the peer's shutdown is no breach.
+func (p *Brontide) spliceYields(chanID lnwire.ChannelID) bool {
+	m, ok := p.SpliceMachine(chanID)
+	if !ok || !m.Preparing() {
+		return false
+	}
+	m.Cancel()
+
+	return !p.spliceUnlocked(chanID)
+}
+
 // spliceNegotiated reports whether splicing applies to this connection: we
 // advertise it (on, or kept on for a splice still to finish somewhere) and
 // the peer supports it. A machine that can't start new splices refuses

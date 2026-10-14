@@ -674,6 +674,7 @@ func TestSpliceShutdownWhileQuiescing(t *testing.T) {
 	require.NoError(t, err)
 	requireUpdates(t, updates, StatePreparing)
 	require.True(t, alice.machine.Busy())
+	require.True(t, alice.machine.Preparing())
 
 	require.NoError(t, alice.ch.State().MarkShutdownSent(
 		channeldb.NewShutdownInfo(p2tr(2), true),

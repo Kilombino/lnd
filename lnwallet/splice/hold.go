@@ -56,6 +56,19 @@ func (m *Machine) LockComing(txid chainhash.Hash) bool {
 	return a.lockedReceived || a.txid == txid
 }
 
+// Preparing reports whether a splice of ours is still waiting for
+// quiescence, nothing of it sent but stfu: the peer, knowing nothing of it,
+// may send shutdown meanwhile, and it yields. Safe from any goroutine.
+func (m *Machine) Preparing() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	a := m.active
+
+	return a != nil && a.phase == phasePreparing &&
+		a.role == interactivetx.Initiator
+}
+
 // Busy reports whether a splice is under way, from its preparation on, also
 // while ours waits for quiescence: a cooperative close then would race it.
 // Safe from any goroutine.
