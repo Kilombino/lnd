@@ -1184,6 +1184,21 @@ func (c *ChainArbitrator) ForceCloseContract(chanPoint wire.OutPoint) (*wire.Msg
 	return closeTx, nil
 }
 
+// asyncForceClose returns a function force closing a channel without waiting:
+// a chain watcher asks it from its own loop, which the arbitrator's close
+// waits on.
+func (c *ChainArbitrator) asyncForceClose(chanPoint wire.OutPoint) func() {
+	return func() {
+		go func() {
+			_, err := c.ForceCloseContract(chanPoint)
+			if err != nil {
+				log.Errorf("ChannelPoint(%v): unable to force "+
+					"close: %v", chanPoint, err)
+			}
+		}()
+	}
+}
+
 // WatchNewChannel sends the ChainArbitrator a message to create a
 // ChannelArbitrator tasked with watching over a new channel. Once a new
 // channel has finished its final funding flow, it should be registered with
@@ -1229,6 +1244,7 @@ func (c *ChainArbitrator) WatchNewChannel(newChan *channeldb.OpenChannel) error 
 			},
 			publishTx:          c.cfg.PublishTx,
 			notifySpentUnknown: c.cfg.NotifyFundingSpentUnknown,
+			forceClose:         c.asyncForceClose(chanPoint),
 		},
 	)
 	if err != nil {
@@ -1417,6 +1433,7 @@ func (c *ChainArbitrator) loadOpenChannels() error {
 				},
 				publishTx:          c.cfg.PublishTx,
 				notifySpentUnknown: c.cfg.NotifyFundingSpentUnknown,
+				forceClose:         c.asyncForceClose(chanPoint),
 			},
 		)
 		if err != nil {

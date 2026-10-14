@@ -310,6 +310,7 @@ func (c *chainWatcher) maybeFollowSplice(spend *chainntnfs.SpendDetail,
 
 		c.splicePublished = r.Txid()
 	}
+	c.maybeCloseLostToSplice()
 
 	return moved, true
 }
@@ -491,6 +492,7 @@ func (c *chainWatcher) maybePublishSpliceCommitment() {
 		return
 	}
 	if !chanState.HasChanStatus(channeldb.ChanStatusCommitBroadcasted) {
+		c.maybeCloseLostToSplice()
 		return
 	}
 
@@ -539,6 +541,30 @@ func (c *chainWatcher) maybePublishSpliceCommitment() {
 	if tx, err := chanState.BroadcastedCommitment(); err == nil {
 		c.publishQuietly(tx)
 	}
+}
+
+// maybeCloseLostToSplice force closes a channel whose cooperative close a
+// splice beat: the peer, having dropped a splice after our tx_signatures, can
+// still publish it. The close can never confirm then. Force closed, the
+// arbitrator offers the anchors of our commitments, those on the splice's
+// output included, which goes out from here at the next block: published
+// alone, nothing would bump its fee. While the splice is unconfirmed the
+// close may still win, and nothing is done. Asked once per run: at a
+// restart the arbitrator, force closed since, refuses another.
+func (c *chainWatcher) maybeCloseLostToSplice() {
+	chanState := c.cfg.chanState
+	if c.splice == nil || c.closeLostAsked || c.cfg.forceClose == nil ||
+		!chanState.HasChanStatus(channeldb.ChanStatusCoopBroadcasted) ||
+		chanState.HasChanStatus(channeldb.ChanStatusCommitBroadcasted) {
+
+		return
+	}
+	c.closeLostAsked = true
+
+	log.Warnf("ChannelPoint(%v): splice %v confirmed in place of our "+
+		"cooperative close; force closing on it",
+		chanState.FundingOutpoint, c.splice.txid)
+	c.cfg.forceClose()
 }
 
 // publishQuietly publishes a transaction that may well be refused, another

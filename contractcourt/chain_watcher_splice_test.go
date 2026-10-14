@@ -471,6 +471,137 @@ func TestChainWatcherForceCloseAfterSplice(t *testing.T) {
 	}
 }
 
+// TestChainWatcherSpliceAfterCoopClose checks a cooperative close that lost
+// to a splice: the peer, dropping a splice after our tx_signatures, can still
+// publish it. Unconfirmed, the close may win and nothing is done; once the
+// splice confirms, the close never can, and the channel is force closed,
+// once: the arbitrator offers the anchors, and our commitment on the
+// splice's output goes out from the watcher.
+func TestChainWatcherSpliceAfterCoopClose(t *testing.T) {
+	t.Parallel()
+
+	h := newChainWatcherTestHarness(t, withRequiredConfs(1))
+	splice := pendSplice(t, h)
+
+	published := make(chan *wire.MsgTx, 2)
+	h.chainWatcher.cfg.publishTx = func(tx *wire.MsgTx, _ string) error {
+		published <- tx
+		return nil
+	}
+	forced := make(chan struct{}, 4)
+	h.chainWatcher.cfg.forceClose = func() { forced <- struct{}{} }
+
+	state := h.aliceChannel.State()
+	fundingOutpoint := state.FundingOutpoint
+	oldCommit := state.LocalCommitment.CommitTx
+	db := state.Db
+
+	beat := func() {
+		t.Helper()
+
+		b := &chainio.MockBlockbeat{}
+		b.On("logger").Return(log)
+		b.On("Height").Return(int32(1)).Maybe()
+		require.NoError(t, h.chainWatcher.ProcessBlock(b))
+	}
+	nothing := func(why string) {
+		t.Helper()
+
+		select {
+		case <-published:
+			t.Fatal(why)
+		case <-forced:
+			t.Fatal(why)
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+
+	closeTx := wire.NewMsgTx(2)
+	closeTx.AddTxIn(&wire.TxIn{PreviousOutPoint: fundingOutpoint})
+	require.NoError(t, state.MarkCoopBroadcasted(closeTx, lntypes.Local))
+
+	beat()
+	nothing("acted while the close may still confirm")
+
+	followSplice(t, h, splice)
+	select {
+	case <-forced:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no force close")
+	}
+	beat()
+	nothing("asked again, or published without the force close")
+
+	// The force close, as the arbitrator makes it on its own copy.
+	arbCopy, err := db.FetchChannel(fundingOutpoint)
+	require.NoError(t, err)
+	require.NoError(t, arbCopy.MarkCommitmentBroadcasted(
+		oldCommit, lntypes.Local,
+	))
+
+	beat()
+	var tx *wire.MsgTx
+	select {
+	case tx = <-published:
+	case <-time.After(5 * time.Second):
+		t.Fatal("nothing published")
+	}
+	require.Equal(t, wire.OutPoint{Hash: splice.TxHash()},
+		tx.TxIn[0].PreviousOutPoint)
+
+	prevOut := splice.TxOut[0]
+	fetcher := txscript.NewCannedPrevOutputFetcher(
+		prevOut.PkScript, prevOut.Value,
+	)
+	vm, err := txscript.NewEngine(
+		prevOut.PkScript, tx, 0, txscript.StandardVerifyFlags, nil,
+		txscript.NewTxSigHashes(tx, fetcher), prevOut.Value, fetcher,
+	)
+	require.NoError(t, err)
+	require.NoError(t, vm.Execute())
+}
+
+// TestChainWatcherSpliceAfterCoopThenForceClose checks a watcher started
+// after the force close a splice beating our cooperative close led to: our
+// commitment on the splice's output goes out, and no other force close is
+// asked.
+func TestChainWatcherSpliceAfterCoopThenForceClose(t *testing.T) {
+	t.Parallel()
+
+	h := newChainWatcherTestHarness(t, withRequiredConfs(1))
+	splice := pendSplice(t, h)
+
+	published := make(chan *wire.MsgTx, 2)
+	h.chainWatcher.cfg.publishTx = func(tx *wire.MsgTx, _ string) error {
+		published <- tx
+		return nil
+	}
+	forced := make(chan struct{}, 4)
+	h.chainWatcher.cfg.forceClose = func() { forced <- struct{}{} }
+
+	state := h.aliceChannel.State()
+	closeTx := wire.NewMsgTx(2)
+	closeTx.AddTxIn(&wire.TxIn{PreviousOutPoint: state.FundingOutpoint})
+	require.NoError(t, state.MarkCoopBroadcasted(closeTx, lntypes.Local))
+	require.NoError(t, state.MarkCommitmentBroadcasted(
+		state.LocalCommitment.CommitTx, lntypes.Local,
+	))
+
+	followSplice(t, h, splice)
+	select {
+	case tx := <-published:
+		require.Equal(t, wire.OutPoint{Hash: splice.TxHash()},
+			tx.TxIn[0].PreviousOutPoint)
+	case <-time.After(5 * time.Second):
+		t.Fatal("nothing published")
+	}
+	select {
+	case <-forced:
+		t.Fatal("force close asked again")
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
 // TestChainWatcherSecondSplice checks a splice of a channel a splice moved
 // while the watcher ran, the first one locked since, is followed too: not
 // taken for a spend it doesn't recognise. One taken for it before, by a

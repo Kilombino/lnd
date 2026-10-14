@@ -306,6 +306,10 @@ type chainWatcherConfig struct {
 	// notifySpentUnknown, if set, is told when the channel is first
 	// flagged for a spend of its funding output it doesn't recognise.
 	notifySpentUnknown func(chanPoint wire.OutPoint, txid chainhash.Hash)
+
+	// forceClose, if set, asks the channel's arbitrator to force close
+	// it, without waiting.
+	forceClose func()
 }
 
 // chainWatcher is a system that's assigned to every active channel. The duty
@@ -376,6 +380,11 @@ type chainWatcher struct {
 	// after a force close, so a block doesn't sign it again. Only the
 	// close observer uses it.
 	splicePublished chainhash.Hash
+
+	// closeLostAsked is set once a force close was asked for a channel
+	// whose cooperative close a splice beat. Only the close observer uses
+	// it.
+	closeLostAsked bool
 
 	// pendingSigned holds our commitments on unconfirmed splice
 	// transactions' outputs, signed once after a force close and
