@@ -862,7 +862,11 @@ func (m *Machine) watchInput(txid chainhash.Hash, op wire.OutPoint,
 			spendNtfn.Cancel()
 			return
 		}
+		// The splice itself. Declared dead before, a reorganisation
+		// took the conflicting spend out and put it in: followed
+		// again.
 		if *spend.SpenderTxHash == txid {
+			m.enqueue(func() { m.revive(txid) })
 			return
 		}
 
@@ -968,6 +972,58 @@ func (m *Machine) spliceDead(txid, conflict chainhash.Hash,
 	m.notify("dead", txid, reason, false)
 	m.report(Update{State: StateAborted, Txid: txid, Reason: reason})
 	m.setActive(nil)
+}
+
+// revive follows again a transaction of the splice recorded dead that
+// confirmed after all, a reorganisation having taken the conflicting spend
+// out: its funding stayed in the channel's set, signed for, so it locks as
+// any. Followed by nothing before, the channel never locked and kept
+// committing on an output already spent.
+func (m *Machine) revive(txid chainhash.Hash) {
+	records, err := m.cfg.Channel.State().SpliceRecords()
+	if err != nil {
+		log.Errorf("ChannelID(%v): unable to read splices: %v",
+			m.cfg.ChanID, err)
+		return
+	}
+	var rec *channeldb.SpliceRecord
+	for _, r := range records {
+		if r.Txid() == txid && !r.Retired {
+			rec = r
+		}
+	}
+	if rec == nil || rec.Negotiation == nil || !rec.Negotiation.Dead {
+		return
+	}
+	a, err := restoredActive(rec)
+	if err != nil {
+		log.Errorf("ChannelID(%v): unable to read splice %v: %v",
+			m.cfg.ChanID, txid, err)
+		return
+	}
+	err = m.cfg.Channel.State().UpdateSpliceRecord(txid,
+		func(r *channeldb.SpliceRecord) error {
+			r.Negotiation.Dead = false
+			return nil
+		})
+	if err != nil {
+		log.Errorf("ChannelID(%v): unable to revive splice %v: %v",
+			m.cfg.ChanID, txid, err)
+		return
+	}
+	delete(m.dead, txid)
+	a.phase = phasePending
+	log.Warnf("ChannelID(%v): splice %v recorded dead confirmed after "+
+		"all; followed again", m.cfg.ChanID, txid)
+
+	m.mu.Lock()
+	if m.active == nil {
+		m.active = a
+	} else {
+		m.active.replaced = append(m.active.replaced, a)
+	}
+	m.mu.Unlock()
+	m.watchConfirmationOf(a, m.heightHint(rec.Negotiation.BroadcastHeight))
 }
 
 // markDead records a transaction of the splice as dead. Its funding stays

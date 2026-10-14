@@ -1205,3 +1205,47 @@ func TestSpliceDeadForgottenAfterRestart(t *testing.T) {
 	}, 5*time.Second, 10*time.Millisecond)
 	require.Zero(t, p.alice.wallet.leaseCount())
 }
+
+// TestSpliceDeadRevived checks a splice recorded dead whose conflicting
+// spend a reorganisation takes out, the splice confirming in its place: both
+// sides follow it again and lock it. Nothing followed it before: the channel
+// never locked and kept committing on a spent output.
+func TestSpliceDeadRevived(t *testing.T) {
+	t.Parallel()
+
+	p := newSplicePair(t)
+	c := p.alice.fund(t, 1, 5_000_000)
+	capacity := p.alice.ch.State().Capacity
+	updates, err := p.alice.machine.Splice(Request{
+		Direction: DirectionIn, Amount: 1_000_000, FeeRate: 2_500,
+	})
+	require.NoError(t, err)
+	u := requireUpdates(t, updates, StatePreparing, StateNegotiating,
+		StateSigned, StateBroadcast)
+	spliceTx, err := p.alice.wallet.FetchTx(u.Txid)
+	require.NoError(t, err)
+
+	conflict := wire.NewMsgTx(2)
+	conflict.AddTxIn(&wire.TxIn{PreviousOutPoint: c.OutPoint})
+	conflict.AddTxOut(&wire.TxOut{Value: 4_000_000, PkScript: p2tr(3)})
+	p.chain.spend(t, c.OutPoint, conflict, 2)
+	p.chain.confirm(t, conflict.TxHash(), deadDepth, 2,
+		&chainntnfs.TxConfirmation{})
+	requireUpdates(t, updates, StateAborted)
+
+	// The conflicting spend reorged out; the splice confirms instead.
+	require.Eventually(t, func() bool {
+		return p.chain.registered(conflict.TxHash(), forgetDepth, 2)
+	}, 5*time.Second, 10*time.Millisecond)
+	p.chain.reorg(t, conflict.TxHash(), forgetDepth)
+	p.chain.spend(t, c.OutPoint, spliceTx, 2)
+	for _, n := range []*node{p.alice, p.bob} {
+		require.Eventually(t, func() bool {
+			recs, err := n.ch.State().SpliceRecords()
+			return err == nil && len(recs) == 1 &&
+				!recs[0].Negotiation.Dead
+		}, 5*time.Second, 10*time.Millisecond)
+	}
+	p.confirm(t, u.Txid)
+	p.requireMoved(t, u.Txid, capacity+1_000_000)
+}
