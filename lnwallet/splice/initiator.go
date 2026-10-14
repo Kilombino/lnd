@@ -257,8 +257,7 @@ func (m *Machine) prepareFunds(a *active, req Request) error {
 
 		// With change, an output of ours, the construction wants
 		// our balance at the reserve on the new capacity.
-		balance := m.cfg.Channel.State().LocalCommitment.LocalBalance.
-			ToSatoshis()
+		balance, _ := m.ourBalance()
 		if sel.Change > 0 && !keepsSpliceReserve(
 			balance, capacity, sel.Contribution,
 		) {
@@ -315,16 +314,21 @@ func (m *Machine) maxOut(shape Shape, destScript []byte,
 	feeRate chainfee.SatPerKWeight) btcutil.Amount {
 
 	fee, _ := MoveOutFee(shape, destScript, feeRate)
-	state := m.cfg.Channel.State()
 	most := min(
 		m.cfg.Channel.AvailableBalance().ToSatoshis(),
-		maxOutKeepingReserve(
-			state.LocalCommitment.LocalBalance.ToSatoshis(),
-			state.Capacity,
-		),
+		maxOutKeepingReserve(m.ourBalance()),
 	)
 
 	return max(0, most-fee)
+}
+
+// ourBalance returns our balance on the channel's current commitment and
+// its capacity, read under the channel's lock: before quiescence the link
+// may be updating them.
+func (m *Machine) ourBalance() (btcutil.Amount, btcutil.Amount) {
+	snap := m.cfg.Channel.StateSnapshot()
+
+	return snap.LocalBalance.ToSatoshis(), snap.Capacity
 }
 
 // checkMoveOut checks a negative contribution against what we can send:
@@ -338,10 +342,7 @@ func (m *Machine) checkMoveOut(contribution btcutil.Amount) error {
 	}
 
 	// And the reserve on the new capacity the construction keeps.
-	state := m.cfg.Channel.State()
-	keep := maxOutKeepingReserve(
-		state.LocalCommitment.LocalBalance.ToSatoshis(), state.Capacity,
-	)
+	keep := maxOutKeepingReserve(m.ourBalance())
 	if -contribution > keep {
 		return refused("above_max_out", "%v out, %v keeping the "+
 			"reserve on the new capacity", -contribution, keep)
@@ -378,6 +379,15 @@ func (m *Machine) quiesced(a *active,
 		// resumed here, which would end it under the peer's
 		// splice_init.
 		m.failOurs(codeNotQuiescent, "the peer started quiescence")
+
+		return
+	}
+
+	// A close begun while we waited: BOLT 2 allows no splice from then
+	// on.
+	if state := m.cfg.Channel.State(); shutdownSent(state) {
+		m.failOurs(codeClosing, "")
+		m.endQuiescence(codeClosing)
 
 		return
 	}

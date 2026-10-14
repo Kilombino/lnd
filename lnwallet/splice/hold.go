@@ -51,6 +51,16 @@ func (m *Machine) LockComing(txid chainhash.Hash) bool {
 	return a.lockedReceived || a.txid == txid
 }
 
+// Busy reports whether a splice is under way, from its preparation on, also
+// while ours waits for quiescence: a cooperative close then would race it.
+// Safe from any goroutine.
+func (m *Machine) Busy() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.active != nil
+}
+
 // Constructing reports whether a splice's transaction is being negotiated,
 // or agreed and not yet added to the channel's fundings: a commitment_signed
 // naming a funding the channel doesn't have may be its own. Safe from any

@@ -657,3 +657,41 @@ func TestTxSignaturesResentOnce(t *testing.T) {
 		}
 	}
 }
+
+// TestSpliceShutdownWhileQuiescing checks our splice waiting for quiescence
+// while a cooperative close begins: once quiescent, it fails with a
+// tx_abort for the peer and the channel resumes, rather than a splice_init
+// following our shutdown, which BOLT 2 forbids.
+func TestSpliceShutdownWhileQuiescing(t *testing.T) {
+	t.Parallel()
+
+	alice, _ := soloAlice(t)
+	alice.link.stfuGate = make(chan struct{})
+	updates, err := alice.machine.Splice(Request{
+		Direction: DirectionOut, Amount: 100_000, FeeRate: 2_500,
+		Destination: p2tr(1),
+	})
+	require.NoError(t, err)
+	requireUpdates(t, updates, StatePreparing)
+	require.True(t, alice.machine.Busy())
+
+	require.NoError(t, alice.ch.State().MarkShutdownSent(
+		channeldb.NewShutdownInfo(p2tr(2), true),
+	))
+	close(alice.link.stfuGate)
+
+	u := requireUpdates(t, updates, StateAborted)
+	require.Contains(t, u.Reason, codeClosing)
+	select {
+	case msg := <-alice.peer.msgs:
+		require.IsType(t, &lnwire.TxAbort{}, msg)
+	case <-time.After(5 * time.Second):
+		t.Fatal("nothing sent")
+	}
+	select {
+	case <-alice.link.resumed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("not resumed")
+	}
+	require.False(t, alice.machine.Busy())
+}

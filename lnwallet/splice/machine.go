@@ -63,6 +63,10 @@ type Channel interface {
 	// State returns the channel's persisted state.
 	State() *channeldb.OpenChannel
 
+	// StateSnapshot copies the channel's state under its lock: read
+	// before quiescence, the link may be changing it.
+	StateSnapshot() *channeldb.ChannelSnapshot
+
 	// PendingFundings returns the channel's pending splices.
 	PendingFundings() []lnwallet.PendingFunding
 

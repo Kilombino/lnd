@@ -51,7 +51,7 @@ func (p *Brontide) spliceUnlocked(chanID lnwire.ChannelID) bool {
 	// closing would race the splice, both transactions signed.
 	m, ok := p.SpliceMachine(chanID)
 
-	return ok && m.Constructing()
+	return ok && m.Busy()
 }
 
 // spliceNegotiated reports whether splicing applies to this connection: we
