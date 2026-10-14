@@ -787,8 +787,30 @@ func (m *Machine) currentFunding() (wire.OutPoint, btcutil.Amount, []byte,
 // setMisbehaved refuses the peer's splices on the channel from now on, on
 // this connection and the next ones.
 func (m *Machine) setMisbehaved() {
+	m.mu.Lock()
 	m.misbehaved = true
+	m.mu.Unlock()
 	m.cfg.Limits.markMisbehaved(m.cfg.ChanID)
+}
+
+// Refusal returns why a splice of ours would be refused now that the
+// channel's own state doesn't show: the peer broke an earlier splice, or the
+// chain isn't synced. "" otherwise. Safe from any goroutine: the estimate
+// tells it before the user starts one.
+func (m *Machine) Refusal() string {
+	m.mu.Lock()
+	misbehaved := m.misbehaved
+	m.mu.Unlock()
+
+	switch {
+	case misbehaved || m.cfg.Limits.isMisbehaved(m.cfg.ChanID):
+		return codePeerMisbehaved
+
+	case m.cfg.Chain != nil && !m.cfg.Chain.Synced():
+		return codeChainNotSynced
+	}
+
+	return ""
 }
 
 // spliceable returns why the channel can't be spliced now, or "".

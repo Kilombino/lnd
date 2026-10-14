@@ -74,13 +74,26 @@ var spliceCommand = cli.Command{
 			Usage: "Show what a splice would cost and allow, " +
 				"without starting it.",
 			ArgsUsage: "--chan_point=X in|out --amt=N | --max",
-			Flags: append(spliceFlags, cli.StringFlag{
+			Flags: append(estimateFlags(), cli.StringFlag{
 				Name:  "addr",
 				Usage: "for out: where the funds would go",
 			}),
 			Action: actionDecorator(spliceEstimate),
 		},
 	},
+}
+
+// estimateFlags are the splice flags an estimate takes: all but
+// force_low_fee, which it can't carry; an estimate below the floor says so.
+func estimateFlags() []cli.Flag {
+	var flags []cli.Flag
+	for _, f := range spliceFlags {
+		if f.GetName() != "force_low_fee" {
+			flags = append(flags, f)
+		}
+	}
+
+	return flags
 }
 
 // spliceChanPoint parses the --chan_point flag.

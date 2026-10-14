@@ -224,3 +224,22 @@ func TestAcceptSpliceLimitsRestart(t *testing.T) {
 	require.Zero(t, limits.recentAborts(h.machine.cfg.ChanID))
 	limits.mu.Unlock()
 }
+
+// TestRefusal checks what a splice of ours would be refused for that the
+// channel's state doesn't show, told to the estimate before the user starts
+// one: the peer marked for breaking an earlier splice, and the chain behind.
+func TestRefusal(t *testing.T) {
+	t.Parallel()
+
+	h := newAcceptorHarness(t)
+	limits := NewLimits()
+	h.machine.cfg.Limits = limits
+	require.Empty(t, h.machine.Refusal())
+
+	h.chain.behind.Store(true)
+	require.Equal(t, codeChainNotSynced, h.machine.Refusal())
+	h.chain.behind.Store(false)
+
+	limits.markMisbehaved(h.machine.cfg.ChanID)
+	require.Equal(t, codePeerMisbehaved, h.machine.Refusal())
+}

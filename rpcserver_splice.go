@@ -118,6 +118,9 @@ func (r *rpcServer) spliceStatus(
 	if !ok {
 		return spliceStatusPeerUnsupported, nil
 	}
+	if code := m.Refusal(); code != "" {
+		return code, nil
+	}
 
 	// Said, but no reason not to splice: the peer's missing half of the
 	// last announcement doesn't stop another splice.
