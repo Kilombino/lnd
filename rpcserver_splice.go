@@ -512,17 +512,12 @@ func (r *rpcServer) addSpliceFields(ch *channeldb.OpenChannel,
 	// shown (shownSplice). What we can count on is the least on any of
 	// them.
 	latest := shownSplice(records)
-	for _, rec := range records {
-		if rec.Retired {
-			continue
-		}
-		if rec.LocalCommit != nil {
-			local := int64(rec.LocalCommit.LocalBalance.ToSatoshis())
-			if local < channel.LocalBalance {
-				channel.LocalBalance = local
-			}
-		}
-	}
+	least := leastCandidateBalance(
+		records, lnwire.NewMSatFromSatoshis(
+			btcutil.Amount(channel.LocalBalance),
+		),
+	)
+	channel.LocalBalance = int64(least.ToSatoshis())
 	if latest != nil {
 		channel.PendingSplice = rpcPendingSplice(latest)
 		if spliceWentOut(latest) {
@@ -716,6 +711,24 @@ func setSpliceDepth(ps *lnrpc.PendingSplice, confs, lockDepth uint32) {
 	}
 }
 
+// leastCandidateBalance returns the least of local and our balance on each
+// pending splice's commitment: what we can count on whichever confirms. A
+// dead one never will, and a close pays out the current funding's balance.
+func leastCandidateBalance(records []*channeldb.SpliceRecord,
+	local lnwire.MilliSatoshi) lnwire.MilliSatoshi {
+
+	least := local
+	for _, rec := range records {
+		dead := rec.Negotiation != nil && rec.Negotiation.Dead
+		if rec.Retired || dead || rec.LocalCommit == nil {
+			continue
+		}
+		least = min(least, rec.LocalCommit.LocalBalance)
+	}
+
+	return least
+}
+
 // shownSplice returns the record of the splice transaction shown for a
 // channel: of those not retired, one that can still confirm before a dead
 // one, then the highest fee rate, the latest.
@@ -831,20 +844,8 @@ func (r *rpcServer) addSpliceBalances(channels []*channeldb.OpenChannel,
 			toWallet += recToWallet
 		}
 
-		var least lnwire.MilliSatoshi
-		for _, rec := range records {
-			if rec.Retired {
-				continue
-			}
-			if rec.LocalCommit != nil {
-				local := ch.LocalCommitment.LocalBalance
-				cand := rec.LocalCommit.LocalBalance
-				if cand < local && local-cand > least {
-					least = local - cand
-				}
-			}
-		}
-		lower += least
+		local := ch.LocalCommitment.LocalBalance
+		lower += local - leastCandidateBalance(records, local)
 	}
 
 	resp.PendingSpliceInSat = int64(in)

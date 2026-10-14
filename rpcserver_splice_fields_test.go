@@ -223,3 +223,32 @@ func TestSpliceOverdue(t *testing.T) {
 	require.False(t, spliceOverdue(77, 0, spliceAnnounceGrace))
 	require.True(t, spliceOverdue(78, 0, spliceAnnounceGrace))
 }
+
+// TestLeastCandidateBalance checks the balance a channel with splices pending
+// reports: the least on any funding that can still confirm, a dead splice's
+// left out, as a close pays out the current funding's.
+func TestLeastCandidateBalance(t *testing.T) {
+	t.Parallel()
+
+	rec := func(local lnwire.MilliSatoshi, dead,
+		retired bool) *channeldb.SpliceRecord {
+
+		return &channeldb.SpliceRecord{
+			Retired: retired,
+			LocalCommit: &channeldb.ChannelCommitment{
+				LocalBalance: local,
+			},
+			Negotiation: &channeldb.SpliceNegotiation{Dead: dead},
+		}
+	}
+	require.EqualValues(t, 5_000, leastCandidateBalance(nil, 5_000))
+	require.EqualValues(t, 3_000, leastCandidateBalance(
+		[]*channeldb.SpliceRecord{rec(3_000, false, false)}, 5_000,
+	))
+	require.EqualValues(t, 5_000, leastCandidateBalance(
+		[]*channeldb.SpliceRecord{
+			rec(1_000, true, false), rec(2_000, false, true),
+			rec(9_000, false, false),
+		}, 5_000,
+	))
+}
