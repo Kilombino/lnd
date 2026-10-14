@@ -4,6 +4,7 @@
 package bridgerpc
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -42,12 +43,17 @@ type fakeNode struct {
 
 	lookup    PaymentStatus
 	lookupErr error
+
+	// held is the last hold invoice the bridge asked for.
+	held *HoldInvoiceRequest
 }
 
 func (f *fakeNode) deps() *Deps {
 	return &Deps{
-		AddHoldInvoice: func(context.Context, HoldInvoiceRequest) (
+		AddHoldInvoice: func(_ context.Context, req HoldInvoiceRequest) (
 			string, error) {
+
+			f.held = &req
 
 			return "lnbcrt1payme", nil
 		},
@@ -625,5 +631,32 @@ func TestLocalNotSentAndUnpayable(t *testing.T) {
 	err = NewLocal(deps).Payable(context.Background(), "lnbcrt1x")
 	if err == nil || !strings.Contains(err.Error(), "AMP") {
 		t.Fatalf("got %v, want a refusal to quote", err)
+	}
+}
+
+// TestAddHoldInvoiceCarriesMetadata: the destination invoice's payment
+// metadata reaches the node with the rest of the hold invoice, unchanged.
+func TestAddHoldInvoiceCarriesMetadata(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeNode{}
+	metadata := []byte{0x01, 0xfa, 0xfa, 0xf0}
+	_, err := local(f).AddHoldInvoice(context.Background(), node.HoldInvoice{
+		Hash: hash8(2), AmountMsat: 1000, CLTVDelta: 400,
+		Expiry: time.Minute, Memo: "a coffee", Metadata: metadata,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.held == nil {
+		t.Fatal("the node was not asked")
+	}
+	if !bytes.Equal(f.held.Metadata, metadata) {
+		t.Errorf("metadata %x, want %x", f.held.Metadata, metadata)
+	}
+	if f.held.Hash != hash8(2) || f.held.AmountMsat != 1000 ||
+		f.held.Memo != "a coffee" {
+
+		t.Errorf("the rest of the request changed: %+v", f.held)
 	}
 }

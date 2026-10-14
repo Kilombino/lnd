@@ -107,6 +107,7 @@ func (l *Local) AddHoldInvoice(ctx context.Context, req node.HoldInvoice) (
 		CLTVDelta:  req.CLTVDelta,
 		Expiry:     req.Expiry,
 		Memo:       req.Memo,
+		Metadata:   req.Metadata,
 	})
 }
 
