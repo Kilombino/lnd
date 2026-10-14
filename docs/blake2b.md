@@ -533,7 +533,10 @@ its old size, but no new splice can start, and what the splice was moving
 out of this node's balance can't be sent in payments meanwhile. A
 cooperative close works and pays out the full balance. If a
 reorganisation takes the other transaction out and the splice confirms
-after all, it locks as any.
+after all, it locks as any. A splice the peer abandons after this node
+signed it, before signing it itself, is shown and handled the same way:
+kept, as the peer could still publish it, and ended by a cooperative
+close.
 
 **A stuck splice.** A splice transaction is offered to the backend again
 at every block until it confirms. If its fee rate is too low to confirm,
