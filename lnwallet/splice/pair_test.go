@@ -1396,3 +1396,53 @@ func TestSpliceDeadRevivedAfterRestart(t *testing.T) {
 	})
 	p.requireMoved(t, u.Txid, capacity+1_000_000)
 }
+
+// TestSpliceSigningFailsForGood checks a failure to sign after the peer's
+// tx_signatures that never ends: retried at each reconnection for a day after
+// the agreement, then force closed, our tx_signatures never out and our
+// commitment on the current funding current.
+func TestSpliceSigningFailsForGood(t *testing.T) {
+	t.Parallel()
+
+	p := newSplicePair(t)
+	p.alice.fund(t, 1, 5_000_000)
+	p.alice.machine.cfg.Signer = &wrongDigestSigner{p.alice.signer}
+	closes := make(chan bool, 4)
+	p.alice.machine.enqueue(func() {
+		p.alice.machine.cfg.Close = func(force bool) { closes <- force }
+	})
+
+	updates, err := p.alice.machine.Splice(Request{
+		Direction: DirectionIn, Amount: 1_000_000, FeeRate: 2_500,
+	})
+	require.NoError(t, err)
+	requireUpdates(t, updates, StatePreparing, StateNegotiating)
+	require.Eventually(t, func() bool {
+		p.alice.peer.mu.Lock()
+		defer p.alice.peer.mu.Unlock()
+
+		return p.alice.peer.disconnected != nil
+	}, 5*time.Second, 10*time.Millisecond)
+	select {
+	case <-closes:
+		t.Fatal("closed at the first failure")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	txid := p.bob.ch.PendingFundings()[0].OutPoint.Hash
+	p.alice.machine.enqueue(func() {
+		p.alice.machine.active.agreedAt = time.Now().Add(
+			-signingGiveUp - time.Minute,
+		)
+	})
+	p.alice.machine.HandleReestablish(&lnwire.ChannelReestablish{
+		NextFunding: fn.Some(lnwire.FundingTxidFlags{Txid: txid}),
+	})
+	select {
+	case force := <-closes:
+		require.True(t, force)
+	case <-time.After(5 * time.Second):
+		t.Fatal("no close")
+	}
+	require.Empty(t, p.alice.wallet.publishedTxs())
+}

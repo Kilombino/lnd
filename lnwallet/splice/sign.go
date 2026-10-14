@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"sync/atomic"
+	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
@@ -61,11 +62,31 @@ func (m *Machine) signingFailed(err error) {
 		return
 	}
 
+	// Failing for good (a remote signer with the wrong key, say): the
+	// channel would stay quiescent with no end. Our tx_signatures never
+	// left, so nobody can publish the splice, and our commitment on the
+	// current funding is current: force closed.
+	a := m.active
+	if !a.agreedAt.IsZero() && time.Since(a.agreedAt) > signingGiveUp &&
+		m.cfg.Close != nil {
+
+		log.Errorf("ChannelID(%v): unable to sign splice %v for over "+
+			"%v; force closing: %v", m.cfg.ChanID, a.txid,
+			signingGiveUp, err)
+		m.cfg.Close(true)
+
+		return
+	}
+
 	log.Errorf("ChannelID(%v): unable to sign splice %v, the peer's "+
 		"tx_signatures in; trying again on reconnecting: %v",
-		m.cfg.ChanID, m.active.txid, err)
+		m.cfg.ChanID, a.txid, err)
 	m.cfg.Peer.Disconnect(fmt.Errorf("unable to sign splice: %w", err))
 }
+
+// signingGiveUp is how long after a splice's agreement we keep failing to
+// sign it, the peer's tx_signatures in, before force closing.
+const signingGiveUp = 24 * time.Hour
 
 // signsFirst reports whether we send tx_signatures first.
 func (m *Machine) signsFirst() bool {
