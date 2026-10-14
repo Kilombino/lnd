@@ -1980,6 +1980,18 @@ func (l *channelLink) cleanupSpuriousResponse(pkt *htlcPacket) {
 func (l *channelLink) handleUpstreamMsg(ctx context.Context,
 	msg lnwire.Message) {
 
+	// The peer's tx_signatures or tx_abort, behind updates held for the
+	// end of our quiescence, is what ends it: taken now. A peer done
+	// signing may resend them after its updates on reconnecting, and
+	// held behind them, they'd never come.
+	_, sigs := msg.(*lnwire.TxSignatures)
+	_, abort := msg.(*lnwire.TxAbort)
+	if l.heldForResume() && (sigs || abort) {
+		l.processUpstreamMsg(ctx, msg)
+
+		return
+	}
+
 	// Behind a held message: in order, after it.
 	if len(l.held) > 0 {
 		if len(l.held) >= maxHeldMessages {
@@ -2025,6 +2037,17 @@ func (l *channelLink) heldTimeout() <-chan time.Time {
 	}
 
 	return l.heldTimer.C
+}
+
+// heldForResume reports whether the messages held start with an update
+// waiting for our quiescence to end, the peer's having ended (peerTxSigs).
+func (l *channelLink) heldForResume() bool {
+	if len(l.held) == 0 || !l.peerTxSigs || l.quiescer.CanRecvUpdates() {
+		return false
+	}
+	_, isSig := l.held[0].(*lnwire.CommitSig)
+
+	return !isSig && l.held[0].MsgType().IsChannelUpdate()
 }
 
 // replayHeld takes up the held messages in order, until one must wait

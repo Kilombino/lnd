@@ -1539,3 +1539,73 @@ func TestLinkUpdateAfterPeerLockBeforeOurs(t *testing.T) {
 	require.NoError(t, <-s.link.LockSplice(txid, scid))
 	s.requireNoFailure(t)
 }
+
+// TestLinkTxSignaturesPastHeldUpdates checks a reconnection on which we are
+// still signing and the peer, done, sends its updates before its
+// tx_signatures, sent again: the updates wait for our quiescence to end,
+// and the tx_signatures, which end it, reach the machine rather than
+// waiting behind them for good.
+func TestLinkTxSignaturesPastHeldUpdates(t *testing.T) {
+	t.Parallel()
+
+	alice, bob, err := createMirroredChannel(
+		t, btcutil.SatoshiPerBitcoin*3, btcutil.SatoshiPerBitcoin*5,
+	)
+	require.NoError(t, err)
+	const added = btcutil.SatoshiPerBitcoin
+	txid := pendSplice(t, alice.channel, bob.channel, added)
+	original := alice.channel.State().FundingOutpoint.Hash
+
+	aliceHandler := &recordingSpliceHandler{
+		nextFunding: fn.Some(lnwire.FundingTxidFlags{Txid: txid}),
+		fundingLocked: fn.Some(lnwire.FundingTxidFlags{
+			Txid: original,
+		}),
+		signing: true,
+	}
+	bobHandler := &recordingSpliceHandler{
+		fundingLocked: fn.Some(lnwire.FundingTxidFlags{
+			Txid: original,
+		}),
+	}
+	n := newTwoHopNetworkStopped(
+		t, alice.channel, bob.channel, testStartingHeight,
+		func(c *ChannelLinkConfig) { c.SpliceHandler = aliceHandler },
+		func(c *ChannelLinkConfig) { c.SpliceHandler = bobHandler },
+	)
+	require.NoError(t, n.aliceServer.Start())
+	require.NoError(t, n.bobServer.Start())
+	require.Eventually(t, n.aliceChannelLink.quiescer.IsQuiescent,
+		5*time.Second, 20*time.Millisecond)
+	require.Eventually(t, n.bobChannelLink.EligibleToForward,
+		5*time.Second, 20*time.Millisecond)
+
+	// Bob pays Alice: his update and commitment reach her first.
+	amount := lnwire.NewMSatFromSatoshis(2_000_000)
+	htlcAmt, totalTimelock, hops := generateHops(
+		amount, testStartingHeight, n.aliceChannelLink,
+	)
+	_ = makePayment(
+		n.bobServer, n.aliceServer, n.aliceChannelLink.ShortChanID(),
+		hops, amount, htlcAmt, totalTimelock,
+	)
+	time.Sleep(500 * time.Millisecond)
+
+	// Then Bob's tx_signatures, sent again by his machine.
+	n.aliceChannelLink.HandleChannelUpdate(&lnwire.TxSignatures{
+		ChannelID: n.aliceChannelLink.ChanID(), TxID: txid,
+	})
+	got := false
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && !got {
+		aliceHandler.mu.Lock()
+		for _, m := range aliceHandler.messages {
+			if _, ok := m.(*lnwire.TxSignatures); ok {
+				got = true
+			}
+		}
+		aliceHandler.mu.Unlock()
+		time.Sleep(50 * time.Millisecond)
+	}
+	require.True(t, got, "tx_signatures stuck behind held updates")
+}
