@@ -1196,6 +1196,44 @@ func TestLinkHoldKeepsCloseDisable(t *testing.T) {
 	require.False(t, s.link.EligibleToForward())
 }
 
+// TestLinkTxAbortAppliesReserves checks a tx_abort applies a spliced
+// channel's reserves at once, before the peer's next message: the Core
+// Lightning port's channel process restarts after the exchange, reading them
+// anew, and its next update may follow straight away.
+func TestLinkTxAbortAppliesReserves(t *testing.T) {
+	t.Parallel()
+
+	s := newSpliceLinkHarness(t)
+	txid := pendSplice(t, s.link.channel, s.bob, 50_000_000)
+	scid := lnwire.ShortChannelID{BlockHeight: 900_000, TxIndex: 1}
+	require.NoError(t, <-s.link.LockSplice(txid, scid))
+
+	reserves := func() (btcutil.Amount, btcutil.Amount) {
+		var local, remote btcutil.Amount
+		require.NoError(t, <-s.link.runSpliceReq(
+			func(context.Context) error {
+				state := s.link.channel.State()
+				local = state.LocalChanCfg.ChanReserve
+				remote = state.RemoteChanCfg.ChanReserve
+
+				return nil
+			},
+		))
+
+		return local, remote
+	}
+	want, ok := s.link.channel.State().SpliceReserve()
+	require.True(t, ok)
+	local, _ := reserves()
+	require.NotEqual(t, want, local, "the lock alone changes them")
+
+	s.link.HandleChannelUpdate(&lnwire.TxAbort{ChannelID: s.link.ChanID()})
+	require.Eventually(t, func() bool {
+		local, remote := reserves()
+		return local == want && remote == want
+	}, 5*time.Second, 10*time.Millisecond)
+}
+
 // quiesce makes the harness's link quiescent, Alice asking.
 func quiesce(t *testing.T, s *spliceLinkHarness) {
 	t.Helper()

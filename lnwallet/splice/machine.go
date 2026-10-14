@@ -60,10 +60,6 @@ type Link interface {
 	// HoldUpdates stops our updates on the channel until a splice locks:
 	// no HTLC forwarded into it, no update_fee.
 	HoldUpdates() <-chan error
-
-	// ApplySpliceReserves sets a spliced channel's reserves to those
-	// after its splices, as the peer's process reads them anew.
-	ApplySpliceReserves() <-chan error
 }
 
 // Channel is the channel's state machine as the machine reads it.
@@ -354,6 +350,10 @@ type active struct {
 
 	// deadlineWatched is set once watchDisownedDeadline runs for it.
 	deadlineWatched bool
+
+	// signFailedAt is when we first failed to sign it, the peer's
+	// tx_signatures in (SignFailedAt in the record).
+	signFailedAt time.Time
 
 	// inputsWatched is set once the transaction's inputs are watched for
 	// a spend by another.

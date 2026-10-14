@@ -65,9 +65,6 @@ type testLink struct {
 	resumed  chan struct{}
 	held     atomic.Bool
 
-	// reservesApplied counts ApplySpliceReserves calls.
-	reservesApplied atomic.Int32
-
 	// mu guards initiator, which a test may change.
 	mu sync.Mutex
 }
@@ -100,12 +97,6 @@ func (l *testLink) InitStfu() <-chan fn.Result[lntypes.ChannelParty] {
 	}()
 
 	return c
-}
-
-func (l *testLink) ApplySpliceReserves() <-chan error {
-	l.reservesApplied.Add(1)
-
-	return done(nil)
 }
 
 func (l *testLink) HoldUpdates() <-chan error {
@@ -1240,24 +1231,6 @@ func TestAcceptSpliceAborts(t *testing.T) {
 		})
 		next[*lnwire.TxAbort](t, h)
 		requireResumed(t, h)
-	})
-
-	// Every tx_abort, the peer's or the echo of ours, ends an exchange
-	// after which the Core Lightning port's channel process restarts,
-	// reading a spliced channel's reserves anew: the link applies them.
-	t.Run("reserves applied", func(t *testing.T) {
-		t.Parallel()
-
-		h := newAcceptorHarness(t)
-		startAliceSplice(t, h, 10_000_000, 2_500)
-		before := h.link.reservesApplied.Load()
-		h.machine.HandleSpliceMessage(&lnwire.TxAbort{
-			ChannelID: h.machine.cfg.ChanID, Data: []byte("bye"),
-		})
-		next[*lnwire.TxAbort](t, h)
-		require.Eventually(t, func() bool {
-			return h.link.reservesApplied.Load() == before+1
-		}, 5*time.Second, 10*time.Millisecond)
 	})
 
 	t.Run("after the commitments, before our signatures",

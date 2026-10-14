@@ -337,6 +337,14 @@ func (l *channelLink) handleSpliceCommitSig(msg *lnwire.CommitSig) {
 
 // handleSpliceMessage hands a splice message to the splice machine.
 func (l *channelLink) handleSpliceMessage(msg lnwire.Message) {
+	// A tx_abort, the peer's or the echo of ours, ends an exchange after
+	// which the Core Lightning port's channel process restarts, reading a
+	// spliced channel's reserves anew: applied here, before the peer's
+	// next message is read, which may come at once.
+	if _, ok := msg.(*lnwire.TxAbort); ok {
+		l.channel.ApplySpliceReserves()
+	}
+
 	if l.cfg.SpliceHandler == nil {
 		if !l.unknownMessageLogged {
 			l.log.Warnf("received %T without splicing enabled",
@@ -477,17 +485,6 @@ func (l *channelLink) HoldUpdates() <-chan error {
 	})
 }
 
-// ApplySpliceReserves sets a spliced channel's reserves to those after its
-// splices, on the link's goroutine: the peer's channel process reads them
-// anew after a tx_abort exchange.
-func (l *channelLink) ApplySpliceReserves() <-chan error {
-	return l.runSpliceReq(func(context.Context) error {
-		l.channel.ApplySpliceReserves()
-
-		return nil
-	})
-}
-
 // holdSpliceUpdates holds our updates, once. Adds are disabled, unless a
 // close disabled them already, which the release then leaves as it is.
 func (l *channelLink) holdSpliceUpdates() {
@@ -594,7 +591,6 @@ type SpliceLink interface {
 	LockSplice(txid chainhash.Hash, scid lnwire.ShortChannelID) <-chan error
 	RemoveSpliceFunding(txid chainhash.Hash) <-chan error
 	HoldUpdates() <-chan error
-	ApplySpliceReserves() <-chan error
 }
 
 // A compile time check that the link can splice.

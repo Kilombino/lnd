@@ -185,6 +185,16 @@ func (c *OpenChannel) SpliceReserve() (btcutil.Amount, bool) {
 	return max(c.Capacity/100, dust), true
 }
 
+// SetReserves sets both sides' channel reserve, in memory: a spliced
+// channel's, as SpliceReserve returns them.
+func (c *OpenChannel) SetReserves(reserve btcutil.Amount) {
+	c.Lock()
+	defer c.Unlock()
+
+	c.LocalChanCfg.ChanReserve = reserve
+	c.RemoteChanCfg.ChanReserve = reserve
+}
+
 // applySpliceLock sets a splice lock's fields on a channel.
 func applySpliceLock(c *OpenChannel, l SpliceLock) {
 	c.spliceFunding = fn.Some(l.Funding)

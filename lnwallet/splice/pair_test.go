@@ -1398,9 +1398,10 @@ func TestSpliceDeadRevivedAfterRestart(t *testing.T) {
 }
 
 // TestSpliceSigningFailsForGood checks a failure to sign after the peer's
-// tx_signatures that never ends: retried at each reconnection for a day after
-// the agreement, then force closed, our tx_signatures never out and our
-// commitment on the current funding current.
+// tx_signatures that never ends: retried at each reconnection, then, a day
+// after the first failure (recorded, so it survives reconnections), force
+// closed, our tx_signatures never out. An old agreement alone doesn't count:
+// a node down for days would close at its first transient failure.
 func TestSpliceSigningFailsForGood(t *testing.T) {
 	t.Parallel()
 
@@ -1411,7 +1412,6 @@ func TestSpliceSigningFailsForGood(t *testing.T) {
 	p.alice.machine.enqueue(func() {
 		p.alice.machine.cfg.Close = func(force bool) { closes <- force }
 	})
-
 	updates, err := p.alice.machine.Splice(Request{
 		Direction: DirectionIn, Amount: 1_000_000, FeeRate: 2_500,
 	})
@@ -1423,21 +1423,37 @@ func TestSpliceSigningFailsForGood(t *testing.T) {
 
 		return p.alice.peer.disconnected != nil
 	}, 5*time.Second, 10*time.Millisecond)
-	select {
-	case <-closes:
-		t.Fatal("closed at the first failure")
-	case <-time.After(200 * time.Millisecond):
-	}
 
 	txid := p.bob.ch.PendingFundings()[0].OutPoint.Hash
+	retry := func() {
+		p.alice.machine.HandleReestablish(&lnwire.ChannelReestablish{
+			NextFunding: fn.Some(lnwire.FundingTxidFlags{Txid: txid}),
+		})
+	}
+
+	// The first failure is recorded.
+	recs, err := p.alice.ch.State().SpliceRecords()
+	require.NoError(t, err)
+	require.NotZero(t, recs[0].Negotiation.SignFailedAt)
+
+	// Agreed two days ago, failing only since now: not closed.
 	p.alice.machine.enqueue(func() {
-		p.alice.machine.active.agreedAt = time.Now().Add(
+		p.alice.machine.active.agreedAt = time.Now().Add(-48 * time.Hour)
+	})
+	retry()
+	select {
+	case <-closes:
+		t.Fatal("closed at the first failures")
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	// Failing for over a day: force closed.
+	p.alice.machine.enqueue(func() {
+		p.alice.machine.active.signFailedAt = time.Now().Add(
 			-signingGiveUp - time.Minute,
 		)
 	})
-	p.alice.machine.HandleReestablish(&lnwire.ChannelReestablish{
-		NextFunding: fn.Some(lnwire.FundingTxidFlags{Txid: txid}),
-	})
+	retry()
 	select {
 	case force := <-closes:
 		require.True(t, force)

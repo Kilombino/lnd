@@ -134,6 +134,11 @@ type SpliceNegotiation struct {
 	// signing deadline runs from it across restarts. Zero if not known.
 	AgreedAt int64
 
+	// SignFailedAt is when we first failed to sign the transaction, the
+	// peer's tx_signatures in, in Unix seconds: retried at each
+	// reconnection, it is given up on a while after that.
+	SignFailedAt int64
+
 	// Inputs describe the transaction's inputs in its order, which
 	// signing and checking the peer's signatures need after a restart.
 	Inputs []SpliceInput
@@ -188,6 +193,7 @@ const (
 	negOurOutputsType      tlv.Type = 9
 	negLockedScidType      tlv.Type = 11
 	negAgreedAtType        tlv.Type = 13
+	negSignFailedAtType    tlv.Type = 15
 )
 
 // encode serializes a negotiation as a TLV stream.
@@ -329,6 +335,12 @@ func (n *SpliceNegotiation) encode(w io.Writer) error {
 			negAgreedAtType, &agreed,
 		))
 	}
+	if n.SignFailedAt > 0 {
+		failed := uint64(n.SignFailedAt)
+		records = append(records, tlv.MakePrimitiveRecord(
+			negSignFailedAtType, &failed,
+		))
+	}
 
 	stream, err := tlv.NewStream(records...)
 	if err != nil {
@@ -348,6 +360,7 @@ func decodeSpliceNegotiation(r io.Reader) (*SpliceNegotiation, error) {
 		spliceInputs       []byte
 		ourOutputs         []byte
 		scid, agreed       uint64
+		signFailed         uint64
 	)
 	stream, err := tlv.NewStream(
 		tlv.MakePrimitiveRecord(negWeInitiatedType, &flags),
@@ -364,6 +377,7 @@ func decodeSpliceNegotiation(r io.Reader) (*SpliceNegotiation, error) {
 		tlv.MakePrimitiveRecord(negOurOutputsType, &ourOutputs),
 		tlv.MakePrimitiveRecord(negLockedScidType, &scid),
 		tlv.MakePrimitiveRecord(negAgreedAtType, &agreed),
+		tlv.MakePrimitiveRecord(negSignFailedAtType, &signFailed),
 	)
 	if err != nil {
 		return nil, err
@@ -381,6 +395,9 @@ func decodeSpliceNegotiation(r io.Reader) (*SpliceNegotiation, error) {
 	n.LockedScid = lnwire.NewShortChanIDFromInt(scid)
 	if agreed <= math.MaxInt64 {
 		n.AgreedAt = int64(agreed)
+	}
+	if signFailed <= math.MaxInt64 {
+		n.SignFailedAt = int64(signFailed)
 	}
 
 	if tx != nil {

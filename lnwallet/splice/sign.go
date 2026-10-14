@@ -65,10 +65,29 @@ func (m *Machine) signingFailed(err error) {
 	// Failing for good (a remote signer with the wrong key, say): the
 	// channel would stay quiescent with no end. Our tx_signatures never
 	// left, so nobody can publish the splice, and our commitment on the
-	// current funding is current: force closed.
+	// current funding is current: force closed, a while after the first
+	// failure (recorded, so reconnections don't start it again; not from
+	// the agreement, or a node down for days would close at its first
+	// transient failure).
 	a := m.active
-	if !a.agreedAt.IsZero() && time.Since(a.agreedAt) > signingGiveUp &&
-		m.cfg.Close != nil {
+	if a.signFailedAt.IsZero() {
+		now := time.Now()
+		m.update(func(a *active) { a.signFailedAt = now })
+		err := m.cfg.Channel.State().UpdateSpliceRecord(a.txid,
+			func(r *channeldb.SpliceRecord) error {
+				if r.Negotiation != nil {
+					r.Negotiation.SignFailedAt = now.Unix()
+				}
+
+				return nil
+			})
+		if err != nil {
+			log.Errorf("ChannelID(%v): unable to record the "+
+				"failure to sign splice %v: %v", m.cfg.ChanID,
+				a.txid, err)
+		}
+	}
+	if time.Since(a.signFailedAt) > signingGiveUp && m.cfg.Close != nil {
 
 		log.Errorf("ChannelID(%v): unable to sign splice %v for over "+
 			"%v; force closing: %v", m.cfg.ChanID, a.txid,
@@ -84,8 +103,8 @@ func (m *Machine) signingFailed(err error) {
 	m.cfg.Peer.Disconnect(fmt.Errorf("unable to sign splice: %w", err))
 }
 
-// signingGiveUp is how long after a splice's agreement we keep failing to
-// sign it, the peer's tx_signatures in, before force closing.
+// signingGiveUp is how long after our first failure to sign a splice, the
+// peer's tx_signatures in, we keep failing before force closing.
 const signingGiveUp = 24 * time.Hour
 
 // signsFirst reports whether we send tx_signatures first.
@@ -502,11 +521,6 @@ func (m *Machine) handleTxAbort(msg *lnwire.TxAbort) {
 	a := m.active
 	reason := printable(msg.Data)
 
-	// A tx_abort exchange, the peer's or the echo of ours: the Core
-	// Lightning port's channel process restarts after it, reading a
-	// spliced channel's reserves anew, and the link does the same.
-	m.applyReserves()
-
 	// The peer's answer to ours, as BOLT 2 asks of it.
 	if m.abortSent {
 		m.abortSent = false
@@ -592,18 +606,6 @@ func (m *Machine) handleTxAbort(msg *lnwire.TxAbort) {
 		})
 		m.send(&lnwire.TxAbort{ChannelID: m.cfg.ChanID})
 		m.forget()
-	}
-}
-
-// applyReserves has the link set a spliced channel's reserves anew.
-func (m *Machine) applyReserves() {
-	select {
-	case err := <-m.cfg.Link.ApplySpliceReserves():
-		if err != nil {
-			log.Debugf("ChannelID(%v): unable to apply the splice "+
-				"reserves: %v", m.cfg.ChanID, err)
-		}
-	case <-m.quit:
 	}
 }
 

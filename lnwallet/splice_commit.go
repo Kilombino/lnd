@@ -1584,6 +1584,5 @@ func (lc *LightningChannel) ApplySpliceReserves() {
 	lc.Lock()
 	defer lc.Unlock()
 
-	lc.channelState.LocalChanCfg.ChanReserve = reserve
-	lc.channelState.RemoteChanCfg.ChanReserve = reserve
+	lc.channelState.SetReserves(reserve)
 }
