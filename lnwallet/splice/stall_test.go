@@ -695,3 +695,42 @@ func TestSpliceShutdownWhileQuiescing(t *testing.T) {
 	}
 	require.False(t, alice.machine.Busy())
 }
+
+// TestSpliceStfuUnanswered checks a peer that never answers our stfu: past
+// the wait, our splice fails, its coins released, and the connection drops,
+// which ends the link's request for quiescence; also when the splice was
+// canceled meanwhile. The link otherwise sent no update for as long as the
+// connection lasted.
+func TestSpliceStfuUnanswered(t *testing.T) {
+	t.Parallel()
+
+	for _, cancel := range []bool{false, true} {
+		alice, _ := soloAlice(t)
+		alice.machine.cfg.Policy.NegotiationTimeout = 50 * time.Millisecond
+		alice.fund(t, 1, 5_000_000)
+		alice.link.stfuGate = make(chan struct{})
+		t.Cleanup(func() { close(alice.link.stfuGate) })
+
+		updates, err := alice.machine.Splice(Request{
+			Direction: DirectionIn, Amount: 1_000_000,
+			FeeRate: 2_500,
+		})
+		require.NoError(t, err)
+		requireUpdates(t, updates, StatePreparing)
+		if cancel {
+			require.True(t, alice.machine.Cancel())
+		}
+
+		u := requireUpdates(t, updates, StateAborted)
+		if !cancel {
+			require.Contains(t, u.Reason, codeTimeout)
+		}
+		require.Eventually(t, func() bool {
+			alice.peer.mu.Lock()
+			defer alice.peer.mu.Unlock()
+
+			return alice.peer.disconnected != nil
+		}, 5*time.Second, 10*time.Millisecond, "cancel %v", cancel)
+		require.Zero(t, alice.wallet.leaseCount())
+	}
+}

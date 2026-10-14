@@ -3,6 +3,7 @@ package splice
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
@@ -171,8 +172,13 @@ func (m *Machine) startSplice(req Request, updates chan Update) error {
 	m.setActive(a)
 	m.report(Update{State: StatePreparing})
 
-	// Quiesce; splice_init goes out once the link says we are.
+	// Quiesce; splice_init goes out once the link says we are. A peer
+	// that never answers our stfu would leave the link unable to send
+	// updates, and our coins leased, for as long as the connection
+	// lasts: past the wait, the connection is dropped, which ends the
+	// request.
 	stfu := m.cfg.Link.InitStfu()
+	wait := 2 * m.cfg.Policy.NegotiationTimeout
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
@@ -180,6 +186,8 @@ func (m *Machine) startSplice(req Request, updates chan Update) error {
 		select {
 		case res := <-stfu:
 			m.enqueue(func() { m.quiesced(a, res) })
+		case <-time.After(wait):
+			m.enqueue(func() { m.stfuUnanswered(a, wait) })
 		case <-m.quit:
 		}
 	}()
@@ -426,6 +434,16 @@ func (m *Machine) quiesced(a *active,
 		FundingPubKey:          a.ourKey.PubKey,
 		RequireConfirmedInputs: true,
 	})
+}
+
+// stfuUnanswered ends a splice of ours whose stfu the peer didn't answer in
+// time, and the connection with it, the link's request for quiescence
+// still out, also when the splice was canceled meanwhile.
+func (m *Machine) stfuUnanswered(a *active, wait time.Duration) {
+	if m.active == a && a.phase == phasePreparing {
+		m.failOurs(codeTimeout, "the peer didn't answer stfu")
+	}
+	m.warnAndDisconnect("stfu not answered within %v", wait)
 }
 
 // endQuiescence ends a quiescence we won without a splice_init to follow:
