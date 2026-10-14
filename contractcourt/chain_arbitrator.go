@@ -483,12 +483,19 @@ func newActiveChannelArbitrator(channel *channeldb.OpenChannel,
 
 	// Next we'll create the matching configuration struct that contains
 	// all interfaces and methods the arbitrator needs to do its job.
+	chanType := channel.ChanType
 	arbCfg := ChannelArbitratorConfig{
 		ChanPoint:   chanPoint,
 		Channel:     c.getArbChannel(channel),
 		ShortChanID: channel.ShortChanID(),
 
 		MarkCommitmentBroadcasted: channel.MarkCommitmentBroadcasted,
+		PublishSpliceCommitments: func() {
+			publishSpliceCommitments(
+				channel, chanType, c.cfg.Signer,
+				c.cfg.PublishTx,
+			)
+		},
 		MarkChannelClosed: func(summary *channeldb.ChannelCloseSummary,
 			statuses ...channeldb.ChannelStatus) error {
 

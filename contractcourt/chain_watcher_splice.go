@@ -636,6 +636,14 @@ func (c *chainWatcher) publishSpliceCommitment(r *channeldb.SpliceRecord,
 func (c *chainWatcher) signSpliceCommitment(
 	r *channeldb.SpliceRecord) (*wire.MsgTx, error) {
 
+	return signSpliceCommitment(c.cfg.chanState.ChanType, r, c.cfg.signer)
+}
+
+// signSpliceCommitment returns our commitment on a splice's funding output,
+// signed.
+func signSpliceCommitment(chanType channeldb.ChannelType,
+	r *channeldb.SpliceRecord, signer input.Signer) (*wire.MsgTx, error) {
+
 	if r.LocalCommit == nil {
 		return nil, errors.New("no commitment of ours")
 	}
@@ -656,12 +664,46 @@ func (c *chainWatcher) signSpliceCommitment(
 			KeyDesc:       r.LocalKey,
 			WitnessScript: witness,
 			Output:        out,
-			HashType: lnwallet.CommitSigHashType(
-				c.cfg.chanState.ChanType,
-			),
-			InputIndex: 0,
+			HashType:      lnwallet.CommitSigHashType(chanType),
+			InputIndex:    0,
 		},
-	}, c.cfg.signer)
+	}, signer)
+}
+
+// publishSpliceCommitments publishes our commitment on each pending splice's
+// funding output, for a force close: the arbitrator offers their anchors
+// next, and the sweeper drops an anchor whose parent isn't in the mempool.
+// One on a splice not in the mempool, or replaced, is refused, quietly. It
+// keeps no state, so it is safe beside the chain watcher, which publishes
+// them again at every block.
+func publishSpliceCommitments(channel *channeldb.OpenChannel,
+	chanType channeldb.ChannelType, signer input.Signer,
+	publish func(*wire.MsgTx, string) error) {
+
+	records, err := channel.SpliceRecords()
+	if err != nil {
+		log.Errorf("ChannelPoint(%v): unable to read splices: %v",
+			channel.FundingOutpoint, err)
+		return
+	}
+	for _, r := range records {
+		if r.Retired || r.LocalCommit == nil {
+			continue
+		}
+		tx, err := signSpliceCommitment(chanType, r, signer)
+		if err != nil {
+			log.Errorf("ChannelPoint(%v): unable to sign our "+
+				"commitment on splice %v: %v",
+				channel.FundingOutpoint, r.Txid(), err)
+			continue
+		}
+		label := labels.MakeLabel(labels.LabelTypeChannelClose, nil)
+		if err := publish(tx, label); err != nil {
+			log.Debugf("ChannelPoint(%v): our commitment on splice "+
+				"%v not published: %v", channel.FundingOutpoint,
+				r.Txid(), err)
+		}
+	}
 }
 
 // reorgSafeDepth is how deep a splice must be before the funding output it

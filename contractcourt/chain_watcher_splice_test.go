@@ -602,6 +602,41 @@ func TestChainWatcherSpliceAfterCoopThenForceClose(t *testing.T) {
 	}
 }
 
+// TestPublishSpliceCommitments checks our commitment on a pending splice's
+// output, signed and published for a force close before its anchors are
+// offered.
+func TestPublishSpliceCommitments(t *testing.T) {
+	t.Parallel()
+
+	h := newChainWatcherTestHarness(t, withRequiredConfs(1))
+	splice := pendSplice(t, h)
+
+	var published []*wire.MsgTx
+	publishSpliceCommitments(
+		h.aliceChannel.State(), h.aliceChannel.State().ChanType,
+		h.chainWatcher.cfg.signer,
+		func(tx *wire.MsgTx, _ string) error {
+			published = append(published, tx)
+			return nil
+		},
+	)
+	require.Len(t, published, 1)
+	tx := published[0]
+	require.Equal(t, wire.OutPoint{Hash: splice.TxHash()},
+		tx.TxIn[0].PreviousOutPoint)
+
+	prevOut := splice.TxOut[0]
+	fetcher := txscript.NewCannedPrevOutputFetcher(
+		prevOut.PkScript, prevOut.Value,
+	)
+	vm, err := txscript.NewEngine(
+		prevOut.PkScript, tx, 0, txscript.StandardVerifyFlags, nil,
+		txscript.NewTxSigHashes(tx, fetcher), prevOut.Value, fetcher,
+	)
+	require.NoError(t, err)
+	require.NoError(t, vm.Execute())
+}
+
 // TestChainWatcherSecondSplice checks a splice of a channel a splice moved
 // while the watcher ran, the first one locked since, is followed too: not
 // taken for a spend it doesn't recognise. One taken for it before, by a

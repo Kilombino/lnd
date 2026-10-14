@@ -133,6 +133,10 @@ type ChannelArbitratorConfig struct {
 	// being broadcast, and we are waiting for the commitment to confirm.
 	MarkCommitmentBroadcasted func(*wire.MsgTx, lntypes.ChannelParty) error
 
+	// PublishSpliceCommitments, if set, publishes our commitment on each
+	// pending splice's funding output, before their anchors are offered.
+	PublishSpliceCommitments func()
+
 	// MarkChannelClosed marks the channel closed in the database, with the
 	// passed close summary. After this method successfully returns we can
 	// no longer expect to receive chain events for this channel, and must
@@ -1221,6 +1225,14 @@ func (c *ChannelArbitrator) stateStep(
 			// happen to end up at this point in the code again, no
 			// harm is done by re-offering the anchors to the
 			// sweeper.
+			//
+			// Our commitments on pending splices' outputs first:
+			// the sweeper drops an anchor whose parent isn't in
+			// the mempool, and the chain watcher only publishes
+			// them at a block.
+			if c.cfg.PublishSpliceCommitments != nil {
+				c.cfg.PublishSpliceCommitments()
+			}
 			anchors, err := c.cfg.Channel.NewAnchorResolutions()
 			if err != nil {
 				return StateError, closeTx, err
