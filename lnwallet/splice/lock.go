@@ -316,6 +316,44 @@ func (m *Machine) ReestablishTLVs() (fn.Option[lnwire.FundingTxidFlags],
 	return next, locked
 }
 
+// TxSignaturesFor returns our tx_signatures for the splice transaction
+// txid, the latest or an earlier one, if they went out, for the link to send
+// again on reconnecting before anything else: the Core Lightning port takes
+// nothing else until it has them. Noted, so they aren't sent twice. Safe
+// from any goroutine.
+func (m *Machine) TxSignaturesFor(txid chainhash.Hash) *lnwire.TxSignatures {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	a := m.active
+	if a == nil {
+		return nil
+	}
+	var sigs *lnwire.TxSignatures
+	if a.txid == txid {
+		sigs = a.ourTxSigs
+	}
+	for _, c := range a.replaced {
+		if c.txid == txid {
+			sigs = c.ourTxSigs
+		}
+	}
+	if sigs != nil {
+		m.sigsResent = txid
+	}
+
+	return sigs
+}
+
+// sigsSentAgain reports whether the link sent our tx_signatures for txid
+// again on this connection.
+func (m *Machine) sigsSentAgain(txid chainhash.Hash) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.sigsResent == txid
+}
+
 // HandleReestablish takes the peer's channel_reestablish.
 func (m *Machine) HandleReestablish(msg *lnwire.ChannelReestablish) {
 	m.enqueue(func() { m.handleReestablish(msg) })
@@ -365,7 +403,8 @@ func (m *Machine) handleReestablish(msg *lnwire.ChannelReestablish) {
 		case a != nil && a.txid != next.Txid &&
 			m.candidate(next.Txid) != nil:
 
-			if c := m.candidate(next.Txid); c.ourTxSigs != nil {
+			c := m.candidate(next.Txid)
+			if c.ourTxSigs != nil && !m.sigsSentAgain(c.txid) {
 				m.send(c.ourTxSigs)
 			}
 
@@ -381,9 +420,11 @@ func (m *Machine) handleReestablish(msg *lnwire.ChannelReestablish) {
 				Data:      []byte("unknown funding transaction"),
 			})
 
-		// Ours already went out: again.
+		// Ours already went out: again, unless the link did.
 		case a.ourTxSigs != nil:
-			m.send(a.ourTxSigs)
+			if !m.sigsSentAgain(a.txid) {
+				m.send(a.ourTxSigs)
+			}
 
 		// Our turn now that both commitments are in.
 		default:

@@ -30,6 +30,20 @@ type recordingSpliceHandler struct {
 	held          btcutil.Amount
 	constructing  bool
 	signing       bool
+	txSigs        *lnwire.TxSignatures
+}
+
+func (h *recordingSpliceHandler) TxSignaturesFor(
+	txid chainhash.Hash) *lnwire.TxSignatures {
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.txSigs == nil || h.txSigs.TxID != txid {
+		return nil
+	}
+
+	return h.txSigs
 }
 
 func (h *recordingSpliceHandler) Signing() (bool, lntypes.ChannelParty) {
@@ -1397,4 +1411,82 @@ func TestLinkUpdateAfterTxAbort(t *testing.T) {
 	require.NoError(t, <-s.link.ResumeQuiescence())
 	nextSent[*lnwire.RevokeAndAck](t, s)
 	s.requireNoFailure(t)
+}
+
+// TestLinkReestablishTxSignaturesFirst checks a reconnection on which the
+// peer names a splice in next_funding, our tx_signatures for it out and an
+// update of ours owed: the tx_signatures go before the update. The Core
+// Lightning port takes nothing else until it has them and drops the
+// connection on anything else, at every reconnection.
+func TestLinkReestablishTxSignaturesFirst(t *testing.T) {
+	t.Parallel()
+
+	alice, bob, err := createMirroredChannel(
+		t, btcutil.SatoshiPerBitcoin*3, btcutil.SatoshiPerBitcoin*5,
+	)
+	require.NoError(t, err)
+
+	txid := pendSplice(
+		t, alice.channel, bob.channel, btcutil.SatoshiPerBitcoin,
+	)
+	original := alice.channel.State().FundingOutpoint.Hash
+
+	// Bob's update and commitment, lost on the way to Alice.
+	amt := lnwire.NewMSatFromSatoshis(100_000)
+	var blob [lnwire.OnionPacketSize]byte
+	_, htlc, _, err := generatePayment(amt, amt, 5, blob)
+	require.NoError(t, err)
+	_, err = bob.channel.AddHTLC(htlc, nil)
+	require.NoError(t, err)
+	_, err = bob.channel.SignNextCommitment(t.Context())
+	require.NoError(t, err)
+
+	aliceHandler := &recordingSpliceHandler{
+		nextFunding: fn.Some(lnwire.FundingTxidFlags{Txid: txid}),
+		fundingLocked: fn.Some(lnwire.FundingTxidFlags{
+			Txid: original,
+		}),
+	}
+	bobHandler := &recordingSpliceHandler{
+		fundingLocked: fn.Some(lnwire.FundingTxidFlags{
+			Txid: original,
+		}),
+		txSigs: &lnwire.TxSignatures{TxID: txid},
+	}
+	n := newTwoHopNetworkStopped(
+		t, alice.channel, bob.channel, testStartingHeight,
+		func(c *ChannelLinkConfig) { c.SpliceHandler = aliceHandler },
+		func(c *ChannelLinkConfig) { c.SpliceHandler = bobHandler },
+	)
+	bobHandler.txSigs.ChannelID = n.bobChannelLink.ChanID()
+	require.NoError(t, n.aliceServer.Start())
+	require.NoError(t, n.bobServer.Start())
+
+	// Alice gets Bob's tx_signatures before his update.
+	order := func() (int, int) {
+		n.aliceServer.protocolTraceMtx.Lock()
+		defer n.aliceServer.protocolTraceMtx.Unlock()
+
+		sigs, add := -1, -1
+		for i, m := range n.aliceServer.protocolTrace {
+			switch m.(type) {
+			case *lnwire.TxSignatures:
+				if sigs < 0 {
+					sigs = i
+				}
+			case *lnwire.UpdateAddHTLC:
+				if add < 0 {
+					add = i
+				}
+			}
+		}
+
+		return sigs, add
+	}
+	require.Eventually(t, func() bool {
+		sigs, add := order()
+		return sigs >= 0 && add >= 0
+	}, 10*time.Second, 20*time.Millisecond)
+	sigs, add := order()
+	require.Less(t, sigs, add)
 }

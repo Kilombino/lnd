@@ -1162,6 +1162,20 @@ func (l *channelLink) syncChanStates(ctx context.Context) error {
 			return err
 		}
 
+		// The splice's resends first: a peer naming a splice in
+		// next_funding (the Core Lightning port) takes nothing else
+		// until it has our commitment_signed for it, if asked for,
+		// then our tx_signatures, and drops the connection on any
+		// other message, at every reconnection.
+		if l.cfg.SpliceHandler != nil {
+			l.resendSpliceCommitSig(remoteChanSyncMsg)
+			remoteChanSyncMsg.NextFunding.WhenSome(
+				func(f lnwire.FundingTxidFlags) {
+					l.resendTxSignatures(f.Txid)
+				},
+			)
+		}
+
 		if len(msgsToReSend) > 0 {
 			l.log.Infof("sending %v updates to synchronize the "+
 				"state", len(msgsToReSend))
@@ -1178,8 +1192,7 @@ func (l *channelLink) syncChanStates(ctx context.Context) error {
 			}
 		}
 
-		// The splice's part: our commitment_signed for it if asked
-		// for, then the machine's.
+		// The machine's part of the splice.
 		if l.cfg.SpliceHandler != nil {
 			// A splice still being signed keeps the channel
 			// quiescent across the reconnection, as the peer
@@ -1199,7 +1212,6 @@ func (l *channelLink) syncChanStates(ctx context.Context) error {
 					l.peerTxSigs = true
 				}
 			}
-			l.resendSpliceCommitSig(remoteChanSyncMsg)
 			remoteChanSyncMsg.MyCurrentFundingLocked.WhenSome(
 				func(f lnwire.FundingTxidFlags) {
 					l.notePeerLocked(f.Txid)

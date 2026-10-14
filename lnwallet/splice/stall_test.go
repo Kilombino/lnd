@@ -619,3 +619,41 @@ func TestSpliceConnectionGone(t *testing.T) {
 	require.Len(t, recs, 1)
 	require.NotZero(t, p.alice.wallet.leaseCount())
 }
+
+// TestTxSignaturesResentOnce checks our tx_signatures for a splice the
+// peer's next_funding names: the link sends them again before anything
+// else, and the machine doesn't send them a second time.
+func TestTxSignaturesResentOnce(t *testing.T) {
+	t.Parallel()
+
+	for _, byLink := range []bool{true, false} {
+		h := newAcceptorHarness(t)
+		s := splicePastSigning(t, h)
+		txid := s.res.Tx.TxHash()
+
+		h.machine.Stop()
+		h.machine = NewMachine(h.machine.cfg)
+		require.NoError(t, h.machine.Start())
+		t.Cleanup(h.machine.Stop)
+
+		if byLink {
+			sigs := h.machine.TxSignaturesFor(txid)
+			require.NotNil(t, sigs)
+			require.Equal(t, txid, sigs.TxID)
+		}
+		h.machine.HandleReestablish(&lnwire.ChannelReestablish{
+			NextFunding: fn.Some(lnwire.FundingTxidFlags{
+				Txid: txid,
+			}),
+		})
+		if byLink {
+			select {
+			case msg := <-h.peer.msgs:
+				t.Fatalf("sent %T again", msg)
+			case <-time.After(200 * time.Millisecond):
+			}
+		} else {
+			next[*lnwire.TxSignatures](t, h)
+		}
+	}
+}

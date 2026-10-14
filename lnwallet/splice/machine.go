@@ -419,6 +419,11 @@ type Machine struct {
 	reestablished bool
 	lockedTold    chainhash.Hash
 
+	// sigsResent is the splice transaction whose tx_signatures the link
+	// sent again on reconnecting, before anything else: not sent twice.
+	// Under mu.
+	sigsResent chainhash.Hash
+
 	// dead are splices given up on, waiting to leave the wallet.
 	dead map[chainhash.Hash]deadSplice
 

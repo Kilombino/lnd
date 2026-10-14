@@ -61,6 +61,12 @@ type SpliceHandler interface {
 	// tx_signatures not exchanged both ways, and which side started it.
 	// Safe from any goroutine.
 	Signing() (bool, lntypes.ChannelParty)
+
+	// TxSignaturesFor returns our tx_signatures for the splice
+	// transaction the peer's next_funding names, if they went out: the
+	// link resends them on reconnecting before anything else, and the
+	// machine doesn't again. Safe from any goroutine.
+	TxSignaturesFor(txid chainhash.Hash) *lnwire.TxSignatures
 }
 
 // peerInputHeld reports whether the peer's balance is below what the splice
@@ -484,6 +490,18 @@ func (l *channelLink) resendSpliceCommitSig(remote *lnwire.ChannelReestablish) {
 	if err := l.cfg.Peer.SendMessage(false, sig); err != nil {
 		l.log.Errorf("failed to resend splice commitment_signed: %v",
 			err)
+	}
+}
+
+// resendTxSignatures resends our tx_signatures for the splice transaction
+// the peer's next_funding names, if they went out.
+func (l *channelLink) resendTxSignatures(txid chainhash.Hash) {
+	sigs := l.cfg.SpliceHandler.TxSignaturesFor(txid)
+	if sigs == nil {
+		return
+	}
+	if err := l.cfg.Peer.SendMessage(false, sigs); err != nil {
+		l.log.Errorf("failed to resend splice tx_signatures: %v", err)
 	}
 }
 
