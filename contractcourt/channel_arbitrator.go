@@ -14,6 +14,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcwallet/chain"
 	"github.com/lightningnetwork/lnd/chainio"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/fn/v2"
@@ -1182,8 +1183,15 @@ func (c *ChannelArbitrator) stateStep(
 			// into mempool. The rebroadcaster makes sure this
 			// transaction is republished regularly until confirmed
 			// or replaced.
+			// Nor when a splice in the mempool spends the same
+			// funding output: the replacement is refused for
+			// paying less. The commitment on the splice's output,
+			// a child of it, goes out from the chain watcher, and
+			// the anchors offered once broadcast bump it.
 			if !errors.Is(err, lnwallet.ErrDoubleSpend) &&
-				!errors.Is(err, lnwallet.ErrMempoolFee) {
+				!errors.Is(err, lnwallet.ErrMempoolFee) &&
+				!errors.Is(err, chain.ErrInsufficientFee) &&
+				!errors.Is(err, chain.ErrTooManyReplacements) {
 
 				return StateError, closeTx, err
 			}

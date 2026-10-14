@@ -13,6 +13,7 @@ import (
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcwallet/chain"
 	"github.com/davecgh/go-spew/spew"
 	"github.com/lightningnetwork/lnd/chainio"
 	"github.com/lightningnetwork/lnd/chainntnfs"
@@ -3599,6 +3600,22 @@ func TestChannelArbitratorStartForceCloseFail(t *testing.T) {
 			name: "Commitment is rejected because of low mempool " +
 				"fees",
 			broadcastErr:    lnwallet.ErrMempoolFee,
+			expectedState:   StateCommitmentBroadcasted,
+			expectedStartup: true,
+		},
+		{
+			// A splice in the mempool spends the same funding
+			// output, paying more: the replacement is refused.
+			name: "Commitment is rejected as a replacement of a " +
+				"splice paying more",
+			broadcastErr:    chain.ErrInsufficientFee,
+			expectedState:   StateCommitmentBroadcasted,
+			expectedStartup: true,
+		},
+		{
+			name: "Commitment is rejected as a replacement of " +
+				"too many transactions",
+			broadcastErr:    chain.ErrTooManyReplacements,
 			expectedState:   StateCommitmentBroadcasted,
 			expectedStartup: true,
 		},
