@@ -477,6 +477,12 @@ type channelLink struct {
 	// completed, on its way to the link: the peer's updates wait for it.
 	lockAwaited chainhash.Hash
 
+	// spliceHeld is set while our updates are held for a splice the peer
+	// disowned (HoldUpdates); spliceHeldAdds when the hold disabled our
+	// adds.
+	spliceHeld     bool
+	spliceHeldAdds bool
+
 	// peerLocked holds the splices the peer has said it locked
 	// (splice_locked, or my_current_funding_locked on reconnecting), as
 	// the link handed them to the splice machine: the peer's next
@@ -4300,6 +4306,11 @@ func (l *channelLink) handleUpdateFee(ctx context.Context) error {
 		return nil
 	}
 
+	// Held for a splice the peer disowned: no commitment can be signed.
+	if l.spliceHeld {
+		return nil
+	}
+
 	// If we are the initiator, then we'll sample the current fee rate to
 	// get into the chain within 3 blocks.
 	netFee, err := l.sampleNetworkFee()
@@ -4397,6 +4408,14 @@ func (l *channelLink) resumeLink(ctx context.Context) error {
 			l.log.Warnf("Error sending shutdown message: %v", err)
 		}
 	})
+
+	// A splice the peer disowned: our updates held before the switch can
+	// forward any (spliceHeld).
+	if l.cfg.SpliceHandler != nil {
+		if held, _ := l.cfg.SpliceHandler.Disowned(); held {
+			l.holdSpliceUpdates()
+		}
+	}
 
 	// We've successfully reestablished the channel, mark it as such to
 	// allow the switch to forward HTLCs in the outbound direction.
@@ -4781,12 +4800,23 @@ func (l *channelLink) processRemoteCommitSig(ctx context.Context,
 	}
 
 	// A batch for another set of pending splices: refused before
-	// anything was accepted, the connection dropped with a warning.
+	// anything was accepted, the connection dropped with a warning. On a
+	// channel being closed for a splice the peer disowned, it is one
+	// leaving that splice out, which can never be accepted: an update
+	// of the peer's that came before our shutdown, which no close could
+	// get past. Force closed, our commitment current.
 	if errors.Is(err, lnwallet.ErrSpliceBatchMismatch) {
+		action := LinkFailureDisconnect
+		if l.cfg.SpliceHandler != nil {
+			_, closing := l.cfg.SpliceHandler.Disowned()
+			if closing {
+				action = LinkFailureForceClose
+			}
+		}
 		l.failf(LinkFailureError{
 			code:          ErrInvalidCommitment,
-			FailureAction: LinkFailureDisconnect,
-			Warning:       true,
+			FailureAction: action,
+			Warning:       action == LinkFailureDisconnect,
 		}, "%v", err)
 
 		return err

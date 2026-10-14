@@ -454,6 +454,12 @@ func (m *Machine) dropCandidate(c *active) {
 	m.markDead(c.txid)
 	log.Infof("ChannelID(%v): splice candidate %v can no longer confirm",
 		m.cfg.ChanID, c.txid)
+
+	// An earlier transaction of a disowned splice: the last gone,
+	// nothing will lock in time, so the channel is closed now.
+	if a.disowned {
+		m.closeDisowned()
+	}
 }
 
 // liveCandidate returns the newest earlier transaction of the splice that

@@ -56,12 +56,20 @@ type Link interface {
 	// RemoveSpliceFunding drops a splice that will never lock from the
 	// channel's funding set.
 	RemoveSpliceFunding(txid chainhash.Hash) <-chan error
+
+	// HoldUpdates stops our updates on the channel until a splice locks:
+	// no HTLC forwarded into it, no update_fee.
+	HoldUpdates() <-chan error
 }
 
 // Channel is the channel's state machine as the machine reads it.
 type Channel interface {
 	// State returns the channel's persisted state.
 	State() *channeldb.OpenChannel
+
+	// IsChannelClean reports whether neither commitment has HTLCs, and
+	// every update is locked in both ways.
+	IsChannelClean() bool
 
 	// StateSnapshot copies the channel's state under its lock: read
 	// before quiescence, the link may be changing it.
@@ -217,6 +225,10 @@ type Config struct {
 	// ResendAnnouncement, if set, sends our half of that announcement
 	// again, as the peer's channel_reestablish asks.
 	ResendAnnouncement func()
+
+	// Close, if set, starts closing the channel, by force or
+	// cooperatively unless a close is under way, without waiting.
+	Close func(force bool)
 
 	// Limits, shared by the node's machines, bounds the splices peers
 	// start. Nil for none.

@@ -394,6 +394,13 @@ func (m *Machine) handleReestablish(msg *lnwire.ChannelReestablish) {
 	}
 	a := m.active
 
+	// Disowned on an earlier connection (the link holds our updates from
+	// its start): the close may not have started, stopped between the
+	// record and the request.
+	if a != nil && a.disowned {
+		m.closeDisowned()
+	}
+
 	msg.NextFunding.WhenSome(func(next lnwire.FundingTxidFlags) {
 		current := m.cfg.Channel.State().CurrentFundingOutpoint().Hash
 		switch {

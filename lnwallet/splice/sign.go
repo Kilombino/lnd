@@ -497,26 +497,32 @@ func (m *Machine) handleTxAbort(msg *lnwire.TxAbort) {
 	// Answering the next_funding of our reestablish on this connection
 	// (its user's signatures still missing), the port keeps the splice,
 	// and it goes on. Otherwise (its user's abort) the port drops it:
-	// recorded disowned, it is no longer being signed, and a cooperative
-	// close, which spends the funding output it spends, may end it.
+	// recorded disowned, before the echo (the port forgets it on the
+	// echo), it is no longer being signed. The channel then takes no
+	// update: the port's commitments leave the splice out, and ours on
+	// it must stay current. Our updates are held before quiescence ends,
+	// and the channel closed (closeDisowned).
 	case (a.phase == phasePending || a.ourTxSigs != nil) &&
 		a.theirTxSigs == nil:
 
 		log.Warnf("ChannelID(%v): peer aborted splice %v after our "+
 			"tx_signatures, before its own: %v", m.cfg.ChanID,
 			a.txid, reason)
-		m.send(&lnwire.TxAbort{ChannelID: m.cfg.ChanID})
-		m.resume()
 
 		// Only the first answers our reestablish.
 		m.mu.Lock()
 		named := m.namedNext == a.txid
 		m.namedNext = chainhash.Hash{}
 		m.mu.Unlock()
-		if named {
-			return
+		if !named {
+			m.disown(a)
+			m.holdUpdates()
 		}
-		m.disown(a)
+		m.send(&lnwire.TxAbort{ChannelID: m.cfg.ChanID})
+		m.resume()
+		if !named {
+			m.closeDisowned()
+		}
 
 	// Its tx_signatures in too: an abort it may not send. Marked, and the
 	// connection dropped with a warning, which also ends the port's wait
@@ -555,6 +561,48 @@ func (m *Machine) disown(a *active) {
 			"disowned: %v", m.cfg.ChanID, a.txid, err)
 	}
 	m.update(func(a *active) { a.disowned = true })
+}
+
+// holdUpdates holds our updates on a channel with a disowned splice.
+func (m *Machine) holdUpdates() {
+	select {
+	case err := <-m.cfg.Link.HoldUpdates():
+		if err != nil {
+			log.Errorf("ChannelID(%v): unable to hold updates: %v",
+				m.cfg.ChanID, err)
+		}
+	case <-m.quit:
+	}
+}
+
+// closeDisowned closes a channel with a disowned splice, which can take no
+// update. With an earlier transaction of the splice still live, which the
+// peer keeps, nothing is closed: it locks in time, the disowned one with it,
+// and the channel goes on. With HTLCs on it, which could never be settled,
+// the channel is force closed, our commitment current, as with any update
+// pending or commitment unanswered; otherwise it is closed cooperatively, the close spending the funding output the splice
+// spends.
+func (m *Machine) closeDisowned() {
+	a := m.active
+	if len(a.replaced) > 0 {
+		log.Warnf("ChannelID(%v): the peer disowned splice %v; "+
+			"updates held until an earlier transaction of it "+
+			"locks", m.cfg.ChanID, a.txid)
+		return
+	}
+	if m.cfg.Close == nil {
+		return
+	}
+
+	force := !m.cfg.Channel.IsChannelClean()
+	how := "cooperatively"
+	if force {
+		how = "by force, its HTLCs or updates never to be settled"
+	}
+	log.Warnf("ChannelID(%v): the peer disowned splice %v we signed, and "+
+		"the channel can take no update; closing it %v", m.cfg.ChanID,
+		a.txid, how)
+	m.cfg.Close(force)
 }
 
 // printable returns the peer's text as printable ASCII, at most 160 bytes.

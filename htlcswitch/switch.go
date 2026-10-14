@@ -128,6 +128,10 @@ type ChanClose struct {
 
 	// Ctx is a context linked to the lifetime of the caller.
 	Ctx context.Context //nolint:containedctx
+
+	// NotIfClosing, if set, refuses the request when a close of the
+	// channel is under way: it starts one, never bumps one.
+	NotIfClosing bool
 }
 
 // Config defines the configuration for the service. ALL elements within the

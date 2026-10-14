@@ -1,11 +1,13 @@
 package peer
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync/atomic"
 
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/lightningnetwork/lnd/contractcourt"
 	"github.com/lightningnetwork/lnd/fn/v2"
 	"github.com/lightningnetwork/lnd/htlcswitch"
 	"github.com/lightningnetwork/lnd/lntypes"
@@ -13,6 +15,9 @@ import (
 	"github.com/lightningnetwork/lnd/lnwallet/splice"
 	"github.com/lightningnetwork/lnd/lnwire"
 )
+
+// errAlreadyClosing refuses a request to start a close already under way.
+var errAlreadyClosing = errors.New("the channel is already closing")
 
 // errSpliceUnlocked is the reason a cooperative close is refused while a
 // splice of the channel hasn't locked: the spec forbids shutdown then.
@@ -55,6 +60,69 @@ func (p *Brontide) spliceUnlocked(chanID lnwire.ChannelID) bool {
 	m, ok := p.SpliceMachine(chanID)
 
 	return ok && m.Busy()
+}
+
+// closeDisowned closes a channel whose peer dropped a splice after our
+// tx_signatures: the peer's commitments leave the splice out, and ours on it
+// must stay current, so the channel can take no update. By force when it has
+// HTLCs, never to be settled; otherwise cooperatively, unless a close is
+// under way, which a second request would replace.
+func (p *Brontide) closeDisowned(chanID lnwire.ChannelID, force bool) {
+	channel, ok := p.activeChannels.Load(chanID)
+	if !ok || channel == nil {
+		return
+	}
+	op := channel.ChannelPoint()
+	if force {
+		if _, err := p.cfg.ChainArb.ForceCloseContract(op); err != nil {
+			p.log.Errorf("ChannelID(%v): unable to force close: %v",
+				chanID, err)
+		}
+
+		return
+	}
+
+	feePerKw, err := p.cfg.FeeEstimator.EstimateFeePerKW(
+		p.cfg.CoopCloseTargetConfs,
+	)
+	if err != nil {
+		p.log.Errorf("ChannelID(%v): unable to estimate the close fee: "+
+			"%v", chanID, err)
+		return
+	}
+
+	ctx, cancel := p.cg.Create(context.Background())
+	defer cancel()
+
+	req := &htlcswitch.ChanClose{
+		CloseType:      contractcourt.CloseRegular,
+		ChanPoint:      &op,
+		TargetFeePerKw: feePerKw,
+		Updates:        make(chan interface{}, 8),
+		Err:            make(chan error, 1),
+		Ctx:            ctx,
+		NotIfClosing:   true,
+	}
+	p.HandleLocalCloseChanReqs(req)
+
+	for {
+		select {
+		case u := <-req.Updates:
+			if _, done := u.(*ChannelCloseUpdate); done {
+				return
+			}
+
+		case err := <-req.Err:
+			if err != nil && !errors.Is(err, errAlreadyClosing) {
+				p.log.Errorf("ChannelID(%v): unable to close: %v",
+					chanID, err)
+			}
+			return
+
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 // spliceYields cancels a splice of ours still waiting for quiescence when
@@ -256,6 +324,9 @@ func (p *Brontide) startSpliceMachine(chanID lnwire.ChannelID,
 		Channel:  lnChan,
 		Peer:     p,
 		Disabled: disabled,
+		Close: func(force bool) {
+			go p.closeDisowned(chanID, force)
+		},
 	}, p.IdentityKey())
 	if err := m.Start(); err != nil {
 		return nil, err
@@ -294,6 +365,16 @@ func (p *Brontide) stopSpliceMachines() {
 	for _, m := range machines {
 		m.Stop()
 	}
+}
+
+// HoldUpdates implements splice.Link.
+func (s *spliceLinkProxy) HoldUpdates() <-chan error {
+	l, err := s.link()
+	if err != nil {
+		return errChan(err)
+	}
+
+	return l.HoldUpdates()
 }
 
 // RemoveSpliceFunding implements splice.Link.

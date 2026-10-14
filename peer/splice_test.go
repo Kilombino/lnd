@@ -3,6 +3,7 @@ package peer
 import (
 	"bytes"
 	"testing"
+	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
@@ -98,6 +99,45 @@ func TestPeerNoCloseDuringSplice(t *testing.T) {
 	warning, ok := queued.msg.(*lnwire.Warning)
 	require.True(t, ok, "%T", queued.msg)
 	require.Equal(t, chanID, warning.ChanID)
+}
+
+// TestPeerClosesDisowned checks the close the splice machine asks for when
+// the peer disowns a splice: a cooperative one starts the channel's closer,
+// and another request then is refused, never replacing the closer.
+func TestPeerClosesDisowned(t *testing.T) {
+	t.Parallel()
+
+	harness, err := createTestPeerWithChannel(t, noUpdate)
+	require.NoError(t, err)
+	peer := harness.peer
+	chanPoint := harness.channel.ChannelPoint()
+	chanID := lnwire.NewChanIDFromOutPoint(chanPoint)
+
+	go peer.closeDisowned(chanID, false)
+	require.Eventually(t, func() bool {
+		_, ok := peer.activeChanCloses.Load(chanID)
+		return ok
+	}, timeout, 10*time.Millisecond)
+
+	// Asked again, as at the next connection: the closer stays.
+	first, _ := peer.activeChanCloses.Load(chanID)
+	go peer.closeDisowned(chanID, false)
+	time.Sleep(300 * time.Millisecond)
+	again, _ := peer.activeChanCloses.Load(chanID)
+	require.Same(t, first.UnwrapLeftOr(nil), again.UnwrapLeftOr(nil))
+
+	// A close under way: refused.
+	req := &htlcswitch.ChanClose{
+		CloseType:    contractcourt.CloseRegular,
+		ChanPoint:    &chanPoint,
+		Updates:      make(chan interface{}, 1),
+		Err:          make(chan error, 1),
+		NotIfClosing: true,
+	}
+	peer.HandleLocalCloseChanReqs(req)
+	closeErr, err := fn.RecvOrTimeout(req.Err, timeout)
+	require.NoError(t, err)
+	require.ErrorIs(t, closeErr, errAlreadyClosing)
 }
 
 // TestSpliceMachineForHolds checks that a channel holding coins the peer put

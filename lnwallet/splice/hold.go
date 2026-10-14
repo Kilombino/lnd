@@ -34,6 +34,22 @@ func (m *Machine) Signing() (bool, lntypes.ChannelParty) {
 	return true, lntypes.Remote
 }
 
+// Disowned reports whether the peer disowned the splice, our updates then
+// held, and whether the channel is being closed for it: no earlier
+// transaction of the splice is live, which would lock in time. Safe from any
+// goroutine.
+func (m *Machine) Disowned() (bool, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	a := m.active
+	if a == nil || !a.disowned {
+		return false, false
+	}
+
+	return true, len(a.replaced) == 0
+}
+
 // LockComing reports whether the splice's lock is on its way to the link:
 // both splice_locked are in, or ours is and the peer's for txid, just
 // received, completes it. The peer, locked on its side, may send updates its
@@ -71,12 +87,13 @@ func (m *Machine) Preparing() bool {
 
 // Busy reports whether a splice is under way, from its preparation on, also
 // while ours waits for quiescence: a cooperative close then would race it.
-// Safe from any goroutine.
+// One the peer disowned doesn't count: the close, spending the output it
+// spends, is how it ends. Safe from any goroutine.
 func (m *Machine) Busy() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	return m.active != nil
+	return m.active != nil && !m.active.disowned
 }
 
 // Constructing reports whether a splice's transaction is being negotiated,

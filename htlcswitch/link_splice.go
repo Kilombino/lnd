@@ -74,6 +74,11 @@ type SpliceHandler interface {
 	// link resends them on reconnecting before anything else, and the
 	// machine doesn't again. Safe from any goroutine.
 	TxSignaturesFor(txid chainhash.Hash) *lnwire.TxSignatures
+
+	// Disowned reports whether the peer disowned the splice, our updates
+	// held (HoldUpdates) from the link's start, and whether the channel
+	// is being closed for it. Safe from any goroutine.
+	Disowned() (bool, bool)
 }
 
 // peerInputHeld reports whether the peer's balance is below what the splice
@@ -437,13 +442,62 @@ func (l *channelLink) RemoveSpliceFunding(txid chainhash.Hash) <-chan error {
 }
 
 // LockSplice completes a splice both sides have locked: the channel moves to
-// its funding output.
+// its funding output. Updates held for a splice the peer disowned go on, an
+// earlier transaction of it having locked: the funding the peer left out is
+// gone with the lock. Not when the channel is being closed for it (the
+// disowned one itself locking): our shutdown may be out.
 func (l *channelLink) LockSplice(txid chainhash.Hash,
 	scid lnwire.ShortChannelID) <-chan error {
 
 	return l.runSpliceReq(func(context.Context) error {
-		return l.channel.LockPendingFunding(txid, scid)
+		err := l.channel.LockPendingFunding(txid, scid)
+		if err != nil {
+			return err
+		}
+		if l.cfg.SpliceHandler != nil {
+			if _, closing := l.cfg.SpliceHandler.Disowned(); closing {
+				return nil
+			}
+		}
+		l.releaseSpliceHold()
+
+		return nil
 	})
+}
+
+// HoldUpdates stops our updates on a channel whose peer disowned a splice:
+// its commitments leave that funding out, ours on it must stay current, so
+// no commitment can be signed. No HTLC is forwarded into the channel, nor an
+// update_fee sent, until a splice locks or the channel closes.
+func (l *channelLink) HoldUpdates() <-chan error {
+	return l.runSpliceReq(func(context.Context) error {
+		l.holdSpliceUpdates()
+
+		return nil
+	})
+}
+
+// holdSpliceUpdates holds our updates, once. Adds are disabled, unless a
+// close disabled them already, which the release then leaves as it is.
+func (l *channelLink) holdSpliceUpdates() {
+	if l.spliceHeld {
+		return
+	}
+	l.spliceHeld = true
+	l.spliceHeldAdds = l.DisableAdds(Outgoing)
+}
+
+// releaseSpliceHold ends the hold on our updates, adds enabled again only if
+// the hold disabled them.
+func (l *channelLink) releaseSpliceHold() {
+	if !l.spliceHeld {
+		return
+	}
+	l.spliceHeld = false
+	if l.spliceHeldAdds {
+		l.EnableAdds(Outgoing)
+	}
+	l.spliceHeldAdds = false
 }
 
 // amendChanSync adds the splice machine's fields to our channel_reestablish.
@@ -528,6 +582,7 @@ type SpliceLink interface {
 	SendSpliceCommitment(txid chainhash.Hash) <-chan error
 	LockSplice(txid chainhash.Hash, scid lnwire.ShortChannelID) <-chan error
 	RemoveSpliceFunding(txid chainhash.Hash) <-chan error
+	HoldUpdates() <-chan error
 }
 
 // A compile time check that the link can splice.

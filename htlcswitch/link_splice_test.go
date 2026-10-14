@@ -1,6 +1,7 @@
 package htlcswitch
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/lightningnetwork/lnd/keychain"
 	"github.com/lightningnetwork/lnd/lntypes"
 	"github.com/lightningnetwork/lnd/lnwallet"
+	"github.com/lightningnetwork/lnd/lnwallet/chainfee"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/stretchr/testify/require"
 )
@@ -32,6 +34,15 @@ type recordingSpliceHandler struct {
 	signing       bool
 	txSigs        *lnwire.TxSignatures
 	lockComing    bool
+	disowned      bool
+	closing       bool
+}
+
+func (h *recordingSpliceHandler) Disowned() (bool, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	return h.disowned, h.disowned && h.closing
 }
 
 func (h *recordingSpliceHandler) LockComing(chainhash.Hash) bool {
@@ -531,6 +542,36 @@ func TestLinkBatchRefused(t *testing.T) {
 		t.Parallel()
 
 		s := newSpliceLinkHarness(t)
+		pendSplice(t, s.link.channel, s.bob, 50_000_000)
+		main, _ := bobBatch(t, s)
+		s.link.HandleChannelUpdate(main)
+		s.requireFailure(t, LinkFailureDisconnect)
+	})
+
+	// The peer left out a splice it disowned, the channel being closed
+	// for it: an update of the peer's no close could get past.
+	t.Run("main alone, a disowned splice", func(t *testing.T) {
+		t.Parallel()
+
+		s := newSpliceLinkHarnessWith(t, func(cfg *ChannelLinkConfig) {
+			h := cfg.SpliceHandler.(*recordingSpliceHandler)
+			h.disowned, h.closing = true, true
+		})
+		pendSplice(t, s.link.channel, s.bob, 50_000_000)
+		main, _ := bobBatch(t, s)
+		s.link.HandleChannelUpdate(main)
+		s.requireFailure(t, LinkFailureForceClose)
+	})
+
+	// With an earlier transaction live, which locks in time: dropped,
+	// not closed.
+	t.Run("main alone, a disowned replacement", func(t *testing.T) {
+		t.Parallel()
+
+		s := newSpliceLinkHarnessWith(t, func(cfg *ChannelLinkConfig) {
+			cfg.SpliceHandler.(*recordingSpliceHandler).disowned =
+				true
+		})
 		pendSplice(t, s.link.channel, s.bob, 50_000_000)
 		main, _ := bobBatch(t, s)
 		s.link.HandleChannelUpdate(main)
@@ -1054,6 +1095,105 @@ func TestLinkBatchAcrossLock(t *testing.T) {
 	sendBatch(s, main, members[0])
 	nextSent[*lnwire.RevokeAndAck](t, s)
 	s.requireNoFailure(t)
+}
+
+// TestLinkHoldUpdates checks the hold on our updates for a splice the peer
+// disowned, whose commitments leave it out: no HTLC is forwarded into the
+// channel nor an update_fee sent, until a splice locks.
+func TestLinkHoldUpdates(t *testing.T) {
+	t.Parallel()
+
+	s := newSpliceLinkHarnessWith(t, func(cfg *ChannelLinkConfig) {
+		cfg.FeeEstimator = chainfee.NewStaticEstimator(50_000, 253)
+	})
+	txid := pendSplice(t, s.link.channel, s.bob, 50_000_000)
+	require.Eventually(t, s.link.EligibleToForward, 5*time.Second,
+		10*time.Millisecond)
+
+	updateFee := func() {
+		t.Helper()
+
+		require.NoError(t, <-s.link.runSpliceReq(
+			func(ctx context.Context) error {
+				return s.link.handleUpdateFee(ctx)
+			},
+		))
+	}
+
+	// Twice: the second changes nothing.
+	require.NoError(t, <-s.link.HoldUpdates())
+	require.NoError(t, <-s.link.HoldUpdates())
+	require.False(t, s.link.EligibleToForward())
+	updateFee()
+	timeout := time.After(300 * time.Millisecond)
+	for done := false; !done; {
+		select {
+		case msg := <-s.sent:
+			_, fee := msg.(*lnwire.UpdateFee)
+			require.False(t, fee, "update_fee while held")
+		case <-timeout:
+			done = true
+		}
+	}
+
+	scid := lnwire.ShortChannelID{BlockHeight: 900_000, TxIndex: 1}
+	require.NoError(t, <-s.link.LockSplice(txid, scid))
+	require.True(t, s.link.EligibleToForward())
+	updateFee()
+	nextSent[*lnwire.UpdateFee](t, s)
+}
+
+// TestLinkHoldFromStart checks a link started with a splice the peer
+// disowned, restored by its machine: our updates are held before the link
+// can forward any, until a splice locks.
+func TestLinkHoldFromStart(t *testing.T) {
+	t.Parallel()
+
+	s := newSpliceLinkHarnessWith(t, func(cfg *ChannelLinkConfig) {
+		cfg.SpliceHandler.(*recordingSpliceHandler).disowned = true
+	})
+	txid := pendSplice(t, s.link.channel, s.bob, 50_000_000)
+	require.Never(t, s.link.EligibleToForward, 300*time.Millisecond,
+		10*time.Millisecond)
+
+	scid := lnwire.ShortChannelID{BlockHeight: 900_000, TxIndex: 1}
+	require.NoError(t, <-s.link.LockSplice(txid, scid))
+	require.True(t, s.link.EligibleToForward())
+}
+
+// TestLinkHoldKeptWhileClosing checks a lock on a channel being closed for a
+// splice the peer disowned, the disowned one itself locking: the hold stays,
+// our shutdown possibly out.
+func TestLinkHoldKeptWhileClosing(t *testing.T) {
+	t.Parallel()
+
+	s := newSpliceLinkHarnessWith(t, func(cfg *ChannelLinkConfig) {
+		h := cfg.SpliceHandler.(*recordingSpliceHandler)
+		h.disowned, h.closing = true, true
+	})
+	txid := pendSplice(t, s.link.channel, s.bob, 50_000_000)
+	scid := lnwire.ShortChannelID{BlockHeight: 900_000, TxIndex: 1}
+	require.NoError(t, <-s.link.LockSplice(txid, scid))
+	require.True(t, s.link.IsFlushing(Outgoing))
+	require.False(t, s.link.EligibleToForward())
+}
+
+// TestLinkHoldKeepsCloseDisable checks the hold's release leaves our adds
+// disabled when a close disabled them before the hold.
+func TestLinkHoldKeepsCloseDisable(t *testing.T) {
+	t.Parallel()
+
+	s := newSpliceLinkHarness(t)
+	txid := pendSplice(t, s.link.channel, s.bob, 50_000_000)
+	require.Eventually(t, s.link.EligibleToForward, 5*time.Second,
+		10*time.Millisecond)
+
+	require.True(t, s.link.DisableAdds(Outgoing))
+	require.NoError(t, <-s.link.HoldUpdates())
+	scid := lnwire.ShortChannelID{BlockHeight: 900_000, TxIndex: 1}
+	require.NoError(t, <-s.link.LockSplice(txid, scid))
+	require.True(t, s.link.IsFlushing(Outgoing))
+	require.False(t, s.link.EligibleToForward())
 }
 
 // quiesce makes the harness's link quiescent, Alice asking.

@@ -4781,6 +4781,12 @@ func (p *Brontide) handleLocalCloseReq(req *htlcswitch.ChanClose) {
 			req.Err <- errSpliceUnlocked
 			return
 		}
+		if _, ok := p.activeChanCloses.Load(chanID); ok &&
+			req.NotIfClosing {
+
+			req.Err <- errAlreadyClosing
+			return
+		}
 
 		var err error
 		switch {

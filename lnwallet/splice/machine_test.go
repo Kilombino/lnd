@@ -63,6 +63,7 @@ type testLink struct {
 	stfuGate chan struct{}
 	commits  chan *lnwire.CommitSig
 	resumed  chan struct{}
+	held     atomic.Bool
 
 	// mu guards initiator, which a test may change.
 	mu sync.Mutex
@@ -96,6 +97,12 @@ func (l *testLink) InitStfu() <-chan fn.Result[lntypes.ChannelParty] {
 	}()
 
 	return c
+}
+
+func (l *testLink) HoldUpdates() <-chan error {
+	l.held.Store(true)
+
+	return done(nil)
 }
 
 func (l *testLink) ResumeQuiescence() <-chan error {
@@ -150,10 +157,16 @@ type testPeer struct {
 	msgs         chan lnwire.Message
 	mu           sync.Mutex
 	disconnected error
+
+	// onSend, if set, sees each message as it is sent.
+	onSend func(lnwire.Message)
 }
 
 func (p *testPeer) SendMessage(_ bool, msgs ...lnwire.Message) error {
 	for _, m := range msgs {
+		if p.onSend != nil {
+			p.onSend(m)
+		}
 		p.msgs <- m
 	}
 
@@ -1245,20 +1258,46 @@ func TestAcceptSpliceAborts(t *testing.T) {
 	// its normal course, waiting for the echo and taking nothing else.
 	// Its user's abort: the splice is kept, as the peer holds ours and
 	// could still publish it, the channel's state there kept current,
-	// but recorded disowned: no longer being signed, nor named on
-	// reconnecting. The peer isn't marked.
+	// but recorded disowned, before the echo (the port forgets it on
+	// the echo): no longer being signed, nor named on reconnecting. The
+	// peer isn't marked. The channel, taking no update now, has our
+	// updates held before quiescence ends, and is closed cooperatively,
+	// which a disowned splice doesn't bar; asked again on the next
+	// connection, should the close not have started, its link told to
+	// hold our updates from its start.
 	t.Run("after our signatures", func(t *testing.T) {
 		t.Parallel()
 
 		h := newAcceptorHarness(t)
 		splicePastSigning(t, h)
+		closes := make(chan bool, 4)
+		h.machine.cfg.Close = func(force bool) { closes <- force }
+		recorded := make(chan bool, 1)
+		h.peer.onSend = func(msg lnwire.Message) {
+			if _, ok := msg.(*lnwire.TxAbort); !ok {
+				return
+			}
+			recs, err := h.bob.State().SpliceRecords()
+			require.NoError(t, err)
+			recorded <- recs[0].Negotiation.Disowned &&
+				h.link.held.Load()
+		}
+		require.True(t, h.machine.Busy())
 
 		h.machine.HandleSpliceMessage(&lnwire.TxAbort{
 			ChannelID: h.machine.cfg.ChanID, Data: []byte("user"),
 		})
 		echo := next[*lnwire.TxAbort](t, h)
 		require.Empty(t, echo.Data)
+		require.True(t, <-recorded, "echoed before the record and hold")
 		requireResumed(t, h)
+		select {
+		case force := <-closes:
+			require.False(t, force)
+		case <-time.After(5 * time.Second):
+			t.Fatal("no close")
+		}
+		require.False(t, h.machine.Busy())
 		done := make(chan bool)
 		h.machine.enqueue(func() { done <- h.machine.misbehaved })
 		require.False(t, <-done)
@@ -1270,6 +1309,145 @@ func TestAcceptSpliceAborts(t *testing.T) {
 		require.False(t, signing)
 		named, _ := h.machine.ReestablishTLVs()
 		require.True(t, named.IsNone())
+
+		h.peer.onSend = nil
+		cfg := h.machine.cfg
+		h.machine.Stop()
+		h.machine = NewMachine(cfg)
+		require.NoError(t, h.machine.Start())
+		t.Cleanup(h.machine.Stop)
+		require.False(t, h.machine.Busy())
+		held, closing := h.machine.Disowned()
+		require.True(t, held)
+		require.True(t, closing)
+		h.machine.HandleReestablish(&lnwire.ChannelReestablish{})
+		select {
+		case force := <-closes:
+			require.False(t, force)
+		case <-time.After(5 * time.Second):
+			t.Fatal("no close after restoring")
+		}
+	})
+
+	// With an HTLC on the channel, which could never be settled now: a
+	// force close, our commitment current.
+	t.Run("after our signatures, with an HTLC", func(t *testing.T) {
+		t.Parallel()
+
+		h := newAcceptorHarness(t)
+		var preimage [32]byte
+		preimage[0] = 1
+		htlc := &lnwire.UpdateAddHTLC{
+			PaymentHash: sha256Hash(preimage[:]),
+			Amount:      lnwire.NewMSatFromSatoshis(50_000),
+			Expiry:      500,
+		}
+		_, err := h.alice.AddHTLC(htlc, nil)
+		require.NoError(t, err)
+		_, err = h.bob.ReceiveHTLC(htlc)
+		require.NoError(t, err)
+		require.NoError(t, lnwallet.ForceStateTransition(h.alice, h.bob))
+
+		splicePastSigning(t, h)
+		closes := make(chan bool, 4)
+		h.machine.cfg.Close = func(force bool) { closes <- force }
+		h.machine.HandleSpliceMessage(&lnwire.TxAbort{
+			ChannelID: h.machine.cfg.ChanID, Data: []byte("user"),
+		})
+		next[*lnwire.TxAbort](t, h)
+		select {
+		case force := <-closes:
+			require.True(t, force)
+		case <-time.After(5 * time.Second):
+			t.Fatal("no close")
+		}
+	})
+
+	// With an update of the peer's not yet committed, which arrived
+	// after the echo: it could never be, so a force close as well.
+	t.Run("after our signatures, an update pending", func(t *testing.T) {
+		t.Parallel()
+
+		h := newAcceptorHarness(t)
+		splicePastSigning(t, h)
+		closes := make(chan bool, 4)
+		h.machine.cfg.Close = func(force bool) { closes <- force }
+
+		var preimage [32]byte
+		preimage[0] = 2
+		htlc := &lnwire.UpdateAddHTLC{
+			PaymentHash: sha256Hash(preimage[:]),
+			Amount:      lnwire.NewMSatFromSatoshis(50_000),
+			Expiry:      500,
+		}
+		h.machine.enqueue(func() {
+			_, err := h.alice.AddHTLC(htlc, nil)
+			require.NoError(t, err)
+			_, err = h.bob.ReceiveHTLC(htlc)
+			require.NoError(t, err)
+		})
+		h.machine.HandleSpliceMessage(&lnwire.TxAbort{
+			ChannelID: h.machine.cfg.ChanID, Data: []byte("user"),
+		})
+		next[*lnwire.TxAbort](t, h)
+		select {
+		case force := <-closes:
+			require.True(t, force)
+		case <-time.After(5 * time.Second):
+			t.Fatal("no close")
+		}
+	})
+
+	// The replacement of a transaction signed both ways, disowned: the
+	// peer keeps the earlier one, which locks in time, the disowned one
+	// with it. Updates held, nothing closed.
+	t.Run("a replacement, after our signatures", func(t *testing.T) {
+		t.Parallel()
+
+		h := newAcceptorHarness(t)
+		splicePastSigning(t, h)
+		closes := make(chan bool, 4)
+		h.machine.cfg.Close = func(force bool) { closes <- force }
+		earlier := &active{txid: chainhash.Hash{9}}
+		other := &active{txid: chainhash.Hash{10}}
+		h.machine.enqueue(func() {
+			h.machine.active.replaced = append(
+				h.machine.active.replaced, earlier, other,
+			)
+		})
+		h.machine.HandleSpliceMessage(&lnwire.TxAbort{
+			ChannelID: h.machine.cfg.ChanID, Data: []byte("user"),
+		})
+		next[*lnwire.TxAbort](t, h)
+		requireResumed(t, h)
+		require.Eventually(t, h.link.held.Load, 5*time.Second,
+			10*time.Millisecond)
+		select {
+		case <-closes:
+			t.Fatal("closed with an earlier transaction live")
+		case <-time.After(200 * time.Millisecond):
+		}
+		held, closing := h.machine.Disowned()
+		require.True(t, held)
+		require.False(t, closing)
+
+		// One dies, another still live: nothing closed. The last
+		// dies: nothing will lock in time, and the channel is closed.
+		h.machine.enqueue(func() { h.machine.dropCandidate(other) })
+		select {
+		case <-closes:
+			t.Fatal("closed with an earlier transaction live")
+		case <-time.After(200 * time.Millisecond):
+		}
+		h.machine.enqueue(func() { h.machine.dropCandidate(earlier) })
+		select {
+		case force := <-closes:
+			require.False(t, force)
+		case <-time.After(5 * time.Second):
+			t.Fatal("no close once the earlier one died")
+		}
+		_, closing = h.machine.Disowned()
+		require.True(t, closing)
 	})
 
 	// Answering the next_funding of our reestablish, the port keeping the
