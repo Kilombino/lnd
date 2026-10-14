@@ -723,10 +723,16 @@ func (m *Machine) watchDisownedDeadline(a *active) {
 			defer m.wg.Done()
 			defer conf.Cancel()
 
-			select {
-			case <-conf.Confirmed:
-				confirmed.Store(true)
-			case <-m.quit:
+			// Reorganised out, it no longer spares the channel.
+			for {
+				select {
+				case <-conf.Confirmed:
+					confirmed.Store(true)
+				case <-conf.NegativeConf:
+					confirmed.Store(false)
+				case <-m.quit:
+					return
+				}
 			}
 		}()
 	}
@@ -749,6 +755,12 @@ func (m *Machine) watchDisownedDeadline(a *active) {
 					return
 				}
 				if uint32(epoch.Height) < deadline {
+					continue
+				}
+				// Checked again at each block past the
+				// deadline while an earlier one stays
+				// confirmed.
+				if confirmed.Load() {
 					continue
 				}
 				m.enqueue(func() {
