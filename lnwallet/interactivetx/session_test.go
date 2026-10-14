@@ -1271,3 +1271,30 @@ func TestPeerWitnessSlack(t *testing.T) {
 	_, _, err = build(100_000 - share + slack + 1)
 	require.Error(t, err)
 }
+
+// TestWaiveOwnReserve checks the waiver of the reserve rule for our own side:
+// our Build passes with our side short, while the peer's side stays bound,
+// as the peer's Build, holding us to it, shows.
+func TestWaiveOwnReserve(t *testing.T) {
+	t.Parallel()
+
+	// The initiator takes 2,000 out of a 2,500 balance as fees only.
+	p := defaultParams()
+	p.initBalance = 2_500
+	p.accBalance = 997_500
+	p.initContrib = -1_500
+	init, acc := pair(t, p)
+	init.WaiveOwnReserve()
+	require.NoError(t, run(init, acc))
+	_, err := init.Build()
+	require.NoError(t, err)
+	_, err = acc.Build()
+	requireAbort(t, err, "below the reserve")
+
+	// Waived on the acceptor, the initiator short: still refused.
+	init, acc = pair(t, p)
+	acc.WaiveOwnReserve()
+	require.NoError(t, run(init, acc))
+	_, err = acc.Build()
+	requireAbort(t, err, "below the reserve")
+}

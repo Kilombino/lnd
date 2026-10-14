@@ -267,6 +267,9 @@ var ErrNotOurTurn = errors.New("message received out of turn")
 type Session struct {
 	cfg Config
 
+	// ownReserveWaived is set by WaiveOwnReserve.
+	ownReserveWaived bool
+
 	inputs  map[uint64]*Input
 	outputs map[uint64]*Output
 
@@ -1066,6 +1069,16 @@ func (s *Session) keepsReserve(role Role) error {
 	return nil
 }
 
+// WaiveOwnReserve stops the reserve rule binding our own side at Build: the
+// peer's replacement of a splice we started, which we join with the same
+// part. The rule protects the peer, which chose the new capacity and can
+// refuse our output as it gets it; found short only after both tx_complete,
+// our tx_abort would fail a peer that signs at tx_complete. Call before the
+// session runs.
+func (s *Session) WaiveOwnReserve() {
+	s.ownReserveWaived = true
+}
+
 // checkReserves applies the reserve rule: a side that adds an output other
 // than the funding output must keep the reserve for the new capacity.
 func (s *Session) checkReserves(res *Result) error {
@@ -1096,6 +1109,9 @@ func (s *Session) checkReserves(res *Result) error {
 		if balance[role] < 0 {
 			return abortf("the %v's contribution takes its balance "+
 				"below zero", role)
+		}
+		if role == s.cfg.Role && s.ownReserveWaived {
+			continue
 		}
 		if addedOutput[role] && balance[role] < reserve {
 			return abortf("the %v adds an output and keeps %d, "+

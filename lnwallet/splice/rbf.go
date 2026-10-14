@@ -118,6 +118,11 @@ func (m *Machine) handleTxInitRbf(msg *lnwire.TxInitRbf) {
 	for _, o := range outputs {
 		session.AddLocalOutput(o)
 	}
+	// Our part again, in the peer's replacement: the reserve on the
+	// capacity it chose binds the peer's side, not ours.
+	if weStarted(a) {
+		session.WaiveOwnReserve()
+	}
 	b.ourInputs = coins
 	b.ourOutputs = outputs
 	b.oursReplaced = weStarted(a)

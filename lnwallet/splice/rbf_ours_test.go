@@ -553,3 +553,138 @@ func TestReplaceOurLargeMoveOut(t *testing.T) {
 		t.Fatal("no answer")
 	}
 }
+
+// TestReplaceOurMaxMoveOut checks the peer's replacement of our move-out of
+// all we can, adding funds of its own: the reserve on the larger capacity it
+// chose isn't held against our side. Found short only after both
+// tx_complete, our tx_abort would fail a peer that signs at tx_complete.
+func TestReplaceOurMaxMoveOut(t *testing.T) {
+	t.Parallel()
+
+	p := newSplicePair(t)
+	updates, err := p.alice.machine.Splice(Request{
+		Direction: DirectionOut, UseMax: true, FeeRate: 2_500,
+		Destination: p2tr(9),
+	})
+	require.NoError(t, err)
+	requireUpdates(t, updates, StatePreparing, StateNegotiating,
+		StateSigned, StateBroadcast)
+	bobKey := p.bob.ch.PendingFundings()[0].LocalKey
+	aliceKey := p.bob.ch.PendingFundings()[0].RemoteKey
+
+	fromAlice := make(chan lnwire.Message, 64)
+	p.dropMu.Lock()
+	p.drop = func(from *node, msg lnwire.Message) bool {
+		if from == p.alice {
+			fromAlice <- msg
+			return true
+		}
+
+		return false
+	}
+	p.dropMu.Unlock()
+	p.alice.link.mu.Lock()
+	p.alice.link.initiator = lntypes.Remote
+	p.alice.link.mu.Unlock()
+	nextA := func() lnwire.Message {
+		t.Helper()
+		select {
+		case m := <-fromAlice:
+			return m
+		case <-time.After(5 * time.Second):
+			t.Fatal("Alice stopped answering")
+			return nil
+		}
+	}
+
+	// Bob adds 600,000,000 at the same rate: 1% of the larger capacity
+	// is above what Alice keeps, her reserve fixed at the opening.
+	const bobAmount = btcutil.Amount(600_000_000)
+	const feeRate = chainfee.SatPerKWeight(2_500)
+	p.alice.machine.HandleSpliceMessage(&lnwire.TxInitRbf{
+		ChannelID:                 p.alice.machine.cfg.ChanID,
+		LockTime:                  p.chain.height,
+		FeeRatePerKw:              uint32(feeRate),
+		FundingOutputContribution: fn.Some(bobAmount),
+	})
+	ack, isAck := nextA().(*lnwire.TxAckRbf)
+	require.True(t, isAck)
+	aliceAmount := ack.FundingOutputContribution.UnwrapOr(0)
+	require.Negative(t, aliceAmount)
+
+	state := p.bob.ch.State()
+	_, oldOut, err := input.GenFundingPkScript(
+		state.LocalChanCfg.MultiSigKey.PubKey.SerializeCompressed(),
+		state.RemoteChanCfg.MultiSigKey.PubKey.SerializeCompressed(),
+		int64(state.Capacity),
+	)
+	require.NoError(t, err)
+	newCapacity := state.Capacity + aliceAmount + bobAmount
+	aliceKeeps := state.LocalCommitment.RemoteBalance.ToSatoshis() +
+		aliceAmount
+	require.Less(t, aliceKeeps, newCapacity/100,
+		"the scenario needs Alice below the reserve")
+	_, newOut, err := input.GenFundingPkScript(
+		bobKey.PubKey.SerializeCompressed(),
+		aliceKey.SerializeCompressed(), int64(newCapacity),
+	)
+	require.NoError(t, err)
+
+	// Bob, like the Core Lightning port, doesn't hold Alice to it.
+	bob, err := interactivetx.NewSession(interactivetx.Config{
+		Role:      interactivetx.Initiator,
+		ChannelID: p.alice.machine.cfg.ChanID,
+		Shared: interactivetx.SharedInput{
+			OutPoint:      state.CurrentFundingOutpoint(),
+			Value:         state.Capacity,
+			PkScript:      oldOut.PkScript,
+			WitnessWeight: input.MultiSigWitnessSize,
+		},
+		FundingScript:         newOut.PkScript,
+		InitiatorContribution: bobAmount,
+		AcceptorContribution:  aliceAmount,
+		FeeRate:               feeRate,
+		LockTime:              p.chain.height,
+		CheckPeerInput:        func(*interactivetx.Input) error { return nil },
+		CheckPeerOutput:       func(*interactivetx.Output) error { return nil },
+		DustLimit:             dustLimit,
+		WitnessWeight:         peerWitnessWeight,
+		Reserve:               func(btcutil.Amount) btcutil.Amount { return 0 },
+		InitiatorBalance:      state.LocalCommitment.LocalBalance.ToSatoshis(),
+		AcceptorBalance:       state.LocalCommitment.RemoteBalance.ToSatoshis(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, bob.AddSharedInputAndFunding())
+	coinB := p.bob.fund(t, 2, 610_000_000)
+	bob.AddLocalInput(interactivetx.Input{
+		OutPoint: coinB.OutPoint, Value: coinB.Value,
+		PkScript: coinB.PkScript, Sequence: interactivetx.MaxSequence,
+		MaxWitnessWeight: input.P2WKHWitnessSize, PrevTx: coinB.PrevTx,
+	})
+	bob.AddLocalOutput(interactivetx.Output{
+		Value: 610_000_000 - bobAmount - 2_600, PkScript: p2wpkh(0x44),
+	})
+	for !bob.Done() {
+		if bob.OurTurn() {
+			msg, err := bob.Next()
+			require.NoError(t, err)
+			p.alice.machine.HandleSpliceMessage(msg)
+
+			continue
+		}
+		msg := nextA()
+		if abort, ok := msg.(*lnwire.TxAbort); ok {
+			t.Fatalf("Alice aborted: %s", abort.Data)
+		}
+		require.NoError(t, bob.Receive(msg))
+	}
+	_, err = bob.Build()
+	require.NoError(t, err)
+
+	// Past both tx_complete: Alice's commitment, not a tx_abort.
+	msg := nextA()
+	if abort, ok := msg.(*lnwire.TxAbort); ok {
+		t.Fatalf("Alice aborted after tx_complete: %s", abort.Data)
+	}
+	require.IsType(t, &lnwire.CommitSig{}, msg)
+}
