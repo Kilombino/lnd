@@ -534,9 +534,16 @@ out of this node's balance can't be sent in payments meanwhile. A
 cooperative close works and pays out the full balance. If a
 reorganisation takes the other transaction out and the splice confirms
 after all, it locks as any. A splice the peer abandons after this node
-signed it, before signing it itself, is shown and handled the same way:
-kept, as the peer could still publish it, and ended by a cooperative
-close.
+signed it, before signing it itself, is shown as failed too, and kept, as
+the peer could still publish it. The channel can then take no update
+(the peer's commitments leave the splice out), so the node stops
+sending payments and fee updates through it and closes it on its own:
+cooperatively, or by force if payments were in flight, as those could
+never be settled. If the peer still holds an earlier transaction of the
+splice, signed by both, the node waits for that one to confirm instead,
+and the channel then goes on as usual. Should the peer publish the
+abandoned splice and it confirm in place of the cooperative close, the
+node force closes on the splice's output.
 
 **A stuck splice.** A splice transaction is offered to the backend again
 at every block until it confirms. If its fee rate is too low to confirm,
