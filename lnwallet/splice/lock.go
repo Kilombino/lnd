@@ -393,6 +393,7 @@ func (m *Machine) handleReestablish(msg *lnwire.ChannelReestablish) {
 		}
 	}
 	a := m.active
+	m.dropDeadDisowned()
 
 	// Disowned on an earlier connection (the link holds our updates from
 	// its start): the close may not have started, stopped between the
@@ -1021,6 +1022,39 @@ func (m *Machine) spliceDead(txid, conflict chainhash.Hash,
 	m.notify("dead", txid, reason, false)
 	m.report(Update{State: StateAborted, Txid: txid, Reason: reason})
 	m.setActive(nil)
+
+	if a.disowned {
+		m.dropDeadDisowned()
+	}
+}
+
+// dropDeadDisowned takes the funding of each dead splice the peer disowned
+// out of the channel's set. The peer doesn't have it, its batches leaving it
+// out, and dead, it can't confirm: kept, as other dead splices are, the
+// batches would never match. Dropped, a close under way can finish, and a
+// channel whose close never started works again. Also at each reestablish:
+// dropped through the link, which may not have been up.
+func (m *Machine) dropDeadDisowned() {
+	records, err := m.cfg.Channel.State().SpliceRecords()
+	if err != nil {
+		log.Errorf("ChannelID(%v): unable to read splices: %v",
+			m.cfg.ChanID, err)
+		return
+	}
+	for _, r := range records {
+		n := r.Negotiation
+		if r.Retired || n == nil || !n.Dead || !n.Disowned {
+			continue
+		}
+		txid := r.Txid()
+		if err := m.wait(m.cfg.Link.RemoveSpliceFunding(txid)); err != nil {
+			log.Warnf("ChannelID(%v): unable to drop dead disowned "+
+				"splice %v: %v", m.cfg.ChanID, txid, err)
+			continue
+		}
+		log.Infof("ChannelID(%v): dead disowned splice %v dropped",
+			m.cfg.ChanID, txid)
+	}
 }
 
 // revive follows again a transaction of the splice recorded dead that

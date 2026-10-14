@@ -781,3 +781,56 @@ func TestWithheldSpliceDead(t *testing.T) {
 		return err == nil && last != nil && last.Outcome == "dead"
 	}, 5*time.Second, 10*time.Millisecond)
 }
+
+// TestDisownedSpliceDead checks a disowned splice one of whose inputs another
+// transaction spent: dead, its funding leaves the set, the peer's batches,
+// which leave it out, matching again.
+func TestDisownedSpliceDead(t *testing.T) {
+	t.Parallel()
+
+	h := newAcceptorHarness(t)
+	s := splicePastSigning(t, h)
+	h.machine.HandleSpliceMessage(&lnwire.TxAbort{
+		ChannelID: h.machine.cfg.ChanID, Data: []byte("user"),
+	})
+	next[*lnwire.TxAbort](t, h)
+	require.Len(t, h.bob.PendingFundings(), 1)
+
+	conflict := wire.NewMsgTx(2)
+	conflict.AddTxIn(&wire.TxIn{PreviousOutPoint: s.coin.OutPoint})
+	conflict.AddTxOut(&wire.TxOut{Value: 1_000, PkScript: p2tr(3)})
+	h.chain.spend(t, s.coin.OutPoint, conflict, 1)
+	h.chain.confirm(t, conflict.TxHash(), deadDepth, 1,
+		&chainntnfs.TxConfirmation{})
+
+	require.Eventually(t, func() bool {
+		return len(h.bob.PendingFundings()) == 0
+	}, 5*time.Second, 10*time.Millisecond)
+	held, _ := h.machine.Disowned()
+	require.False(t, held)
+}
+
+// TestDisownedSpliceDeadDroppedAtReestablish checks a dead disowned splice
+// whose funding the link wasn't up to drop: dropped at the next
+// reestablish.
+func TestDisownedSpliceDeadDroppedAtReestablish(t *testing.T) {
+	t.Parallel()
+
+	h := newAcceptorHarness(t)
+	splicePastSigning(t, h)
+	recs, err := h.bob.State().SpliceRecords()
+	require.NoError(t, err)
+	require.NoError(t, h.bob.State().UpdateSpliceRecord(recs[0].Txid(),
+		func(r *channeldb.SpliceRecord) error {
+			r.Negotiation.Dead = true
+			r.Negotiation.Disowned = true
+
+			return nil
+		}))
+	require.Len(t, h.bob.PendingFundings(), 1)
+
+	h.machine.HandleReestablish(&lnwire.ChannelReestablish{})
+	require.Eventually(t, func() bool {
+		return len(h.bob.PendingFundings()) == 0
+	}, 5*time.Second, 10*time.Millisecond)
+}
