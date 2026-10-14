@@ -1309,3 +1309,60 @@ func TestSpliceReorgedOutThenDead(t *testing.T) {
 	u = requireUpdates(t, updates, StateAborted)
 	require.Contains(t, u.Reason, "dead")
 }
+
+// TestSpliceDeadRevivedAfterRestart checks a dead splice the wallet doesn't
+// hold, the peer's side having put nothing in, restarted before a
+// reorganisation confirms it after all: still followed again and locked.
+// Its inputs were watched after a restart only when the wallet held it.
+func TestSpliceDeadRevivedAfterRestart(t *testing.T) {
+	t.Parallel()
+
+	p := newSplicePair(t)
+	c := p.alice.fund(t, 1, 5_000_000)
+	capacity := p.alice.ch.State().Capacity
+	updates, err := p.alice.machine.Splice(Request{
+		Direction: DirectionIn, Amount: 1_000_000, FeeRate: 2_500,
+	})
+	require.NoError(t, err)
+	u := requireUpdates(t, updates, StatePreparing, StateNegotiating,
+		StateSigned, StateBroadcast)
+	spliceTx, err := p.alice.wallet.FetchTx(u.Txid)
+	require.NoError(t, err)
+
+	conflict := wire.NewMsgTx(2)
+	conflict.AddTxIn(&wire.TxIn{PreviousOutPoint: c.OutPoint})
+	conflict.AddTxOut(&wire.TxOut{Value: 4_000_000, PkScript: p2tr(3)})
+	p.chain.spend(t, c.OutPoint, conflict, 2)
+	p.chain.confirm(t, conflict.TxHash(), deadDepth, 2,
+		&chainntnfs.TxConfirmation{})
+	requireUpdates(t, updates, StateAborted)
+
+	// Bob restarts, his wallet not holding the splice, as a wallet keeps
+	// no transaction with none of its coins or outputs; his machine finds
+	// the conflict again.
+	p.bob.machine.Stop()
+	p.bob.wallet.mu.Lock()
+	delete(p.bob.wallet.txs, u.Txid)
+	p.bob.wallet.mu.Unlock()
+	restarted := NewMachine(p.bob.machine.cfg)
+	startReestablished(t, restarted)
+	t.Cleanup(restarted.Stop)
+	p.bob.machine = restarted
+	p.chain.spend(t, c.OutPoint, conflict, 1)
+	p.chain.confirm(t, conflict.TxHash(), deadDepth, 3,
+		&chainntnfs.TxConfirmation{})
+
+	// The conflict reorged out, the splice confirming instead.
+	require.Eventually(t, func() bool {
+		return p.chain.registered(conflict.TxHash(), forgetDepth, 3)
+	}, 5*time.Second, 10*time.Millisecond)
+	p.chain.reorg(t, conflict.TxHash(), forgetDepth)
+	p.chain.spend(t, c.OutPoint, spliceTx, 2)
+
+	// Each side's watch from before, the stopped machine's gone, and the
+	// one each revival starts.
+	p.chain.confirm(t, u.Txid, 6, 4, &chainntnfs.TxConfirmation{
+		BlockHeight: 900_006, TxIndex: 2,
+	})
+	p.requireMoved(t, u.Txid, capacity+1_000_000)
+}

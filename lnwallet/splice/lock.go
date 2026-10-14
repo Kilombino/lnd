@@ -591,20 +591,24 @@ func (m *Machine) restore() error {
 // restart between the splice's death and that depth left its coins counted
 // as spent for good.
 func (m *Machine) restoreDead(r *channeldb.SpliceRecord) {
-	if m.cfg.CoinSource == nil {
-		return
-	}
 	txid := r.Txid()
-	if _, err := m.cfg.CoinSource.FetchTx(txid); err != nil {
-		return
-	}
 	a, err := restoredActive(r)
 	if err != nil {
 		log.Errorf("ChannelID(%v): unable to read dead splice %v: %v",
 			m.cfg.ChanID, txid, err)
 		return
 	}
-	m.dead[txid] = deadSplice{tx: r.Negotiation.Tx, inputs: a.ourInputs}
+
+	// Taken out of the wallet at depth, while the wallet holds it. Its
+	// inputs are watched either way: a reorganisation taking the
+	// conflicting spend out may confirm it after all (revive).
+	if m.cfg.CoinSource != nil {
+		if _, err := m.cfg.CoinSource.FetchTx(txid); err == nil {
+			m.dead[txid] = deadSplice{
+				tx: r.Negotiation.Tx, inputs: a.ourInputs,
+			}
+		}
+	}
 
 	height := m.heightHint(r.Negotiation.BroadcastHeight)
 	for _, in := range a.res.Inputs {
@@ -781,8 +785,14 @@ func (m *Machine) watchInputsOf(a *active, heightHint uint32) {
 		return
 	}
 	a.inputsWatched = true
+
+	// The locktime is the peer's to choose when it built the splice: no
+	// earlier than the current funding's confirmation, which the splice
+	// spends, or a locktime of 1 had every input searched for from the
+	// chain's start, at every restart.
 	if lt := a.res.Tx.LockTime; lt > 0 && lt < heightHint {
-		heightHint = lt
+		floor := m.cfg.Channel.State().CurrentShortChanID().BlockHeight
+		heightHint = max(lt, floor)
 	}
 	heightHint = m.heightHint(heightHint)
 
