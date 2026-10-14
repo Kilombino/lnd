@@ -3,6 +3,7 @@ package splice
 import (
 	"errors"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
@@ -681,6 +682,32 @@ func (m *Machine) watchDisownedDeadline(a *active) {
 	}
 	deadline := from + disownedHoldBlocks
 
+	// One confirmed is on its way to its lock depth, which can be past
+	// the deadline: not closed for it.
+	var confirmed atomic.Bool
+	for _, c := range a.replaced {
+		txid := c.txid
+		conf, err := m.cfg.Chain.RegisterConfirmationsNtfn(
+			&txid, c.fundingScript, 1, from,
+		)
+		if err != nil {
+			log.Errorf("ChannelID(%v): unable to watch splice %v: %v",
+				m.cfg.ChanID, txid, err)
+			continue
+		}
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			defer conf.Cancel()
+
+			select {
+			case <-conf.Confirmed:
+				confirmed.Store(true)
+			case <-m.quit:
+			}
+		}()
+	}
+
 	epochs, err := m.cfg.Chain.RegisterBlockEpochNtfn(nil)
 	if err != nil {
 		log.Errorf("ChannelID(%v): unable to watch blocks: %v",
@@ -705,6 +732,15 @@ func (m *Machine) watchDisownedDeadline(a *active) {
 					if m.active != a || !a.disowned ||
 						len(a.replaced) == 0 {
 
+						return
+					}
+					if confirmed.Load() {
+						log.Infof("ChannelID(%v): an "+
+							"earlier transaction of "+
+							"disowned splice %v "+
+							"confirmed; waiting for "+
+							"its lock", m.cfg.ChanID,
+							a.txid)
 						return
 					}
 					log.Warnf("ChannelID(%v): no earlier "+

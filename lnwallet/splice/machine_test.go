@@ -1476,6 +1476,44 @@ func TestAcceptSpliceAborts(t *testing.T) {
 		}
 	})
 
+	// The earlier transaction confirmed by the deadline, on its way to a
+	// lock depth past it: not closed for it.
+	t.Run("a replacement, the earlier confirmed in time", func(t *testing.T) {
+		t.Parallel()
+
+		h := newAcceptorHarness(t)
+		splicePastSigning(t, h)
+		closes := make(chan bool, 4)
+		h.machine.cfg.Close = func(force bool) { closes <- force }
+		h.chain.mu.Lock()
+		start := h.chain.height
+		h.chain.mu.Unlock()
+		earlier := chainhash.Hash{9}
+		h.machine.enqueue(func() {
+			h.machine.active.replaced = append(
+				h.machine.active.replaced, &active{
+					txid: earlier, broadcastHeight: start,
+				},
+			)
+		})
+		h.machine.HandleSpliceMessage(&lnwire.TxAbort{
+			ChannelID: h.machine.cfg.ChanID, Data: []byte("user"),
+		})
+		next[*lnwire.TxAbort](t, h)
+		requireResumed(t, h)
+		h.chain.confirm(t, earlier, 1, 1, &chainntnfs.TxConfirmation{})
+
+		for i := 0; i < disownedHoldBlocks+1; i++ {
+			h.chain.mine()
+			time.Sleep(2 * time.Millisecond)
+		}
+		select {
+		case <-closes:
+			t.Fatal("closed, the earlier transaction confirmed")
+		case <-time.After(300 * time.Millisecond):
+		}
+	})
+
 	// The earlier transaction the splice again by the deadline (its
 	// confirmation adopted it): nothing closed.
 	t.Run("a replacement, the earlier adopted in time", func(t *testing.T) {
