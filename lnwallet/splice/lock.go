@@ -281,7 +281,7 @@ func (m *Machine) ReestablishTLVs() (fn.Option[lnwire.FundingTxidFlags],
 	// Our commitment_signed went out and the peer's tx_signatures
 	// haven't come: next_funding, asking for its commitment_signed if
 	// that hasn't come either.
-	case a.phase == phaseSigning && a.commitSent:
+	case a.phase == phaseSigning && a.commitSent && !a.disowned:
 		var flags uint8
 		if !a.commitReceived {
 			flags |= lnwire.RetransmitCommitSig
@@ -686,6 +686,7 @@ func restoredActive(r *channeldb.SpliceRecord) (*active, error) {
 	if n.AgreedAt != 0 {
 		a.agreedAt = time.Unix(n.AgreedAt, 0)
 	}
+	a.disowned = n.Disowned
 	if n.LockedSent && n.LockedScid.ToUint64() != 0 {
 		a.scid = fn.Some(n.LockedScid)
 	}

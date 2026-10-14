@@ -1243,14 +1243,15 @@ func TestAcceptSpliceAborts(t *testing.T) {
 
 	// After ours, the peer's not in: as the Core Lightning port does in
 	// its normal course, waiting for the echo and taking nothing else.
-	// Its user's abort: it drops the splice, and so do we, out of the
-	// funding set (our batches would never match its again), the
-	// transaction still watched as a dropped one. The peer isn't marked.
+	// Its user's abort: the splice is kept, as the peer holds ours and
+	// could still publish it, the channel's state there kept current,
+	// but recorded disowned: no longer being signed, nor named on
+	// reconnecting. The peer isn't marked.
 	t.Run("after our signatures", func(t *testing.T) {
 		t.Parallel()
 
 		h := newAcceptorHarness(t)
-		s := splicePastSigning(t, h)
+		splicePastSigning(t, h)
 
 		h.machine.HandleSpliceMessage(&lnwire.TxAbort{
 			ChannelID: h.machine.cfg.ChanID, Data: []byte("user"),
@@ -1261,15 +1262,19 @@ func TestAcceptSpliceAborts(t *testing.T) {
 		done := make(chan bool)
 		h.machine.enqueue(func() { done <- h.machine.misbehaved })
 		require.False(t, <-done)
-		require.Empty(t, h.bob.PendingFundings())
-		_, err := h.bob.State().DroppedSplice(s.res.Tx.TxHash())
+		require.Len(t, h.bob.PendingFundings(), 1)
+		recs, err := h.bob.State().SpliceRecords()
 		require.NoError(t, err)
+		require.True(t, recs[0].Negotiation.Disowned)
 		signing, _ := h.machine.Signing()
 		require.False(t, signing)
+		named, _ := h.machine.ReestablishTLVs()
+		require.True(t, named.IsNone())
 	})
 
 	// Answering the next_funding of our reestablish, the port keeping the
-	// splice (its user's signatures still missing): kept too.
+	// splice (its user's signatures still missing): kept, not disowned.
+	// A later abort on the connection, its user's, disowns it.
 	t.Run("after our signatures, answering our reestablish",
 		func(t *testing.T) {
 			t.Parallel()
@@ -1284,13 +1289,28 @@ func TestAcceptSpliceAborts(t *testing.T) {
 			require.True(t, named.IsSome())
 			h.machine.HandleReestablish(&lnwire.ChannelReestablish{})
 
-			h.machine.HandleSpliceMessage(&lnwire.TxAbort{
-				ChannelID: h.machine.cfg.ChanID,
-				Data:      []byte("next_funding_txid not recognized"),
-			})
-			echo := next[*lnwire.TxAbort](t, h)
-			require.Empty(t, echo.Data)
-			requireResumed(t, h)
+			disowned := func() bool {
+				recs, err := h.bob.State().SpliceRecords()
+				require.NoError(t, err)
+
+				return recs[0].Negotiation.Disowned
+			}
+			abort := func(why string) {
+				h.machine.HandleSpliceMessage(&lnwire.TxAbort{
+					ChannelID: h.machine.cfg.ChanID,
+					Data:      []byte(why),
+				})
+				echo := next[*lnwire.TxAbort](t, h)
+				require.Empty(t, echo.Data)
+				requireResumed(t, h)
+			}
+			abort("next_funding_txid not recognized")
+			require.False(t, disowned())
+			signing, _ := h.machine.Signing()
+			require.True(t, signing)
+
+			abort("user")
+			require.True(t, disowned())
 			require.Len(t, h.bob.PendingFundings(), 1)
 		})
 

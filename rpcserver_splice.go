@@ -722,7 +722,8 @@ func leastCandidateBalance(records []*channeldb.SpliceRecord,
 
 	least := local
 	for _, rec := range records {
-		dead := rec.Negotiation != nil && rec.Negotiation.Dead
+		dead := rec.Negotiation != nil &&
+			(rec.Negotiation.Dead || rec.Negotiation.Disowned)
 		if rec.Retired || dead || rec.LocalCommit == nil {
 			continue
 		}
@@ -737,7 +738,8 @@ func leastCandidateBalance(records []*channeldb.SpliceRecord,
 // one, then the highest fee rate, the latest.
 func shownSplice(records []*channeldb.SpliceRecord) *channeldb.SpliceRecord {
 	dead := func(r *channeldb.SpliceRecord) bool {
-		return r.Negotiation != nil && r.Negotiation.Dead
+		n := r.Negotiation
+		return n != nil && (n.Dead || n.Disowned)
 	}
 	var shown *channeldb.SpliceRecord
 	for _, rec := range records {
@@ -781,7 +783,9 @@ func rpcPendingSplice(rec *channeldb.SpliceRecord) *lnrpc.PendingSplice {
 	ps.BroadcastHeight = n.BroadcastHeight
 	ps.WeLocked = n.LockedSent
 	ps.PeerLocked = n.LockedReceived
-	ps.Dead = n.Dead
+	// Disowned by the peer: it won't go through unless the peer
+	// publishes it after all, and a normal close ends it.
+	ps.Dead = n.Dead || n.Disowned
 
 	switch {
 	case n.LockedSent:

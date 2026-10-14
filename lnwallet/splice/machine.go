@@ -331,6 +331,11 @@ type active struct {
 	// ourInputs are the wallet coins we put in.
 	ourInputs []Coin
 
+	// disowned is set when the peer aborted the transaction after our
+	// tx_signatures, before its own, dropping it on its side: kept, as it
+	// holds ours, but no longer being signed (Disowned in the record).
+	disowned bool
+
 	// inputsWatched is set once the transaction's inputs are watched for
 	// a spend by another.
 	inputsWatched bool

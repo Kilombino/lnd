@@ -148,6 +148,14 @@ type SpliceNegotiation struct {
 	// transaction of the splice locks or the channel closes.
 	Dead bool
 
+	// Disowned is set when the peer aborted the transaction after our
+	// tx_signatures, before sending its own, and dropped it on its side.
+	// It holds ours and could still publish it, so it stays in the
+	// channel's set, the channel's state there kept current; but it is
+	// no longer being signed, and a cooperative close, which spends the
+	// funding output it spends, may end it.
+	Disowned bool
+
 	// OurOutputs are the outputs this node added: change, or the
 	// destination of funds moved out.
 	OurOutputs []*wire.TxOut
@@ -196,6 +204,9 @@ func (n *SpliceNegotiation) encode(w io.Writer) error {
 	}
 	if n.Dead {
 		flags |= 4
+	}
+	if n.Disowned {
+		flags |= 8
 	}
 	records = append(records, tlv.MakePrimitiveRecord(
 		negWeInitiatedType, &flags,
@@ -364,6 +375,7 @@ func decodeSpliceNegotiation(r io.Reader) (*SpliceNegotiation, error) {
 	n.WeInitiated = flags&1 != 0
 	n.OursReplaced = flags&2 != 0
 	n.Dead = flags&4 != 0
+	n.Disowned = flags&8 != 0
 	n.LockedSent = locked&1 != 0
 	n.LockedReceived = locked&2 != 0
 	n.LockedScid = lnwire.NewShortChanIDFromInt(scid)

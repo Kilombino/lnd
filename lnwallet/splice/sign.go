@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightningnetwork/lnd/channeldb"
@@ -486,14 +487,18 @@ func (m *Machine) handleTxAbort(msg *lnwire.TxAbort) {
 
 	// After our tx_signatures, the peer's not in: the Core Lightning port
 	// aborts there in its normal course, waiting for the echo and taking
-	// nothing else until it comes. Echoed, and nothing held against the
-	// peer. Answering the next_funding of our reestablish on this
-	// connection (its user's signatures still missing), the port keeps
-	// the splice, and so do we: our batches must still name it. Its
-	// user's abort, it drops the splice, and so do we, its funding out of
-	// our set, or our batches never matched again and a close stayed
-	// refused: the transaction, signed by us, is still watched as a
-	// dropped one, and followed if the peer publishes it after all.
+	// nothing else until it comes. Echoed, quiescence ended, nothing held
+	// against the peer. The splice is kept either way: the peer holds our
+	// tx_signatures and could still publish it, and dropped, the channel
+	// moving on would revoke every commitment on its output, a peer then
+	// publishing it holding the funds there. Kept, the channel's state on
+	// it stays current.
+	//
+	// Answering the next_funding of our reestablish on this connection
+	// (its user's signatures still missing), the port keeps the splice,
+	// and it goes on. Otherwise (its user's abort) the port drops it:
+	// recorded disowned, it is no longer being signed, and a cooperative
+	// close, which spends the funding output it spends, may end it.
 	case (a.phase == phasePending || a.ourTxSigs != nil) &&
 		a.theirTxSigs == nil:
 
@@ -501,19 +506,17 @@ func (m *Machine) handleTxAbort(msg *lnwire.TxAbort) {
 			"tx_signatures, before its own: %v", m.cfg.ChanID,
 			a.txid, reason)
 		m.send(&lnwire.TxAbort{ChannelID: m.cfg.ChanID})
+		m.resume()
 
+		// Only the first answers our reestablish.
 		m.mu.Lock()
 		named := m.namedNext == a.txid
+		m.namedNext = chainhash.Hash{}
 		m.mu.Unlock()
 		if named {
-			m.resume()
 			return
 		}
-		m.update(func(a *active) {
-			a.abortReason = reason
-			a.reasonFromPeer = true
-		})
-		m.forget()
+		m.disown(a)
 
 	// Its tx_signatures in too: an abort it may not send. Marked, and the
 	// connection dropped with a warning, which also ends the port's wait
@@ -534,6 +537,24 @@ func (m *Machine) handleTxAbort(msg *lnwire.TxAbort) {
 		m.send(&lnwire.TxAbort{ChannelID: m.cfg.ChanID})
 		m.forget()
 	}
+}
+
+// disown records a transaction of the splice the peer dropped after our
+// tx_signatures as disowned: kept, but no longer being signed.
+func (m *Machine) disown(a *active) {
+	err := m.cfg.Channel.State().UpdateSpliceRecord(a.txid,
+		func(r *channeldb.SpliceRecord) error {
+			if r.Negotiation != nil {
+				r.Negotiation.Disowned = true
+			}
+
+			return nil
+		})
+	if err != nil {
+		log.Errorf("ChannelID(%v): unable to record splice %v "+
+			"disowned: %v", m.cfg.ChanID, a.txid, err)
+	}
+	m.update(func(a *active) { a.disowned = true })
 }
 
 // printable returns the peer's text as printable ASCII, at most 160 bytes.

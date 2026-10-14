@@ -315,6 +315,7 @@ func TestSpliceNegotiationRoundTrip(t *testing.T) {
 		},
 		OursReplaced: true,
 		Dead:         true,
+		Disowned:     true,
 		AgreedAt:     1_790_000_000,
 		OurOutputs: []*wire.TxOut{
 			{Value: 40_000, PkScript: []byte{0, 0x14, 7}},
@@ -356,6 +357,7 @@ func TestSpliceNegotiationRoundTrip(t *testing.T) {
 	require.False(t, got.LockedReceived)
 	require.True(t, got.OursReplaced)
 	require.True(t, got.Dead)
+	require.True(t, got.Disowned)
 	require.Equal(t, r.Negotiation.OurOutputs, got.OurOutputs)
 	require.Equal(t, r.Negotiation.Inputs, got.Inputs)
 

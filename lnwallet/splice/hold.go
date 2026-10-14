@@ -24,7 +24,7 @@ func (m *Machine) Signing() (bool, lntypes.ChannelParty) {
 	defer m.mu.Unlock()
 
 	a := m.active
-	if a == nil || a.phase != phaseSigning {
+	if a == nil || a.phase != phaseSigning || a.disowned {
 		return false, lntypes.Local
 	}
 	if a.role == interactivetx.Initiator {

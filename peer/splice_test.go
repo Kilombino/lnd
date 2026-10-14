@@ -61,6 +61,15 @@ func TestPeerNoCloseDuringSplice(t *testing.T) {
 	require.NoError(t, ch.State().PutSpliceRecord(dead))
 	require.True(t, peer.spliceUnlocked(chanID))
 
+	// Disowned by the peer: a close, spending the output it spends, ends
+	// it, and is the way out.
+	dead.Negotiation.Disowned = true
+	require.NoError(t, ch.State().PutSpliceRecord(dead))
+	require.False(t, peer.spliceUnlocked(chanID))
+	dead.Negotiation.Disowned = false
+	require.NoError(t, ch.State().PutSpliceRecord(dead))
+	require.True(t, peer.spliceUnlocked(chanID))
+
 	// Ours.
 	req := &htlcswitch.ChanClose{
 		CloseType: contractcourt.CloseRegular,

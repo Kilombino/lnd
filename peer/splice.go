@@ -35,8 +35,11 @@ func (p *Brontide) spliceUnlocked(chanID lnwire.ChannelID) bool {
 			// Unreadable: as unlocked.
 			return true
 		}
+		// Dead, or disowned by the peer (a close spends the output
+		// it spends, ending it).
 		for _, r := range records {
-			if r.Negotiation != nil && r.Negotiation.Dead {
+			n := r.Negotiation
+			if n != nil && (n.Dead || n.Disowned) {
 				dead[r.Txid()] = true
 			}
 		}
