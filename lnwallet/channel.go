@@ -4766,6 +4766,20 @@ func (lc *LightningChannel) ProcessChanSyncMsg(ctx context.Context,
 			newCommit, err := lc.SignNextCommitment(ctx)
 			switch {
 
+			// Splices pending: the batch it went out in, a
+			// commitment_signed per funding. Alone, the peer
+			// fails the channel (the Core Lightning port does).
+			case err == nil && len(newCommit.SpliceSigs) > 0:
+				diff, err := lc.channelState.RemoteCommitChainTip()
+				if err != nil {
+					return nil, nil, nil, err
+				}
+				msgs, err := lc.retransmittedCommitSigs(diff)
+				if err != nil {
+					return nil, nil, nil, err
+				}
+				updates = append(updates, msgs...)
+
 			// If we signed this state, then we'll accumulate
 			// another update to send over.
 			case err == nil:

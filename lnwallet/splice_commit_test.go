@@ -1492,3 +1492,68 @@ func TestSpliceRestoreFailureRevocation(t *testing.T) {
 	_, _, _, err = bob.RevokeCurrentCommitment()
 	require.Error(t, err)
 }
+
+// TestSpliceChanSyncOweRevocationAndCommitment checks a reconnection on which
+// we owe both our revocation and our commitment while a splice is pending:
+// the peer added an HTLC and signed, we revoked and stopped before signing,
+// and the revocation was lost. Our commitment goes out in its batch, a
+// commitment_signed per funding. Alone, the peer fails the channel (the Core
+// Lightning port does, as BOLT 2 asks).
+func TestSpliceChanSyncOweRevocationAndCommitment(t *testing.T) {
+	t.Parallel()
+
+	alice, bob, txid := splicedPair(t, 100_000_000, 0)
+
+	htlc, _ := createHTLC(0, lnwire.NewMSatFromSatoshis(100_000))
+	index, err := alice.AddHTLC(htlc, nil)
+	require.NoError(t, err)
+	htlc.ID = index
+	_, err = bob.ReceiveHTLC(htlc)
+	require.NoError(t, err)
+	aCommit, err := alice.SignNextCommitment(ctxb)
+	require.NoError(t, err)
+	require.NoError(t, bob.ReceiveNewCommitmentBatch(
+		aCommit.CommitSigs, aCommit.SpliceSigs,
+	))
+	_, _, _, err = bob.RevokeCurrentCommitment()
+	require.NoError(t, err)
+
+	aliceSync, err := alice.channelState.ChanSyncMsg()
+	require.NoError(t, err)
+	msgs, _, _, err := bob.ProcessChanSyncMsg(ctxb, aliceSync)
+	require.NoError(t, err)
+
+	require.Len(t, msgs, 4)
+	require.IsType(t, &lnwire.RevokeAndAck{}, msgs[0])
+	batch, ok := msgs[1].(*lnwire.StartBatch)
+	require.True(t, ok, "%T", msgs[1])
+	require.EqualValues(t, 2, batch.BatchSize)
+	var named []chainhash.Hash
+	for _, m := range msgs[2:] {
+		sig, ok := m.(*lnwire.CommitSig)
+		require.True(t, ok, "%T", m)
+		sig.FundingTxid.WhenSome(func(h chainhash.Hash) {
+			named = append(named, h)
+		})
+	}
+	require.Contains(t, named, txid)
+
+	// Alice takes them as they come.
+	rev := msgs[0].(*lnwire.RevokeAndAck)
+	_, _, err = alice.ReceiveRevocation(rev)
+	require.NoError(t, err)
+	main := msgs[2].(*lnwire.CommitSig)
+	var spliceSigs []SpliceCommitSigs
+	for _, m := range msgs[3:] {
+		sig := m.(*lnwire.CommitSig)
+		spliceSigs = append(spliceSigs, SpliceCommitSigs{
+			FundingTxid: sig.FundingTxid.UnsafeFromSome(),
+			CommitSigs: &CommitSigs{
+				CommitSig: sig.CommitSig, HtlcSigs: sig.HtlcSigs,
+			},
+		})
+	}
+	require.NoError(t, alice.ReceiveNewCommitmentBatch(&CommitSigs{
+		CommitSig: main.CommitSig, HtlcSigs: main.HtlcSigs,
+	}, spliceSigs))
+}
