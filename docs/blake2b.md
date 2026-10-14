@@ -505,9 +505,10 @@ that would draw on those coins are failed back with
 funds, are unaffected.
 
 **Replacements.** The peer may replace a pending splice, its own or one
-this node started, with a transaction paying at least as much in fees
-(`tx_init_rbf`); the Core Lightning port does so when its user splices
-while one is pending. This node takes part: adding nothing to the peer's
+this node started, at a fee rate at least as high (`tx_init_rbf`); the
+Core Lightning port does so when its user splices while one is pending.
+One that pays less in total is kept all the same: it won't relay, and the
+transaction it replaces confirms instead. This node takes part: adding nothing to the peer's
 splice, and to its own the same coins, or the same amount to the same
 destination, paying for them at the new rate. Every transaction stays a
 candidate until one confirms, which is then the splice. This node doesn't
@@ -520,9 +521,19 @@ take the channel above `maxchansize`.
 **Limits.** Splices peers start are limited across the node: one per
 peer, five in all, and a channel whose peer ended three without locking
 within a day refuses more until the next day. A peer that breaks a splice
-after this node signed it (an abort or bad signatures after ours, or
-publishing it without sending its own) is refused further splices on that
-channel until a restart.
+after this node signed it (bad signatures after ours, or an abort after
+both sides signed) is refused further splices on that channel until a
+restart.
+
+**A failed splice.** When a coin in a splice is spent by another
+transaction, six confirmations deep, the splice can never confirm:
+`pending_splice` shows it as `dead`. It stays on the channel, as it does
+on the peer's side, until the channel closes: the channel keeps working at
+its old size, but no new splice can start, and what the splice was moving
+out of this node's balance can't be sent in payments meanwhile. A
+cooperative close works and pays out the full balance. If a
+reorganisation takes the other transaction out and the splice confirms
+after all, it locks as any.
 
 **A stuck splice.** A splice transaction is offered to the backend again
 at every block until it confirms. If its fee rate is too low to confirm,
