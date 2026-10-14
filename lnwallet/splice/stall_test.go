@@ -8,6 +8,7 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/wire"
 	"github.com/lightningnetwork/lnd/chainntnfs"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/fn/v2"
@@ -755,5 +756,28 @@ func TestWithheldInputsWatched(t *testing.T) {
 		defer h.chain.mu.Unlock()
 
 		return len(h.chain.spends[s.coin.OutPoint]) > 0
+	}, 5*time.Second, 10*time.Millisecond)
+}
+
+// TestWithheldSpliceDead checks a splice whose peer never sent its
+// tx_signatures, withheld or disowned, one of whose inputs another
+// transaction spent: declared dead at depth, its transaction unsigned,
+// where assembling the signed one crashed the node.
+func TestWithheldSpliceDead(t *testing.T) {
+	t.Parallel()
+
+	h := newAcceptorHarness(t)
+	s := splicePastSigning(t, h)
+
+	conflict := wire.NewMsgTx(2)
+	conflict.AddTxIn(&wire.TxIn{PreviousOutPoint: s.coin.OutPoint})
+	conflict.AddTxOut(&wire.TxOut{Value: 1_000, PkScript: p2tr(3)})
+	h.chain.spend(t, s.coin.OutPoint, conflict, 1)
+	h.chain.confirm(t, conflict.TxHash(), deadDepth, 1,
+		&chainntnfs.TxConfirmation{})
+
+	require.Eventually(t, func() bool {
+		last, err := h.bob.State().LastSplice()
+		return err == nil && last != nil && last.Outcome == "dead"
 	}, 5*time.Second, 10*time.Millisecond)
 }

@@ -347,6 +347,11 @@ func (m *Machine) signedTx() (*wire.MsgTx, error) {
 func (m *Machine) signedTxWith(a *active, ours,
 	theirs *lnwire.TxSignatures) (*wire.MsgTx, error) {
 
+	// One side's missing: the peer withheld or disowned its own.
+	if ours == nil || theirs == nil {
+		return nil, errors.New("tx_signatures missing")
+	}
+
 	res := a.res
 	tx := res.Tx.Copy()
 
