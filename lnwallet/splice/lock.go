@@ -457,7 +457,11 @@ func (m *Machine) restore() error {
 		// A dead one can't confirm: nothing to follow, though its
 		// funding stays in the channel's set.
 		n := r.Negotiation
-		if r.Retired || n == nil || n.Tx == nil || n.Dead {
+		if r.Retired || n == nil || n.Tx == nil {
+			continue
+		}
+		if n.Dead {
+			m.restoreDead(r)
 			continue
 		}
 		a, err := restoredActive(r)
@@ -537,6 +541,37 @@ func (m *Machine) restore() error {
 	}
 
 	return nil
+}
+
+// restoreDead watches a dead splice transaction's inputs again while the
+// wallet still holds it: the conflicting spend, deep enough, takes it out of
+// the wallet and releases its coins, as before the restart. Without it, a
+// restart between the splice's death and that depth left its coins counted
+// as spent for good.
+func (m *Machine) restoreDead(r *channeldb.SpliceRecord) {
+	if m.cfg.CoinSource == nil {
+		return
+	}
+	txid := r.Txid()
+	if _, err := m.cfg.CoinSource.FetchTx(txid); err != nil {
+		return
+	}
+	a, err := restoredActive(r)
+	if err != nil {
+		log.Errorf("ChannelID(%v): unable to read dead splice %v: %v",
+			m.cfg.ChanID, txid, err)
+		return
+	}
+	m.dead[txid] = deadSplice{tx: r.Negotiation.Tx, inputs: a.ourInputs}
+
+	height := m.heightHint(r.Negotiation.BroadcastHeight)
+	for _, in := range a.res.Inputs {
+		if in.Shared {
+			continue
+		}
+		m.wg.Add(1)
+		go m.watchInput(txid, in.OutPoint, in.PkScript, height)
+	}
 }
 
 // signedBoth reports whether both sides' tx_signatures are in.

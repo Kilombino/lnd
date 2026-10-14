@@ -73,6 +73,11 @@ func (w *fakeWallet) PublishTransaction(tx *wire.MsgTx, label string) error {
 	w.publishes++
 	w.published[tx.TxHash()] = label
 
+	// Kept, as a wallet keeps what it published.
+	if _, ok := w.txs[tx.TxHash()]; !ok && w.txs != nil {
+		w.txs[tx.TxHash()] = tx
+	}
+
 	return nil
 }
 

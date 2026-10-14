@@ -1163,3 +1163,45 @@ func TestSpliceZeroBroadcastHeight(t *testing.T) {
 		return p.chain.registered(u.Txid, 6, 3)
 	}, 5*time.Second, 10*time.Millisecond)
 }
+
+// TestSpliceDeadForgottenAfterRestart checks a dead splice whose starter
+// restarted before the conflicting spend was deep enough: the restarted
+// machine still takes it out of the wallet then, releasing its coins. It
+// knew nothing of it, and the coins stayed counted as spent for good.
+func TestSpliceDeadForgottenAfterRestart(t *testing.T) {
+	t.Parallel()
+
+	p := newSplicePair(t)
+	c := p.alice.fund(t, 1, 5_000_000)
+	updates, err := p.alice.machine.Splice(Request{
+		Direction: DirectionIn, Amount: 1_000_000, FeeRate: 2_500,
+	})
+	require.NoError(t, err)
+	u := requireUpdates(t, updates, StatePreparing, StateNegotiating,
+		StateSigned, StateBroadcast)
+
+	conflict := wire.NewMsgTx(2)
+	conflict.AddTxIn(&wire.TxIn{PreviousOutPoint: c.OutPoint})
+	conflict.AddTxOut(&wire.TxOut{Value: 4_000_000, PkScript: p2tr(3)})
+	p.chain.spend(t, c.OutPoint, conflict, 2)
+	p.chain.confirm(t, conflict.TxHash(), deadDepth, 2,
+		&chainntnfs.TxConfirmation{})
+	requireUpdates(t, updates, StateAborted)
+
+	// Alice restarts before the spend is deep enough to forget it.
+	p.alice.machine.Stop()
+	restarted := NewMachine(p.alice.machine.cfg)
+	startReestablished(t, restarted)
+	t.Cleanup(restarted.Stop)
+	p.chain.spend(t, c.OutPoint, conflict, 1)
+	p.chain.confirm(t, conflict.TxHash(), deadDepth, 3,
+		&chainntnfs.TxConfirmation{})
+	p.chain.confirm(t, conflict.TxHash(), forgetDepth, 3,
+		&chainntnfs.TxConfirmation{})
+
+	require.Eventually(t, func() bool {
+		removed := p.alice.wallet.removedTxs()
+		return len(removed) == 1 && removed[0] == u.Txid
+	}, 5*time.Second, 10*time.Millisecond)
+	require.Zero(t, p.alice.wallet.leaseCount())
+}
