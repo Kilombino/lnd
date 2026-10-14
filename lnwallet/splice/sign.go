@@ -80,9 +80,7 @@ func (m *Machine) maybeSendTxSignatures() {
 	// it goes on as a splice that may not relay, to bump or to die as
 	// any stuck one.
 	if !m.signsFirst() && m.cfg.CheckMempool != nil {
-		a.ourTxSigs = sigs
-		tx, err := m.signedTx()
-		a.ourTxSigs = nil
+		tx, err := m.signedTxWith(a, sigs, a.theirTxSigs)
 		if err == nil {
 			err = m.cfg.CheckMempool(tx)
 		}
@@ -339,16 +337,25 @@ func (m *Machine) checkTheirTxSignatures(msg *lnwire.TxSignatures) error {
 // signedTx assembles the splice transaction with every witness.
 func (m *Machine) signedTx() (*wire.MsgTx, error) {
 	a := m.active
+
+	return m.signedTxWith(a, a.ourTxSigs, a.theirTxSigs)
+}
+
+// signedTxWith is signedTx with the signatures given: ours not yet the
+// splice's, the link reading them from another goroutine.
+func (m *Machine) signedTxWith(a *active, ours,
+	theirs *lnwire.TxSignatures) (*wire.MsgTx, error) {
+
 	res := a.res
 	tx := res.Tx.Copy()
 
-	ourShared, err := a.ourTxSigs.SharedInputSignature.UnwrapOrErr(
+	ourShared, err := ours.SharedInputSignature.UnwrapOrErr(
 		errors.New("no shared input signature of ours"),
 	)
 	if err != nil {
 		return nil, err
 	}
-	theirShared, err := a.theirTxSigs.SharedInputSignature.UnwrapOrErr(
+	theirShared, err := theirs.SharedInputSignature.UnwrapOrErr(
 		errors.New("no shared input signature of theirs"),
 	)
 	if err != nil {
@@ -376,15 +383,15 @@ func (m *Machine) signedTx() (*wire.MsgTx, error) {
 		theirSig, interactivetx.SharedInputHashType,
 	)
 
-	ours, theirs := a.ourTxSigs.Witnesses, a.theirTxSigs.Witnesses
+	ourW, theirW := ours.Witnesses, theirs.Witnesses
 	for i, in := range res.Inputs {
 		if in.Shared {
 			continue
 		}
 		if ourSerial(a.role, in.SerialID) {
-			tx.TxIn[i].Witness, ours = ours[0], ours[1:]
+			tx.TxIn[i].Witness, ourW = ourW[0], ourW[1:]
 		} else {
-			tx.TxIn[i].Witness, theirs = theirs[0], theirs[1:]
+			tx.TxIn[i].Witness, theirW = theirW[0], theirW[1:]
 		}
 	}
 
