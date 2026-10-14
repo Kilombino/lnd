@@ -254,6 +254,17 @@ func (p *Brontide) startSpliceMachine(chanID lnwire.ChannelID,
 		old.Stop()
 	}
 
+	// The connection ending meanwhile: its machines may have been stopped
+	// before this one joined them, and nothing would stop it.
+	if atomic.LoadInt32(&p.disconnect) == 1 {
+		p.spliceMtx.Lock()
+		if p.spliceMachines[chanID] == m {
+			delete(p.spliceMachines, chanID)
+		}
+		p.spliceMtx.Unlock()
+		m.Stop()
+	}
+
 	return m, nil
 }
 
