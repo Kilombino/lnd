@@ -181,14 +181,22 @@ func checkNeutrinoBlake2b(cfg *Config) error {
 			"only")
 	}
 
+	// The same rule chainreg applies when it builds the fee estimator, but
+	// that runs only once the node has synced to the BLAKE2b activation
+	// height; refused here it fails at start instead.
+	if cfg.Bitcoin.MainNet && cfg.Fee.URL == "" {
+		return fmt.Errorf("--fee.url parameter required when running " +
+			"neutrino on mainnet")
+	}
+
 	if cfg.Bitcoin.IsLocalNetwork() || len(cfg.NeutrinoMode.ConnectPeers) > 0 {
 		return nil
 	}
 	if len(cfg.NeutrinoMode.AddPeers) == 0 {
-		return fmt.Errorf("bitcoin.node=neutrino on %s needs " +
-			"neutrino.connect: the DNS seeds return nodes on the " +
-			"SHA256d chain; name Bitcoin Knots nodes on the BLAKE2b " +
-			"chain with blockfilterindex=1 and peerblockfilters=1, " +
+		return fmt.Errorf("bitcoin.node=neutrino on %s needs "+
+			"neutrino.connect: the DNS seeds return nodes on the "+
+			"SHA256d chain; name Bitcoin Knots nodes on the BLAKE2b "+
+			"chain with blockfilterindex=1 and peerblockfilters=1, "+
 			"ideally your own", cfg.ActiveNetParams.Name)
 	}
 	ltndLog.Warnf("neutrino.addpeer without neutrino.connect: peers from "+
