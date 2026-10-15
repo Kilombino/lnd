@@ -334,18 +334,26 @@ func TestNeutrinoTestnet4Height(t *testing.T) {
 	require.ErrorContains(t, applyBlake2bChainConfig(cfg), "out of range")
 }
 
-// TestCheckNeutrinoBlake2b covers the peer and header-import rules for
+// TestCheckNeutrinoBlake2b covers the peer, fee and header-import rules for
 // neutrino on the BLAKE2b chain.
 func TestCheckNeutrinoBlake2b(t *testing.T) {
 	mainnet := func(set func(*Config)) *Config {
 		return blake2bTestConfig(t, chainreg.BitcoinMainNetParams,
 			func(c *Config) {
 				c.Bitcoin.Node = neutrinoBackendName
+				c.Fee.URL = "https://fees.example/fees.json"
 				set(c)
 			})
 	}
 
-	err := checkNeutrinoBlake2b(mainnet(func(*Config) {}))
+	// No fee.url on mainnet: refused at start, not after the sync.
+	err := checkNeutrinoBlake2b(mainnet(func(c *Config) {
+		c.Fee.URL = ""
+		c.NeutrinoMode.ConnectPeers = []string{"knots.example:8333"}
+	}))
+	require.ErrorContains(t, err, "fee.url")
+
+	err = checkNeutrinoBlake2b(mainnet(func(*Config) {}))
 	require.ErrorContains(t, err, "neutrino.connect")
 
 	require.NoError(t, checkNeutrinoBlake2b(mainnet(func(c *Config) {

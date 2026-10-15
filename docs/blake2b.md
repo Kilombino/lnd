@@ -230,15 +230,19 @@ follow the BLAKE2b proof of work and is refused at configuration time.
 `neutrino` validates BLAKE2b proof of work itself (btcd's `blockchain`
 package, from the network's `Blake2bHeight`). A peer serving the SHA256d chain
 is refused at the activation height, where its headers are still v1, and is
-banned so it is not dialled again. On mainnet the light client also gets a
+banned for 48 hours (lnd sets neutrino's ban duration to that, whatever
+`neutrino.banduration` says) so it is not dialled again meanwhile. A peer
+named in `neutrino.connect` or `neutrino.addpeer` is only disconnected, with
+an error saying what to check, so a wrong setting here (a regtest activation
+height) cannot lock out your own node. On mainnet the light client also gets a
 checkpoint at block 961640 with the activation block's hash, and once its
 headers reach that height the same chain-identity check as with `bitcoind`
 runs against them and writes `chain-identity.json`.
 
 Peers: neutrino needs peers serving compact block filters, that is Knots nodes
 on the BLAKE2b chain with `blockfilterindex=1` and `peerblockfilters=1`.
-Mainnet and testnet4 use Bitcoin's DNS seeds, which return almost only nodes on
-the SHA256d chain, so `neutrino.connect` is required there; `neutrino.addpeer`
+Mainnet and testnet4 use the SHA256 chain's DNS seeds, which return almost only
+nodes on the SHA256d chain, so `neutrino.connect` is required there; `neutrino.addpeer`
 alone is accepted with a warning, since it still mixes in seed peers. Point it
 at your own Knots node if you have one.
 
