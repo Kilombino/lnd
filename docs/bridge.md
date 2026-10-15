@@ -104,6 +104,14 @@ seconds, through Tor when this node uses Tor:
 - **The cross-check** is Neoxa's BTCB2_USDC market over a BTC/USD price
   (CoinGecko's, or Neoxa's own BTC_USDC market). If the two are more than 5%
   apart, or the cross-check cannot be read, nothing is quoted.
+- **A second venue** is NonKYC's BTCB2_USDT market over the same BTC/USD
+  price: another exchange, both books above being Neoxa's. Each direction
+  trades at whichever of the two is worse for its payer (the lower rate when
+  paying out SHA256 coin, the higher when paying out BLAKE2b coin), so pushing
+  BLAKE2b coin up or down on one exchange gains nothing against the bridge.
+  The two venues often sit a few percent apart, so this prices rather than
+  stops. If NonKYC cannot be read (it refuses many Tor exits), the bridge
+  prices on Neoxa alone, as before.
 - **No market, no quotes.** With no reading in the last 90 seconds, or a
   ticker that has stopped updating, nothing is quoted. A move of 10% within
   ten minutes (the most the fee widens for) stops quoting for half an hour.

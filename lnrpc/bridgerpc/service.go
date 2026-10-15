@@ -484,7 +484,7 @@ func (s *service) priceCheck(sd *side) runner.PriceCheck {
 			return false, err
 		}
 
-		r := m.rate
+		r := m.forSide(sd.invert)
 		if sd.invert {
 			r = 1 / r
 		}
@@ -532,7 +532,7 @@ func (s *service) pricer(sd *side) quote.Pricer {
 			moved = s.res.rate.MaxSpread
 		}
 		r := rate.Reading{
-			OutgoingPerIncoming: m.rate,
+			OutgoingPerIncoming: m.forSide(sd.invert),
 			At:                  m.at,
 			Sources:             m.sources,
 			Spread:              sd.fee + moved,
