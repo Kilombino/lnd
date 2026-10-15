@@ -474,6 +474,7 @@ func TestSpliceReserve(t *testing.T) {
 		func(p *testChannelParams) {
 			p.channel.IsInitiator = true
 			p.channel.LocalChanCfg.DustLimit = 354
+			p.channel.RemoteChanCfg.DustLimit = 500
 			p.channel.LocalChanCfg.ChanReserve = 20_000
 			p.channel.RemoteChanCfg.ChanReserve = 20_000
 		})
@@ -496,8 +497,8 @@ func TestSpliceReserve(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, btcutil.Amount(30_000), reserve)
 
-	// Below the dust limit: ours, as we opened the channel; the chain's
-	// had the peer.
+	// Below the dust limit: the opener's, ours as we opened the
+	// channel, the peer's had it.
 	require.NoError(t, channel.LockSplice(
 		testSpliceLock(t, 0x72, 20_000),
 	))
@@ -505,5 +506,5 @@ func TestSpliceReserve(t *testing.T) {
 	require.Equal(t, btcutil.Amount(354), reserve)
 	channel.IsInitiator = false
 	reserve, _ = channel.SpliceReserve()
-	require.Equal(t, chainDustLimit, reserve)
+	require.Equal(t, btcutil.Amount(500), reserve)
 }
