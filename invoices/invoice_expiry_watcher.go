@@ -28,6 +28,34 @@ type invoiceExpiryTs struct {
 	PaymentHash lntypes.Hash
 	Expiry      time.Time
 	Keysend     bool
+
+	// Invoice identifies the invoice the entry was made for: the payment
+	// hash alone doesn't, as a canceled invoice can be deleted and another
+	// added with the same hash, which this entry must not expire.
+	Invoice InvoiceIdentity
+}
+
+// InvoiceIdentity tells apart invoices with the same payment hash: one
+// deleted and another added since. The add index alone doesn't (SQLite may
+// give the new one the deleted one's), so the creation time goes with it, in
+// seconds as every store keeps it.
+type InvoiceIdentity struct {
+	AddIndex uint64
+	Created  int64
+}
+
+// identityOf returns an invoice's identity.
+func identityOf(invoice *Invoice) InvoiceIdentity {
+	return InvoiceIdentity{
+		AddIndex: invoice.AddIndex,
+		Created:  invoice.CreationDate.Unix(),
+	}
+}
+
+// Is reports whether the invoice is the one identified; a zero identity is
+// any invoice.
+func (id InvoiceIdentity) Is(invoice *Invoice) bool {
+	return id == InvoiceIdentity{} || id == identityOf(invoice)
 }
 
 // Less implements PriorityQueueItem.Less such that the top item in the
@@ -44,6 +72,10 @@ var _ invoiceExpiry = (*invoiceExpiryHeight)(nil)
 type invoiceExpiryHeight struct {
 	paymentHash  lntypes.Hash
 	expiryHeight uint32
+
+	// invoice identifies the invoice the entry was made for (see
+	// invoiceExpiryTs.Invoice).
+	invoice InvoiceIdentity
 }
 
 // Less implements PriorityQueueItem.Less such that the top item in the
@@ -88,8 +120,9 @@ type InvoiceExpiryWatcher struct {
 	// currentHash is the block hash for our current height.
 	currentHash *chainhash.Hash
 
-	// cancelInvoice is a template method that cancels an expired invoice.
-	cancelInvoice func(lntypes.Hash, bool) error
+	// cancelInvoice is a template method that cancels an expired invoice:
+	// the one with the payment hash, if it is the one identified.
+	cancelInvoice func(lntypes.Hash, InvoiceIdentity, bool) error
 
 	// timestampExpiryQueue holds invoiceExpiry items and is used to find
 	// the next invoice to expire.
@@ -133,9 +166,9 @@ func NewInvoiceExpiryWatcher(clock clock.Clock,
 // Start starts the subscription handler and the main loop. Start() will
 // return with error if InvoiceExpiryWatcher is already started. Start()
 // expects a cancellation function passed that will be use to cancel expired
-// invoices by their payment hash.
+// invoices by their payment hash, only the invoice identified.
 func (ew *InvoiceExpiryWatcher) Start(
-	cancelInvoice func(lntypes.Hash, bool) error) error {
+	cancelInvoice func(lntypes.Hash, InvoiceIdentity, bool) error) error {
 
 	ew.Lock()
 	defer ew.Unlock()
@@ -210,7 +243,12 @@ func makeInvoiceExpiry(paymentHash lntypes.Hash,
 			}
 		}
 
-		return makeHeightExpiry(paymentHash, minHeight)
+		expiry := makeHeightExpiry(paymentHash, minHeight)
+		if expiry != nil {
+			expiry.invoice = identityOf(invoice)
+		}
+
+		return expiry
 
 	default:
 		log.Debugf("Invoice not added to expiry watcher: %v",
@@ -238,6 +276,7 @@ func makeTimestampExpiry(paymentHash lntypes.Hash,
 		PaymentHash: paymentHash,
 		Expiry:      expiry,
 		Keysend:     len(invoice.PaymentRequest) == 0,
+		Invoice:     identityOf(invoice),
 	}
 }
 
@@ -318,7 +357,7 @@ func (ew *InvoiceExpiryWatcher) cancelNextExpiredInvoice() {
 		// field would never be used. Enabling cancellation for accepted
 		// keysend invoices creates a safety mechanism that can prevents
 		// channel force-closes.
-		ew.expireInvoice(top.PaymentHash, top.Keysend)
+		ew.expireInvoice(top.PaymentHash, top.Invoice, top.Keysend)
 		ew.timestampExpiryQueue.Pop()
 	}
 }
@@ -338,14 +377,16 @@ func (ew *InvoiceExpiryWatcher) cancelNextHeightExpiredInvoice() {
 	// We always force-cancel block-based expiry so that we can
 	// cancel invoices that have been accepted but not yet resolved.
 	// This helps us avoid force closes.
-	ew.expireInvoice(top.paymentHash, true)
+	ew.expireInvoice(top.paymentHash, top.invoice, true)
 	ew.blockExpiryQueue.Pop()
 }
 
 // expireInvoice attempts to expire an invoice and logs an error if we get an
 // unexpected error.
-func (ew *InvoiceExpiryWatcher) expireInvoice(hash lntypes.Hash, force bool) {
-	err := ew.cancelInvoice(hash, force)
+func (ew *InvoiceExpiryWatcher) expireInvoice(hash lntypes.Hash,
+	id InvoiceIdentity, force bool) {
+
+	err := ew.cancelInvoice(hash, id, force)
 	switch {
 	case err == nil:
 

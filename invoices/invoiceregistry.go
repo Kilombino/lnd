@@ -231,9 +231,9 @@ func (i *InvoiceRegistry) Start() error {
 	// Start InvoiceExpiryWatcher and prepopulate it with existing
 	// active invoices.
 	err = i.expiryWatcher.Start(
-		func(hash lntypes.Hash, force bool) error {
+		func(hash lntypes.Hash, id InvoiceIdentity, force bool) error {
 			return i.cancelInvoiceImpl(
-				context.Background(), hash, force,
+				context.Background(), hash, id, force,
 			)
 		})
 	if err != nil {
@@ -1431,7 +1431,7 @@ func (i *InvoiceRegistry) SettleHodlInvoice(ctx context.Context,
 func (i *InvoiceRegistry) CancelInvoice(ctx context.Context,
 	payHash lntypes.Hash) error {
 
-	return i.cancelInvoiceImpl(ctx, payHash, true)
+	return i.cancelInvoiceImpl(ctx, payHash, InvoiceIdentity{}, true)
 }
 
 // shouldCancel examines the state of an invoice and whether we want to
@@ -1453,7 +1453,7 @@ func shouldCancel(state ContractState, cancelAccepted bool) bool {
 // requested to do so. It notifies subscribing links and resolvers that
 // the associated htlcs were canceled if they change state.
 func (i *InvoiceRegistry) cancelInvoiceImpl(ctx context.Context,
-	payHash lntypes.Hash, cancelAccepted bool) error {
+	payHash lntypes.Hash, id InvoiceIdentity, cancelAccepted bool) error {
 
 	i.Lock()
 	defer i.Unlock()
@@ -1461,7 +1461,15 @@ func (i *InvoiceRegistry) cancelInvoiceImpl(ctx context.Context,
 	ref := InvoiceRefByHash(payHash)
 	log.Debugf("Invoice%v: canceling invoice", ref)
 
+	// An expiry entry names the invoice it was made for: another one
+	// added since with the same payment hash, the first deleted, isn't
+	// it.
+	var another bool
 	updateInvoice := func(invoice *Invoice) (*InvoiceUpdateDesc, error) {
+		if !id.Is(invoice) {
+			another = true
+			return nil, nil
+		}
 		if !shouldCancel(invoice.State, cancelAccepted) {
 			return nil, nil
 		}
@@ -1494,6 +1502,11 @@ func (i *InvoiceRegistry) cancelInvoiceImpl(ctx context.Context,
 	}
 	if err != nil {
 		return err
+	}
+	if another {
+		log.Debugf("Invoice%v: expiry of an earlier invoice with this "+
+			"hash, not this one's", ref)
+		return nil
 	}
 
 	// Return without cancellation if the invoice state is ContractAccepted.

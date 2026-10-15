@@ -39,7 +39,7 @@ func newInvoiceExpiryWatcherTest(t *testing.T, now time.Time,
 	test.wg.Add(numExpiredInvoices)
 
 	err := test.watcher.Start(func(paymentHash lntypes.Hash,
-		force bool) error {
+		_ InvoiceIdentity, force bool) error {
 
 		test.canceledInvoices = append(
 			test.canceledInvoices, paymentHash,
@@ -91,7 +91,7 @@ func TestInvoiceExpiryWatcherStartStop(t *testing.T) {
 		clock.NewTestClock(testTime), 0, uint32(testCurrentHeight), nil,
 		newMockNotifier(),
 	)
-	cancel := func(lntypes.Hash, bool) error {
+	cancel := func(lntypes.Hash, InvoiceIdentity, bool) error {
 		t.Fatalf("unexpected call")
 		return nil
 	}

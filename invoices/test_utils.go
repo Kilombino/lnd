@@ -232,7 +232,9 @@ func setupHodlExpiry(t *testing.T, creationDate time.Time,
 
 	// Use an unbuffered channel to block on cancel calls so that the test
 	// does not exit before we've processed all the invoices we expect.
-	cancelImpl := func(paymentHash lntypes.Hash, force bool) error {
+	cancelImpl := func(paymentHash lntypes.Hash, _ InvoiceIdentity,
+		force bool) error {
+
 		test.stateLock.Lock()
 		currentState := test.state
 		test.stateLock.Unlock()

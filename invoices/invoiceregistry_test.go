@@ -493,6 +493,10 @@ func TestInvoiceRegistry(t *testing.T) {
 			test: testInvoiceExpiryWithRegistry,
 		},
 		{
+			name: "ExpiryOfDeletedInvoiceSparesItsReplacement",
+			test: testExpiryOfDeletedInvoiceSparesItsReplacement,
+		},
+		{
 			name: "OldInvoiceRemovalOnStart",
 			test: testOldInvoiceRemovalOnStart,
 		},
@@ -1751,6 +1755,80 @@ func testInvoiceExpiryWithRegistry(t *testing.T,
 
 	// Finally stop the registry.
 	require.NoError(t, registry.Stop(), "failed to stop invoice registry")
+}
+
+// testExpiryOfDeletedInvoiceSparesItsReplacement checks a canceled invoice
+// deleted and another added with the same payment hash: the first one's
+// expiry, still queued, doesn't cancel the second, which expires at its own
+// time.
+func testExpiryOfDeletedInvoiceSparesItsReplacement(t *testing.T,
+	makeDB func(t *testing.T) (invpkg.InvoiceDB, *clock.TestClock)) {
+
+	t.Parallel()
+	idb, testClock := makeDB(t)
+
+	cfg := invpkg.RegistryConfig{
+		FinalCltvRejectDelta: testFinalCltvRejectDelta,
+		Clock:                testClock,
+		HtlcInterceptor:      &invpkg.MockHtlcModifier{},
+	}
+	expiryWatcher := invpkg.NewInvoiceExpiryWatcher(
+		cfg.Clock, 0, uint32(testCurrentHeight), nil, newMockNotifier(),
+	)
+	registry := invpkg.NewRegistry(idb, expiryWatcher, &cfg)
+	require.NoError(t, registry.Start())
+	t.Cleanup(func() { require.NoError(t, registry.Stop()) })
+
+	ctxb := t.Context()
+	var preimage lntypes.Preimage
+	preimage[0] = 7
+	hash := preimage.Hash()
+
+	// The first, expiring ten minutes after its creation, canceled and
+	// deleted.
+	first := newInvoiceExpiryTestInvoice(
+		t, preimage, testTime, 10*time.Minute,
+	)
+	_, err := registry.AddInvoice(ctxb, first, hash)
+	require.NoError(t, err)
+	require.NoError(t, registry.CancelInvoice(ctxb, hash))
+	firstStored, err := registry.LookupInvoice(ctxb, hash)
+	require.NoError(t, err)
+	require.NoError(t, idb.DeleteInvoice(ctxb, []invpkg.InvoiceDeleteRef{{
+		PayHash:  hash,
+		PayAddr:  &firstStored.Terms.PaymentAddr,
+		AddIndex: firstStored.AddIndex,
+	}}))
+
+	// The second, five minutes later, expiring in an hour.
+	second := newInvoiceExpiryTestInvoice(
+		t, preimage, testTime.Add(5*time.Minute), time.Hour,
+	)
+	_, err = registry.AddInvoice(ctxb, second, hash)
+	require.NoError(t, err)
+
+	state := func() invpkg.ContractState {
+		inv, err := registry.LookupInvoice(ctxb, hash)
+		require.NoError(t, err)
+
+		return inv.State
+	}
+
+	// Past the first one's expiry: the second stays open.
+	testClock.SetTime(testTime.Add(11 * time.Minute))
+	time.Sleep(300 * time.Millisecond)
+	require.Equal(t, invpkg.ContractOpen, state())
+
+	// Past its own: canceled.
+	testClock.SetTime(testTime.Add(66 * time.Minute))
+	err = wait.NoError(func() error {
+		if s := state(); s != invpkg.ContractCanceled {
+			return fmt.Errorf("state %v", s)
+		}
+
+		return nil
+	}, testTimeout)
+	require.NoError(t, err)
 }
 
 // testOldInvoiceRemovalOnStart tests that we'll attempt to remove old canceled
