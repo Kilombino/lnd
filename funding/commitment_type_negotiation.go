@@ -85,8 +85,8 @@ func requireUnifiedSigs(chanType *lnwire.ChannelType,
 // outright, so the channel was both unbound and unable to interoperate.
 //
 // Taproot is excluded deliberately, for the reason explicitNegotiateCommitment-
-// Type gives: there the commitment signature is a MuSig2 partial signature over
-// a BIP341 digest, so opting in is a wire change rather than a hash type.
+// Type gives: the spec doesn't define option_unified_sigs for taproot channel
+// types.
 func withUnifiedSigs(chanType lnwire.ChannelType, local,
 	remote *lnwire.FeatureVector) lnwire.ChannelType {
 
@@ -191,11 +191,12 @@ func explicitNegotiateCommitmentType(channelType lnwire.ChannelType, local,
 		}
 
 		// Not on a taproot channel. There the commitment signature is
-		// a MuSig2 partial signature over a BIP341 digest, and making
-		// that opt in is a wire change (a 65-byte signature in
-		// commitment_signed) rather than a different hash type. Until
-		// that is specified, refusing is better than agreeing to a
-		// channel whose two sides would sign different digests.
+		// a MuSig2 partial signature, which carries no hash type, over
+		// a BIP341 digest: opting in would change the digest the two
+		// sides sign, not the messages. The spec doesn't define it for
+		// taproot channel types (lightning-blake2b/bolts#12), and until
+		// it does, refusing is better than agreeing to a channel whose
+		// two sides would sign different digests.
 		if isTaprootType(channelFeatures) {
 			return 0, errUnsupportedChannelType
 		}
