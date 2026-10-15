@@ -330,7 +330,7 @@
         "payment_metadata": {
           "type": "string",
           "format": "byte",
-          "description": "Payment metadata (BOLT 11 field m) to put on the invoice: the payer sends\nit back with the payment. Setting it also sets the payment_metadata feature\nbit (49), as BOLT 11 asks of an invoice that carries one. Lightning Fork\nonly: stock LND ignores the field, and the number is kept clear of\nupstream's."
+          "description": "Payment metadata (BOLT 11 field m) to put on the invoice: BOLT 11 has the\npayer send it back with the payment. Setting it also sets the optional\nfeature bit 49, BOLT 9's option_payment_metadata, so payers can tell the\ninvoice expects it back; BOLT 11 itself does not require the bit. Lightning\nFork only: stock LND ignores the field, and the number is kept clear of\nupstream's. lnd#10316 proposes metadata = 11 for the same thing; if\nupstream takes it, Lightning Fork will move to that field."
         }
       }
     },

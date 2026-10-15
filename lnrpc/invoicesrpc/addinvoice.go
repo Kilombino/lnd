@@ -161,9 +161,12 @@ type AddInvoiceData struct {
 	// used to assist in reaching the invoice's destination.
 	RouteHints [][]zpay32.HopHint
 
-	// Metadata is optional payment metadata (BOLT 11 field m) that the payer
-	// sends back with the payment. An invoice that carries it also sets the
-	// payment_metadata feature bit, as BOLT 11 asks.
+	// Metadata is optional payment metadata (BOLT 11 field m), which BOLT 11
+	// has the payer send back with the payment. An invoice that carries it
+	// also sets the optional feature bit 49, BOLT 9's option_payment_metadata,
+	// so payers can tell it expects the metadata back; BOLT 11 itself does not
+	// require the bit. lnd#10316 proposes field 11 of AddHoldInvoiceRequest
+	// (metadata) for the same thing; the RPC uses 1000 until upstream decides.
 	Metadata []byte
 }
 
