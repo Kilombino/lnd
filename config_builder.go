@@ -1826,8 +1826,8 @@ func initNeutrinoBackend(ctx context.Context, cfg *Config, chainDir string,
 	// neutrino light client. We pass in relevant configuration parameters
 	// required.
 	config := neutrino.Config{
-		DataDir:      dbPath,
-		Database:     db,
+		DataDir:  dbPath,
+		Database: db,
 		// With a checkpoint at the BLAKE2b activation block where it
 		// is pinned (mainnet); see chainreg.NeutrinoChainParams.
 		ChainParams:  *chainreg.NeutrinoChainParams(cfg.ActiveNetParams),
