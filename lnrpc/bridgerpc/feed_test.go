@@ -47,8 +47,24 @@ func newMarket(now time.Time) *market {
 	m.set(pairDirect, 0.006, 0.006, 0.00606)
 	m.set(pairUSDC, 510, 509, 512)
 	m.coinGecko(85000)
+	m.nonKYC(510, 509, 512)
 
 	return m
+}
+
+// nonKYC gives the second venue's BTCB2_USDT book a last trade, best bid and
+// best ask (zero last: the venue does not answer).
+func (m *market) nonKYC(last, bid, ask float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if last == 0 {
+		delete(m.body, nonKYCTickerURL+pairNonKYC)
+
+		return
+	}
+	m.body[nonKYCTickerURL+pairNonKYC] = fmt.Sprintf(`{"ticker_id":%q,`+
+		`"last_price":"%g","bid":"%g","ask":"%g"}`, pairNonKYC, last, bid,
+		ask)
 }
 
 // set gives a pair a last trade, best bid and best ask.
@@ -222,6 +238,119 @@ func TestTheFeedRefusesWhenTheBooksDisagree(t *testing.T) {
 	}
 }
 
+// Each direction trades at whichever venue is worse for its payer: BLAKE2b
+// coin pushed up on Neoxa alone is priced at NonKYC for whoever sells it to
+// the bridge, and the other direction keeps Neoxa's price.
+func TestEachDirectionTakesTheWorseVenue(t *testing.T) {
+	m := newMarket(feedStart)
+	f := testFeed(t, m)
+
+	// NonKYC 5% under Neoxa (0.0057 SHA256 coin per BLAKE2b coin).
+	m.nonKYC(484.5, 484.5, 484.5)
+	f.read(context.Background())
+	got, err := f.quoteRate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(got.rate-0.006) > 1e-12 {
+		t.Errorf("rate %g, wanted Neoxa's 0.006", got.rate)
+	}
+	if v := got.forSide(false); math.Abs(v-0.0057) > 1e-12 {
+		t.Errorf("paying out SHA256 at %g, wanted NonKYC's lower 0.0057", v)
+	}
+	if v := got.forSide(true); math.Abs(v-0.006) > 1e-12 {
+		t.Errorf("paying out BLAKE2b at %g, wanted Neoxa's higher 0.006", v)
+	}
+
+	// NonKYC 5% over: the other way round. Its median follows within the
+	// window, as the main price's does.
+	for i := 0; i < 4; i++ {
+		m.nonKYC(535.5, 535.5, 535.5)
+		m.advance(30 * time.Second)
+		f.read(context.Background())
+	}
+	got, err = f.quoteRate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := got.forSide(false); math.Abs(v-0.006) > 1e-12 {
+		t.Errorf("paying out SHA256 at %g, wanted Neoxa's lower 0.006", v)
+	}
+	if v := got.forSide(true); math.Abs(v-0.0063) > 1e-12 {
+		t.Errorf("paying out BLAKE2b at %g, wanted NonKYC's higher 0.0063", v)
+	}
+}
+
+// A quote is made at the venue worse for its payer: with BLAKE2b coin 5% dearer
+// on Neoxa than on NonKYC, the bridge pays out SHA256 coin at NonKYC's rate
+// and BLAKE2b coin at Neoxa's.
+func TestQuotesTakeTheWorseVenuePerDirection(t *testing.T) {
+	t.Parallel()
+
+	cfg := usable()
+	cfg.RateSource = RateSourceNeoxa
+	cfg.FixedRate = 0
+
+	m := newMarket(feedStart)
+	m.nonKYC(484.5, 484.5, 484.5) // 0.0057, 5% under Neoxa's 0.006
+	mkt := testFeed(t, m)
+	mkt.read(context.Background())
+
+	f := &fakeNode{synced: true,
+		balance: cfg.resolve().inventory.TargetOutgoingMsat}
+	svc := serviceForMarket(t, cfg, f, mkt)
+	svc.positionOf = f.deps().ChannelBalance
+	fwd, rev := sidesOf(t, svc)
+
+	got, err := svc.pricer(fwd)(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(got.OutgoingPerIncoming-0.0057) > 1e-12 {
+		t.Errorf("paying out SHA256 at %g, wanted NonKYC's 0.0057",
+			got.OutgoingPerIncoming)
+	}
+	back, err := svc.pricer(rev)(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(back.OutgoingPerIncoming-1/0.006) > 1e-9 {
+		t.Errorf("paying out BLAKE2b at %g, wanted 1/0.006 (Neoxa)",
+			back.OutgoingPerIncoming)
+	}
+}
+
+// The second venue not answering leaves the bridge priced as before, on
+// Neoxa's two books: another exchange's outage does not stop it.
+func TestTheSecondVenueIsNotRequired(t *testing.T) {
+	m := newMarket(feedStart)
+	m.nonKYC(0, 0, 0)
+	f := testFeed(t, m)
+
+	f.read(context.Background())
+	got, err := f.quoteRate()
+	if err != nil {
+		t.Fatalf("quoting stopped without the second venue: %v", err)
+	}
+	if got.second != 0 || got.forSide(false) != got.rate ||
+		got.forSide(true) != got.rate {
+
+		t.Errorf("without a second venue both directions should "+
+			"trade at %g: %+v", got.rate, got)
+	}
+
+	// Nor does a garbled answer, or one for another market.
+	m.mu.Lock()
+	m.body[nonKYCTickerURL+pairNonKYC] = `{"ticker_id":"XYZ_USDT",` +
+		`"last_price":"1","bid":"1","ask":"1"}`
+	m.mu.Unlock()
+	m.advance(30 * time.Second)
+	f.read(context.Background())
+	if _, err := f.quoteRate(); err != nil {
+		t.Fatalf("another market's ticker stopped quoting: %v", err)
+	}
+}
+
 // A market that cannot be read leaves the last reading usable only while it is
 // fresh; after that nothing is quoted.
 func TestTheFeedStopsWhenTheMarketCannotBeRead(t *testing.T) {
@@ -308,6 +437,7 @@ func TestTheBreakerStopsQuoting(t *testing.T) {
 	// 25% in a minute, both books together.
 	m.set(pairDirect, 0.0075, 0.0075, 0.0075)
 	m.set(pairUSDC, 637.5, 637.5, 637.5)
+	m.nonKYC(637.5, 637.5, 637.5)
 	m.advance(time.Minute)
 	f.read(context.Background())
 
@@ -383,9 +513,10 @@ func TestTheMarketRateIsQuotedWithEachDirectionsFee(t *testing.T) {
 	m := newMarket(feedStart)
 	mkt := testFeed(t, m)
 	mkt.read(context.Background())
-	// The market moved 5% within the window.
+	// The market moved 5% within the window, on both venues.
 	m.set(pairDirect, 0.0063, 0.0063, 0.0063)
 	m.set(pairUSDC, 535.5, 535.5, 535.5)
+	m.nonKYC(535.5, 535.5, 535.5)
 	m.advance(30 * time.Second)
 	mkt.read(context.Background())
 
@@ -580,6 +711,7 @@ func TestAFailedFetchDoesNotUndoTheBreaker(t *testing.T) {
 
 	m.set(pairDirect, 0.0075, 0.0075, 0.0075)
 	m.set(pairUSDC, 637.5, 637.5, 637.5)
+	m.nonKYC(637.5, 637.5, 637.5)
 	m.advance(20 * time.Second)
 	f.read(context.Background())
 	if _, err := f.quoteRate(); !errors.Is(err, rate.ErrBroken) {

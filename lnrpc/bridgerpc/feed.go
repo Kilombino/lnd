@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -47,6 +48,29 @@ type marketRate struct {
 	// sources is how many readings agreed on it: one for the operator's
 	// own, two for the market cross-checked.
 	sources int
+
+	// second is the second venue's rate, the same units, when it was read
+	// recently; zero otherwise. Each direction is priced at whichever of
+	// rate and second is worse for its payer (forSide).
+	second float64
+}
+
+// forSide is the rate a direction trades at: with a second venue, the one of
+// the two that is worse for that direction's payer. Paying out SHA256 coin
+// for BLAKE2b coin (invert false) takes the lower rate; paying out BLAKE2b
+// coin (invert true, the rate turned over afterwards) takes the higher. A
+// venue moved on its own then moves nobody's price in their favour: whoever
+// pushes BLAKE2b up on one exchange to sell it to the bridge is priced at the
+// other.
+func (m marketRate) forSide(invert bool) float64 {
+	if m.second <= 0 {
+		return m.rate
+	}
+	if invert {
+		return math.Max(m.rate, m.second)
+	}
+
+	return math.Min(m.rate, m.second)
 }
 
 // quoteRate is the operator's rate while it is fresh.
@@ -85,6 +109,13 @@ const (
 	// several percent, and both are well inside that of each other.
 	coinGeckoRatesURL = "https://api.coingecko.com/api/v3/exchange_rates"
 	pairBTCUSDC       = "BTC_USDC"
+
+	// A second venue, NonKYC's BTCB2_USDT book over the same BTC/USD:
+	// another exchange, so that Neoxa alone, both of whose books the
+	// first check reads, cannot be moved to move the price. It is the
+	// busiest BTCB2 book at the time of writing.
+	nonKYCTickerURL = "https://api.nonkyc.io/api/v2/ticker/"
+	pairNonKYC      = "BTCB2_USDT"
 
 	// feedUserAgent names the bridge to the sources.
 	feedUserAgent = "lightning-fork-bridge"
@@ -144,6 +175,10 @@ type feed struct {
 
 	// readings are the recent good ones, oldest first.
 	readings []rate.Reading
+
+	// seconds are the second venue's recent readings, oldest first, taken
+	// with the good readings above.
+	seconds []rate.Reading
 
 	// cross is the cross-check's last value, for Status.
 	cross float64
@@ -246,7 +281,7 @@ func (f *feed) read(ctx context.Context) {
 	ctx, cancel := context.WithTimeout(ctx, feedTimeout)
 	defer cancel()
 
-	r, cross, err, unsafe := f.measure(ctx)
+	r, cross, second, err, unsafe := f.measure(ctx)
 
 	f.mu.Lock()
 	wasErr := f.err
@@ -262,6 +297,7 @@ func (f *feed) read(ctx context.Context) {
 		// starts the median again, and the breaker, kept by the
 		// oracle, refuses until it clears.
 		f.readings = nil
+		f.seconds = nil
 	}
 	if err == nil {
 		f.readings = append(f.readings, r)
@@ -273,6 +309,19 @@ func (f *feed) read(ctx context.Context) {
 			cut++
 		}
 		f.readings = f.readings[cut:]
+
+		if second > 0 {
+			f.seconds = append(f.seconds, rate.Reading{
+				OutgoingPerIncoming: second, At: r.At,
+			})
+		}
+		cut = 0
+		for cut < len(f.seconds) &&
+			r.At.Sub(f.seconds[cut].At) > 2*smoothWindow {
+
+			cut++
+		}
+		f.seconds = f.seconds[cut:]
 	}
 	f.mu.Unlock()
 
@@ -293,23 +342,23 @@ func (f *feed) read(ctx context.Context) {
 }
 
 // measure reads every source and decides.
-func (f *feed) measure(ctx context.Context) (rate.Reading, float64, error,
-	bool) {
+func (f *feed) measure(ctx context.Context) (rate.Reading, float64, float64,
+	error, bool) {
 
 	now := f.now()
 
 	direct, err := f.ticker(ctx, pairDirect, now)
 	if err != nil {
-		return rate.Reading{}, 0, err, errors.Is(err, rate.ErrStale)
+		return rate.Reading{}, 0, 0, err, errors.Is(err, rate.ErrStale)
 	}
 	usdc, err := f.ticker(ctx, pairUSDC, now)
 	if err != nil {
-		return rate.Reading{}, 0, fmt.Errorf("the cross-check: %w", err),
+		return rate.Reading{}, 0, 0, fmt.Errorf("the cross-check: %w", err),
 			errors.Is(err, rate.ErrStale)
 	}
 	btcUSD, err := f.btcUSD(ctx, now)
 	if err != nil {
-		return rate.Reading{}, 0, fmt.Errorf("the cross-check: %w", err),
+		return rate.Reading{}, 0, 0, fmt.Errorf("the cross-check: %w", err),
 			errors.Is(err, rate.ErrStale)
 	}
 
@@ -317,11 +366,21 @@ func (f *feed) measure(ctx context.Context) (rate.Reading, float64, error,
 	if gap := math.Abs(direct-cross) / math.Min(direct, cross); gap >
 		f.policy.MaxDisagreement {
 
-		return rate.Reading{}, cross, fmt.Errorf("%w: Neoxa's %s market "+
+		return rate.Reading{}, cross, 0, fmt.Errorf("%w: Neoxa's %s market "+
 			"says %.8g; its %s market over BTC/USD says %.8g, %.1f%% "+
 			"apart, more than the %.1f%% allowed",
 			rate.ErrDisagreement, pairDirect, direct, pairUSDC, cross,
 			gap*100, f.policy.MaxDisagreement*100), true
+	}
+
+	// The second venue, when it answers, is kept beside the price (see
+	// forSide). When it does not, the bridge prices as before, on Neoxa's
+	// two books, rather than stop for another exchange's outage.
+	second := 0.0
+	if usdt, err := f.nonKYC(ctx); err == nil {
+		second = usdt / btcUSD
+	} else {
+		log.Debugf("Bridge market rate: the second venue: %v", err)
 	}
 
 	// Priced from the direct book alone: it is the one payers check
@@ -333,10 +392,10 @@ func (f *feed) measure(ctx context.Context) (rate.Reading, float64, error,
 		At: now,
 	}})
 	if err != nil {
-		return rate.Reading{}, cross, err, true
+		return rate.Reading{}, cross, 0, err, true
 	}
 
-	return r, cross, nil, false
+	return r, cross, second, nil, false
 }
 
 // neoxaTicker is the part of Neoxa's ticker the feed reads.
@@ -388,6 +447,55 @@ func (f *feed) ticker(ctx context.Context, pair string, now time.Time) (float64,
 	if !positive(last) {
 		return 0, fmt.Errorf("%w: Neoxa's %s market has no last price",
 			errFeedUnreadable, pair)
+	}
+	if !positive(bid) || !positive(ask) || bid > ask {
+		return last, nil
+	}
+	prices := []float64{last, bid, ask}
+	sort.Float64s(prices)
+
+	return prices[1], nil
+}
+
+// nonKYCTicker is the part of NonKYC's ticker the feed reads. Its numbers are
+// strings.
+type nonKYCTicker struct {
+	TickerID  string `json:"ticker_id"`
+	LastPrice string `json:"last_price"`
+	Bid       string `json:"bid"`
+	Ask       string `json:"ask"`
+}
+
+// nonKYC reads NonKYC's BTCB2_USDT book, in dollars per BTCB2, as ticker
+// reads Neoxa's: the middle of the last trade, best bid and best ask, or the
+// last trade alone without a usable book.
+func (f *feed) nonKYC(ctx context.Context) (float64, error) {
+	raw, err := f.fetch(ctx, nonKYCTickerURL+pairNonKYC)
+	if err != nil {
+		return 0, fmt.Errorf("%w: NonKYC's %s market: %v",
+			errFeedUnreadable, pairNonKYC, err)
+	}
+
+	var t nonKYCTicker
+	if err := json.Unmarshal(raw, &t); err != nil ||
+		(t.TickerID != "" && t.TickerID != pairNonKYC) {
+
+		return 0, fmt.Errorf("%w: NonKYC's %s market answered with "+
+			"something other than its ticker", errFeedUnreadable,
+			pairNonKYC)
+	}
+	num := func(s string) float64 {
+		v, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return 0
+		}
+		return v
+	}
+
+	last, bid, ask := num(t.LastPrice), num(t.Bid), num(t.Ask)
+	if !positive(last) {
+		return 0, fmt.Errorf("%w: NonKYC's %s market has no last price",
+			errFeedUnreadable, pairNonKYC)
 	}
 	if !positive(bid) || !positive(ask) || bid > ask {
 		return last, nil
@@ -452,11 +560,24 @@ func (f *feed) quoteRate() (marketRate, error) {
 			f.policy.MaxAge, why)
 	}
 
+	return marketRate{
+		rate: medianSince(f.readings, newest.At), at: newest.At,
+		volatility: newest.Volatility, sources: 2,
+		second: medianSince(f.seconds, newest.At),
+	}, nil
+}
+
+// medianSince is the median of the readings within smoothWindow of newest, or
+// zero when there are none.
+func medianSince(readings []rate.Reading, newest time.Time) float64 {
 	var recent []float64
-	for _, r := range f.readings {
-		if newest.At.Sub(r.At) <= smoothWindow {
+	for _, r := range readings {
+		if newest.Sub(r.At) <= smoothWindow {
 			recent = append(recent, r.OutgoingPerIncoming)
 		}
+	}
+	if len(recent) == 0 {
+		return 0
 	}
 	sort.Float64s(recent)
 	mid := recent[len(recent)/2]
@@ -464,10 +585,7 @@ func (f *feed) quoteRate() (marketRate, error) {
 		mid = (recent[len(recent)/2-1] + mid) / 2
 	}
 
-	return marketRate{
-		rate: mid, at: newest.At, volatility: newest.Volatility,
-		sources: 2,
-	}, nil
+	return mid
 }
 
 // last is the newest reading, fresh or not.
