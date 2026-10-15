@@ -224,6 +224,33 @@ func (s *server) forgetBridgeInvoice(ctx context.Context, hash [32]byte) error {
 func (s *server) addBridgeHoldInvoice(ctx context.Context,
 	req bridgerpc.HoldInvoiceRequest) (string, error) {
 
+	addInvoiceCfg := &invoicesrpc.AddInvoiceConfig{
+		AddInvoice:        s.invoices.AddInvoice,
+		IsChannelActive:   s.htlcSwitch.HasActiveLink,
+		ChainParams:       s.cfg.ActiveNetParams.Params,
+		NodeSigner:        s.nodeSigner,
+		DefaultCLTVExpiry: s.cfg.Bitcoin.TimeLockDelta,
+		ChanDB:            s.chanStateDB,
+		Graph:             s.v1Graph,
+		GenInvoiceFeatures: func() *lnwire.FeatureVector {
+			return s.featureMgr.Get(feature.SetInvoice)
+		},
+		GenAmpInvoiceFeatures: func() *lnwire.FeatureVector {
+			return s.featureMgr.Get(feature.SetInvoiceAmp)
+		},
+		GetAlias: s.aliasMgr.GetPeerAlias,
+	}
+
+	return addBridgeHoldInvoiceWith(ctx, addInvoiceCfg, req)
+}
+
+// addBridgeHoldInvoiceWith checks req and makes its hold invoice with cfg: the
+// part of addBridgeHoldInvoice that does not need a running server, so a test
+// can drive it with a signer and a network.
+func addBridgeHoldInvoiceWith(ctx context.Context,
+	addInvoiceCfg *invoicesrpc.AddInvoiceConfig,
+	req bridgerpc.HoldInvoiceRequest) (string, error) {
+
 	hash := lntypes.Hash(req.Hash)
 
 	// The bridge's own adapter rejects these before they reach here. They
@@ -240,23 +267,6 @@ func (s *server) addBridgeHoldInvoice(ctx context.Context,
 	}
 	if req.Expiry <= 0 {
 		return "", fmt.Errorf("bridge hold invoice %x: no expiry", hash)
-	}
-
-	addInvoiceCfg := &invoicesrpc.AddInvoiceConfig{
-		AddInvoice:        s.invoices.AddInvoice,
-		IsChannelActive:   s.htlcSwitch.HasActiveLink,
-		ChainParams:       s.cfg.ActiveNetParams.Params,
-		NodeSigner:        s.nodeSigner,
-		DefaultCLTVExpiry: s.cfg.Bitcoin.TimeLockDelta,
-		ChanDB:            s.chanStateDB,
-		Graph:             s.v1Graph,
-		GenInvoiceFeatures: func() *lnwire.FeatureVector {
-			return s.featureMgr.Get(feature.SetInvoice)
-		},
-		GenAmpInvoiceFeatures: func() *lnwire.FeatureVector {
-			return s.featureMgr.Get(feature.SetInvoiceAmp)
-		},
-		GetAlias: s.aliasMgr.GetPeerAlias,
 	}
 
 	value := lnwire.MilliSatoshi(req.AmountMsat)
