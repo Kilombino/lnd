@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -250,6 +251,22 @@ func TestCommitmentAndHTLCTransactionsUnified(t *testing.T) {
 				channeldb.UnifiedSigsBit,
 			jsonFile: "test_vectors_zero_fee_htlc_tx_unified.json",
 		},
+		{
+			// The spec's file as it is, so it can be compared:
+			// two of its cases lnd can't build (its 253 sat/kw
+			// fee floor, its reserve check), left out as lnd's
+			// own static remote key vectors leave them out.
+			name: "static remote key unified",
+			chanType: channeldb.SingleFunderTweaklessBit |
+				channeldb.UnifiedSigsBit,
+			jsonFile: "test_vectors_static_remotekey_unified.json",
+			skip: []string{
+				"commitment tx with all five HTLCs untrimmed " +
+					"(minimum feerate)",
+				"commitment tx with fee greater than funder " +
+					"amount",
+			},
+		},
 	})
 }
 
@@ -258,6 +275,9 @@ type vectorSet struct {
 	name     string
 	jsonFile string
 	chanType channeldb.ChannelType
+
+	// skip names the file's cases lnd can't build.
+	skip []string
 }
 
 // testVectorSets runs each test case of the given vector sets.
@@ -276,6 +296,9 @@ func testVectorSets(t *testing.T, vectorSets []vectorSet) {
 		for _, test := range testCases {
 			test := test
 			name := fmt.Sprintf("%s-%s", set.name, test.Name)
+			if slices.Contains(set.skip, test.Name) {
+				continue
+			}
 
 			t.Run(name, func(t *testing.T) {
 				t.Parallel()
