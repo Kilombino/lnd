@@ -979,14 +979,18 @@ func (s *service) directionInfo(ctx context.Context, sd *side) *DirectionInfo {
 		return shut(fmt.Errorf("%w: %w", quote.ErrRefused, err))
 	}
 	// What can be quoted now is also bounded by what is left: a payer
-	// shown the policy's maximum would be refused anything above this.
-	if room < out.MaxMsat {
-		out.MaxMsat = room
+	// shown the policy's maximum would be refused anything above this. A
+	// quote needs the payout's routing budget to fit as well, so the most
+	// is what fits with it, not the whole of what is left.
+	most := payableWithin(policy, room)
+	if most < out.MaxMsat {
+		out.MaxMsat = most
 	}
-	if room < policy.MinSwapMsat {
-		return shut(fmt.Errorf("%w: %w: %d msat left against a %d msat "+
-			"minimum", quote.ErrRefused, quote.ErrNoLiquidity, room,
-			policy.MinSwapMsat))
+	if most < policy.MinSwapMsat {
+		return shut(fmt.Errorf("%w: %w: %d msat left, which pays at "+
+			"most %d msat with its routing budget, against a %d "+
+			"msat minimum", quote.ErrRefused, quote.ErrNoLiquidity,
+			room, most, policy.MinSwapMsat))
 	}
 
 	out.Open = true

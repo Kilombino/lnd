@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"math"
 
 	"github.com/lightningnetwork/lnd/lnrpc"
 	"github.com/lightningnetwork/lnd/macaroons"
@@ -207,6 +208,47 @@ func forParticipant(resp *InfoResponse) *InfoResponse {
 	}
 
 	return resp
+}
+
+// feeBudget is the routing budget a quote gives a payout of amountMsat, by the
+// quote package's rule (Quoter.feeBudget): the policy's fraction of it, and
+// never less than its floor. Info's maximum is sized with it, and one that
+// differed from the quote's would show a maximum the quote then refuses.
+func feeBudget(p quote.Policy, amountMsat uint64) uint64 {
+	fee := uint64(math.Ceil(float64(amountMsat) * p.FeeFraction))
+	if fee < p.MinFeeMsat {
+		fee = p.MinFeeMsat
+	}
+
+	return fee
+}
+
+// payableWithin is the largest payout a quote would take with room left on the
+// paying side: one whose amount and routing budget fit in it, as the quote
+// checks. Zero when not even the budget's floor fits.
+func payableWithin(p quote.Policy, room uint64) uint64 {
+	fits := func(amt uint64) bool {
+		need := amt + feeBudget(p, amt)
+
+		return need >= amt && need <= room
+	}
+
+	// The amount and its budget only grow together, so the largest that
+	// fits is found by halving.
+	if !fits(0) {
+		return 0
+	}
+	lo, hi := uint64(0), room
+	for lo < hi {
+		mid := lo + (hi-lo)/2 + 1
+		if fits(mid) {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+
+	return lo
 }
 
 // coarseMsat rounds an amount down to whole satoshis and then to two
