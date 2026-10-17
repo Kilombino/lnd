@@ -798,8 +798,8 @@ func TestBTCUSDSources(t *testing.T) {
 	}
 }
 
-// A ticker whose own computedAt has stopped is a market that has stopped, and
-// it refuses at once.
+// A ticker whose own computedAt has stopped, over a book that has not changed
+// for as long, is a market that has stopped, and it refuses at once.
 func TestAFrozenTickerRefuses(t *testing.T) {
 	m := newMarket(feedStart)
 	f := testFeed(t, m)
@@ -812,9 +812,62 @@ func TestAFrozenTickerRefuses(t *testing.T) {
 
 	_, err := f.quoteRate()
 	if !errors.Is(err, rate.ErrStale) ||
-		!strings.Contains(err.Error(), "has not changed since") {
+		!strings.Contains(err.Error(), "not changed since") {
 
 		t.Fatalf("want a frozen ticker refused, got %v", err)
+	}
+}
+
+// Neoxa's ticker is only its book's clock: stopped while the book goes on
+// changing, it widens the fee; the bridge stops only once the book has stayed
+// the same as long.
+func TestAFrozenTickerOverAMovingBookWidens(t *testing.T) {
+	m := newMarket(feedStart)
+	f := testFeed(t, m)
+	f.read(context.Background())
+
+	// The ticker's computedAt stays at the start; the book changes a
+	// little at every reading.
+	jump := func(d time.Duration) {
+		m.mu.Lock()
+		m.now = m.now.Add(d)
+		m.mu.Unlock()
+	}
+	p := 0.006
+	for i := 0; i < 14; i++ {
+		jump(30 * time.Second)
+		p *= 1.0002
+		m.set(pairDirect, p, p*1.01)
+		f.read(context.Background())
+	}
+	got, err := f.quoteRate()
+	if err != nil {
+		t.Fatalf("a frozen ticker over a moving book stopped quoting: "+
+			"%v", err)
+	}
+	if !hasNote(got, "ticker has not changed since") {
+		t.Errorf("notes %q", got.notes)
+	}
+	if _, extra := sideOf(t, got, true); extra < unverifiedSpread {
+		t.Errorf("widened %g for a frozen ticker", extra)
+	}
+
+	// The book stops too: five minutes on, nothing is quoted.
+	for i := 0; i < 9; i++ {
+		jump(30 * time.Second)
+		f.read(context.Background())
+		if _, err := f.quoteRate(); err != nil {
+			t.Fatalf("stopped %v after the book did: %v",
+				time.Duration(i+1)*30*time.Second, err)
+		}
+	}
+	jump(30 * time.Second)
+	f.read(context.Background())
+	if _, err := f.quoteRate(); !errors.Is(err, rate.ErrStale) ||
+		!strings.Contains(err.Error(), "ticker and book have not "+
+			"changed") {
+
+		t.Fatalf("want a frozen ticker and book refused, got %v", err)
 	}
 }
 

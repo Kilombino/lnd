@@ -221,7 +221,10 @@ const (
 	// tickerFrozenAfter is how old a venue's own timestamp may be. Neoxa
 	// recomputes its tickers every few seconds; one minutes old is a
 	// ticker that has stopped, whatever the request says. Generous,
-	// because it compares the venue's clock with this node's.
+	// because it compares the venue's clock with this node's. Neoxa's
+	// ticker is only its book's clock: while the book itself goes on
+	// changing, a stopped ticker widens the fee, and only a book that
+	// has stayed the same as long stops the bridge.
 	tickerFrozenAfter = 5 * time.Minute
 
 	// btcUSDInterval is how often BTC/USD is asked for. It moves slowly
@@ -406,6 +409,10 @@ type stuckBook struct {
 	seen  depth
 	since time.Time
 	other float64
+
+	// same is since when the book has been seen, whatever the other
+	// venue did.
+	same time.Time
 }
 
 // newFeed builds a feed reading through dial: the node's own dialler, so that
@@ -601,28 +608,6 @@ func (f *feed) measure(ctx context.Context) (poll, float64, error, bool) {
 		p.notes = append(p.notes, fmt.Sprintf(format, args...))
 	}
 
-	// Neoxa's own clock, which only its ticker carries. A ticker that
-	// has stopped is a market that has; one that does not say, or does
-	// not answer while the books do, is a reading not vouched for.
-	computed, err := neoxaComputedAt(src.ticker, src.tickerErr, pairDirect)
-	switch {
-	case err != nil:
-		log.Debugf("Bridge market rate: %v", err)
-		note(unverifiedSpread, "Neoxa's %s ticker could not be read "+
-			"to confirm the book is current; fee widened %.1f%%",
-			pairDirect, unverifiedSpread*100)
-
-	case computed.IsZero():
-		note(unverifiedSpread, "Neoxa's %s ticker carries no time to "+
-			"confirm the book is current; fee widened %.1f%%",
-			pairDirect, unverifiedSpread*100)
-
-	case now.Sub(computed) > tickerFrozenAfter:
-		return poll{}, 0, fmt.Errorf("%w: Neoxa's %s ticker has not "+
-			"changed since %s", rate.ErrStale, pairDirect,
-			computed.UTC().Format(time.RFC3339)), true
-	}
-
 	if src.bookErr != nil {
 		return poll{}, 0, fmt.Errorf("%w: Neoxa's %s market: %v",
 			errFeedUnreadable, pairDirect, src.bookErr), false
@@ -718,6 +703,38 @@ func (f *feed) measure(ctx context.Context) (poll, float64, error, bool) {
 			pairNonKYC, stuckAfter, unverifiedSpread*100)
 	}
 
+	// Neoxa's own clock, which only its ticker carries. A ticker that
+	// has stopped, over a book that has not changed for as long, is a
+	// market that has; one that does not say, does not answer while the
+	// books do, or has stopped while the book goes on changing, is a
+	// reading not vouched for.
+	computed, err := neoxaComputedAt(src.ticker, src.tickerErr, pairDirect)
+	switch {
+	case err != nil:
+		log.Debugf("Bridge market rate: %v", err)
+		note(unverifiedSpread, "Neoxa's %s ticker could not be read "+
+			"to confirm the book is current; fee widened %.1f%%",
+			pairDirect, unverifiedSpread*100)
+
+	case computed.IsZero():
+		note(unverifiedSpread, "Neoxa's %s ticker carries no time to "+
+			"confirm the book is current; fee widened %.1f%%",
+			pairDirect, unverifiedSpread*100)
+
+	case now.Sub(computed) > tickerFrozenAfter &&
+		now.Sub(f.stuck[0].same) >= tickerFrozenAfter:
+
+		return poll{}, 0, fmt.Errorf("%w: Neoxa's %s ticker and book "+
+			"have not changed since %s", rate.ErrStale, pairDirect,
+			computed.UTC().Format(time.RFC3339)), true
+
+	case now.Sub(computed) > tickerFrozenAfter:
+		note(unverifiedSpread, "Neoxa's %s ticker has not changed "+
+			"since %s, though its book has; fee widened %.1f%%",
+			pairDirect, computed.UTC().Format(time.RFC3339),
+			unverifiedSpread*100)
+	}
+
 	// The breaker and the market's movement follow the middle of Neoxa's
 	// book; each direction's own side is applied in quoteRate.
 	r, err := f.oracle.Update(now, []rate.Observation{{
@@ -737,8 +754,13 @@ func (f *feed) measure(ctx context.Context) (poll, float64, error, bool) {
 // Without the other venue there is nothing to compare with.
 func (f *feed) stillFor(i int, d depth, other float64, now time.Time) bool {
 	s := &f.stuck[i]
-	if d != s.seen || s.other <= 0 {
-		*s = stuckBook{seen: d, since: now, other: other}
+	if d != s.seen {
+		*s = stuckBook{seen: d, since: now, other: other, same: now}
+
+		return false
+	}
+	if s.other <= 0 {
+		s.since, s.other = now, other
 
 		return false
 	}

@@ -133,14 +133,15 @@ through Tor when this node uses Tor:
   mempool.space's when CoinGecko does not answer. Only when neither has
   answered for fifteen minutes is Neoxa's own BTC_USDC market used, with the
   fee widened by 0.5%.
-- **No market, no quotes.** With no reading in the last 90 seconds, or a
-  ticker that has stopped updating, nothing is quoted. A move of 10% within
+- **No market, no quotes.** With no reading in the last 90 seconds, or with
+  Neoxa's ticker and book both unchanged for five minutes, nothing is quoted. A move of 10% within
   ten minutes (the most the fee widens for) stops quoting for half an hour.
 - **What a reading cannot vouch for widens the fee rather than stopping the
   bridge.** A book that holds less than the largest swap is priced at what it
   holds, with the fee widened by up to 5% for the rest. A venue whose book
   carries no time of its own, or has not changed at all in ten minutes while
-  the other venue moved, widens the fee by 0.5%.
+  the other venue moved, or Neoxa's ticker stopped while its book goes on
+  changing, widens the fee by 0.5%.
 - **The day's median.** The bridge keeps the median of the last 24 hours
   (started from Neoxa's hourly candles, so a restarted node has it at once).
   When the price is more than `bridgerpc.drift.band` (10%) from it, the
