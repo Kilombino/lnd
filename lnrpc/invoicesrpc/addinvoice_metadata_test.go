@@ -18,7 +18,9 @@ import (
 // metadataConfig is the least AddInvoice needs to encode a public hold
 // invoice: a signer, a network and the node's invoice features, kept in
 // shared so a test can see whether AddInvoice changed them.
-func metadataConfig(t *testing.T, shared *lnwire.FeatureVector) *AddInvoiceConfig {
+func metadataConfig(t *testing.T,
+	shared *lnwire.FeatureVector) *AddInvoiceConfig {
+
 	t.Helper()
 
 	priv, err := btcec.NewPrivateKey()
@@ -30,12 +32,16 @@ func metadataConfig(t *testing.T, shared *lnwire.FeatureVector) *AddInvoiceConfi
 
 			return 1, nil
 		},
-		NodeSigner: netann.NewNodeSigner(keychain.NewPrivKeyMessageSigner(
-			priv, keychain.KeyLocator{},
-		)),
-		ChainParams:        &chaincfg.MainNetParams,
-		DefaultCLTVExpiry:  40,
-		GenInvoiceFeatures: func() *lnwire.FeatureVector { return shared },
+		NodeSigner: netann.NewNodeSigner(
+			keychain.NewPrivKeyMessageSigner(
+				priv, keychain.KeyLocator{},
+			),
+		),
+		ChainParams:       &chaincfg.MainNetParams,
+		DefaultCLTVExpiry: 40,
+		GenInvoiceFeatures: func() *lnwire.FeatureVector {
+			return shared
+		},
 	}
 }
 
@@ -45,9 +51,9 @@ func invoiceFeatures() *lnwire.FeatureVector {
 	), lnwire.Features)
 }
 
-// TestAddInvoiceCarriesMetadata: payment metadata given to AddInvoice is put on
-// the invoice as BOLT 11 field m, with the payment_metadata feature bit, and
-// the node's shared feature vector is left alone.
+// TestAddInvoiceCarriesMetadata: payment metadata given to AddInvoice is put
+// on the invoice as BOLT 11 field m, with the payment_metadata feature bit,
+// and the node's shared feature vector is left alone.
 func TestAddInvoiceCarriesMetadata(t *testing.T) {
 	t.Parallel()
 

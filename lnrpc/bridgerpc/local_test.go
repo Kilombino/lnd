@@ -50,8 +50,8 @@ type fakeNode struct {
 
 func (f *fakeNode) deps() *Deps {
 	return &Deps{
-		AddHoldInvoice: func(_ context.Context, req HoldInvoiceRequest) (
-			string, error) {
+		AddHoldInvoice: func(_ context.Context,
+			req HoldInvoiceRequest) (string, error) {
 
 			f.held = &req
 
@@ -641,10 +641,11 @@ func TestAddHoldInvoiceCarriesMetadata(t *testing.T) {
 
 	f := &fakeNode{}
 	metadata := []byte{0x01, 0xfa, 0xfa, 0xf0}
-	_, err := local(f).AddHoldInvoice(context.Background(), node.HoldInvoice{
+	req := node.HoldInvoice{
 		Hash: hash8(2), AmountMsat: 1000, CLTVDelta: 400,
 		Expiry: time.Minute, Memo: "a coffee", Metadata: metadata,
-	})
+	}
+	_, err := local(f).AddHoldInvoice(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
 	}

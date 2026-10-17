@@ -35,16 +35,20 @@ func bridgeInvoiceConfig(t *testing.T,
 			*stored = inv
 			return 1, nil
 		},
-		NodeSigner: netann.NewNodeSigner(keychain.NewPrivKeyMessageSigner(
-			priv, keychain.KeyLocator{},
-		)),
+		NodeSigner: netann.NewNodeSigner(
+			keychain.NewPrivKeyMessageSigner(
+				priv, keychain.KeyLocator{},
+			),
+		),
 		ChainParams:       &chaincfg.MainNetParams,
 		DefaultCLTVExpiry: 40,
 		GenInvoiceFeatures: func() *lnwire.FeatureVector {
-			return lnwire.NewFeatureVector(lnwire.NewRawFeatureVector(
+			raw := lnwire.NewRawFeatureVector(
 				lnwire.TLVOnionPayloadRequired,
 				lnwire.PaymentAddrRequired,
-			), lnwire.Features)
+			)
+
+			return lnwire.NewFeatureVector(raw, lnwire.Features)
 		},
 	}
 }
@@ -72,7 +76,9 @@ func TestBridgeHoldInvoiceCarriesMetadata(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, metadata, decoded.Metadata)
-	require.True(t, decoded.Features.HasFeature(lnwire.PaymentMetadataOptional))
+	require.True(t, decoded.Features.HasFeature(
+		lnwire.PaymentMetadataOptional,
+	))
 	require.Equal(t, req.Hash, [32]byte(*decoded.PaymentHash))
 	require.EqualValues(t, req.AmountMsat, *decoded.MilliSat)
 	require.EqualValues(t, req.CLTVDelta, decoded.MinFinalCLTVExpiry())
@@ -88,7 +94,9 @@ func TestBridgeHoldInvoiceCarriesMetadata(t *testing.T) {
 	decoded, err = zpay32.Decode(payReq, &chaincfg.MainNetParams)
 	require.NoError(t, err)
 	require.Nil(t, decoded.Metadata)
-	require.False(t, decoded.Features.HasFeature(lnwire.PaymentMetadataOptional))
+	require.False(t, decoded.Features.HasFeature(
+		lnwire.PaymentMetadataOptional,
+	))
 }
 
 // TestBridgeHoldInvoiceRefusesIncompleteRequests checks the boundary checks
@@ -100,15 +108,23 @@ func TestBridgeHoldInvoiceRefusesIncompleteRequests(t *testing.T) {
 		Hash: [32]byte{9}, AmountMsat: 1000, CLTVDelta: 288,
 		Expiry: time.Minute,
 	}
-	for name, change := range map[string]func(*bridgerpc.HoldInvoiceRequest){
-		"amount": func(r *bridgerpc.HoldInvoiceRequest) { r.AmountMsat = 0 },
-		"cltv":   func(r *bridgerpc.HoldInvoiceRequest) { r.CLTVDelta = 0 },
-		"expiry": func(r *bridgerpc.HoldInvoiceRequest) { r.Expiry = 0 },
+	type edit func(*bridgerpc.HoldInvoiceRequest)
+	for name, change := range map[string]edit{
+		"amount": func(r *bridgerpc.HoldInvoiceRequest) {
+			r.AmountMsat = 0
+		},
+		"cltv": func(r *bridgerpc.HoldInvoiceRequest) {
+			r.CLTVDelta = 0
+		},
+		"expiry": func(r *bridgerpc.HoldInvoiceRequest) {
+			r.Expiry = 0
+		},
 	} {
 		req := full
 		change(&req)
 		_, err := addBridgeHoldInvoiceWith(t.Context(), cfg, req)
 		require.Error(t, err, name)
 	}
-	require.Nil(t, stored, "an incomplete request reached the invoice store")
+	require.Nil(t, stored,
+		"an incomplete request reached the invoice store")
 }
