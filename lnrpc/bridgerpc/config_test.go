@@ -517,9 +517,26 @@ func TestFundedGraceIsBoundedApartFromTheInvoicesLife(t *testing.T) {
 	}
 }
 
+// The floor leaves every quote minQuoteLife to be paid in, past the quote's
+// reserve, and is no lower than the quote package itself accepts.
+func TestTheMinRemainingLifeFloorLeavesAPayableQuote(t *testing.T) {
+	t.Parallel()
+
+	reserve := quote.DefaultPolicy.QuoteReserve
+	if minRemainingLifeFloor-reserve < minQuoteLife {
+		t.Errorf("a quote at the floor lives %v, under %v",
+			minRemainingLifeFloor-reserve, minQuoteLife)
+	}
+	p := quote.DefaultPolicy
+	p.MinRemainingLife = minRemainingLifeFloor
+	if err := p.Valid(); err != nil {
+		t.Errorf("the quote package refuses the floor: %v", err)
+	}
+}
+
 // bridgerpc.minremaininglife: unset is the quote package's 20 s; set, it is
-// used, from the least that leaves a quote a second past its 10 s reserve to
-// an hour.
+// used, from 20 s, which leaves a quote 10 s past its reserve to be paid in,
+// to an hour.
 func TestMinRemainingLife(t *testing.T) {
 	t.Parallel()
 
@@ -532,11 +549,12 @@ func TestMinRemainingLife(t *testing.T) {
 		life time.Duration
 		ok   bool
 	}{
-		{11 * time.Second, true},
+		{20 * time.Second, true},
 		{30 * time.Second, true},
 		{15 * time.Minute, true},
 		{time.Hour, true},
-		{11*time.Second - time.Millisecond, false},
+		{20*time.Second - time.Millisecond, false},
+		{11 * time.Second, false},
 		{10 * time.Second, false},
 		{time.Second, false},
 		{-time.Second, false},

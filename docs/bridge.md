@@ -158,7 +158,8 @@ through Tor when this node uses Tor:
   invoice being paid expires, if that is sooner. Payers' wallets fund a quote
   within seconds of asking for it.
 - **An invoice needs 20 seconds left to be quoted**
-  (`bridgerpc.minremaininglife`), so a point-of-sale invoice that lives a
+  (`bridgerpc.minremaininglife`, which can be raised but not lowered: a quote
+  needs 10 seconds to be paid in), so a point-of-sale invoice that lives a
   minute can be paid; one with less is refused as `expires_soon`, and the
   payer asks for a new one. The bridge pays an invoice while it has 5 seconds
   left, and gives up on a payout that has not arrived a few seconds after the

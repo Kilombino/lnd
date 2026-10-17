@@ -226,8 +226,9 @@ type Config struct {
 	// It can be short: an invoice that expires before the payout arrives
 	// fails the payout, and the payer's funds come back. A quote is valid
 	// for what is left of the invoice less the quote package's
-	// QuoteReserve (10 seconds), so this must leave a second past that.
-	MinRemainingLife time.Duration `long:"minremaininglife" description:"How long an invoice must still be payable for the bridge to quote it; with less it is refused as expires_soon. A quote on an invoice with little time left expires 10s before the invoice does. Default 20s, at least 11s, at most 1h."`
+	// QuoteReserve (10 seconds), so this is at least 20 seconds, which
+	// leaves a quote 10 seconds to be paid in (minRemainingLifeFloor).
+	MinRemainingLife time.Duration `long:"minremaininglife" description:"How long an invoice must still be payable for the bridge to quote it; with less it is refused as expires_soon. A quote on an invoice with little time left expires 10s before the invoice does. Default, and the least, 20s; at most 1h."`
 
 	// MaxUnpaid, MaxInProgress and PerMinute limit each participant: a
 	// caller whose macaroon has a root key of its own. The operator's own
@@ -300,13 +301,20 @@ const DefaultQuoteValidity = time.Minute
 const maxFundedGrace = 12 * time.Minute
 
 // minRemainingLifeFloor and maxMinRemainingLife bound
-// bridgerpc.minremaininglife: the least the quote package accepts, a quote
-// valid for MinValidity past its reserve, and an hour, past which ordinary
-// invoices, which live an hour, would all be refused.
-var minRemainingLifeFloor = quote.DefaultPolicy.QuoteReserve +
-	quote.MinValidity
+// bridgerpc.minremaininglife.
+//
+// The floor is above what the quote package accepts (a quote valid for
+// quote.MinValidity past its reserve): it leaves a quote at least
+// minQuoteLife, since a quote with less cannot be paid by any wallet, and the
+// dashboard pays only one with that much left. The ceiling is an hour, past
+// which ordinary invoices, which live an hour, would all be refused.
+const (
+	minRemainingLifeFloor = 20 * time.Second
+	maxMinRemainingLife   = time.Hour
 
-const maxMinRemainingLife = time.Hour
+	// minQuoteLife is the least a quote is valid for at the floor.
+	minQuoteLife = 10 * time.Second
+)
 
 // DefaultFloorFraction is the share of the working balance held back for swaps
 // already in flight, when the bounds are derived rather than configured. It is
@@ -644,11 +652,11 @@ func (c *Config) Validate() error {
 
 		return fmt.Errorf("%w: bridgerpc.minremaininglife %v is outside "+
 			"%v..%v: a quote is valid for what is left of the invoice "+
-			"less %v, so less than %v leaves it no time, and more than "+
-			"%v refuses invoices that could be paid", ErrConfig,
-			c.MinRemainingLife, minRemainingLifeFloor,
+			"less %v, so less than %v leaves a payer under %v to pay "+
+			"it, and more than %v refuses invoices that could be paid",
+			ErrConfig, c.MinRemainingLife, minRemainingLifeFloor,
 			maxMinRemainingLife, quote.DefaultPolicy.QuoteReserve,
-			minRemainingLifeFloor, maxMinRemainingLife)
+			minRemainingLifeFloor, minQuoteLife, maxMinRemainingLife)
 	}
 	for _, f := range []struct {
 		name string
