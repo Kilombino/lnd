@@ -10,8 +10,6 @@ github.com/Azure/go-ansiterm v0.0.0-20230124172434-306776ec8161 h1:L/gRVlceqvL25
 github.com/Azure/go-ansiterm v0.0.0-20230124172434-306776ec8161/go.mod h1:xomTg63KZ2rFqZQzSB4Vz2SUXa1BpHTVz9L5PTmPC4E=
 github.com/BurntSushi/toml v0.3.1 h1:WXkYYl6Yr3qBf1K79EBnL4mak0OimBfB0XUf9Vl28OQ=
 github.com/BurntSushi/toml v0.3.1/go.mod h1:xHWCNGjB5oqiDr8zfno3MHue2Ht5sIBksp03qcyfWMU=
-github.com/Kilombino/neutrino-blake2b v0.0.0-20261012222229-e3dedd4d1590 h1:BHsXn4OdRtsUIPNGh3Vw7f8EtyKW4RiKf/Ss0RcNZkE=
-github.com/Kilombino/neutrino-blake2b v0.0.0-20261012222229-e3dedd4d1590/go.mod h1:oLkAavtRxNosJmxZFaYC5PO4ZT1XVnh1r/atiPVNTRk=
 github.com/Masterminds/semver/v3 v3.1.1 h1:hLg3sBzpNErnxhQtUy/mmLR2I9foDujNK030IGemrRc=
 github.com/Masterminds/semver/v3 v3.1.1/go.mod h1:VPu/7SZ7ePZ3QOrcuXROw5FAcLl4a0cBrbBpGY/8hQs=
 github.com/Microsoft/go-winio v0.6.1 h1:9/kr64B9VUZrLm5YYwbGtUJnMgqWVOdUAXu6Migciow=
@@ -444,6 +442,8 @@ github.com/paulscode/btcwallet-blake2b/wallet/txauthor v1.3.5-blake2b.1 h1:uKixy
 github.com/paulscode/btcwallet-blake2b/wallet/txauthor v1.3.5-blake2b.1/go.mod h1:+tXJ3Ym0nlQc/iHSwW1qzjmPs3ev+UVWMbGgfV1OZqU=
 github.com/paulscode/lightning-fork-bridge v0.1.6 h1:XjRjYLj2Idkz72jW7ETV78yVga9xiPpXxtonDW1imeQ=
 github.com/paulscode/lightning-fork-bridge v0.1.6/go.mod h1:6fYqFoyd+s8Nx6TwDZEgBs5AHhetgp7ibgjxD3hfCjE=
+github.com/paulscode/neutrino-blake2b v0.17.1-blake2b.1 h1:e2c/IcfkK7fWDVsWi/CKlz/REQNscIp54G8y7gte8sw=
+github.com/paulscode/neutrino-blake2b v0.17.1-blake2b.1/go.mod h1:oLkAavtRxNosJmxZFaYC5PO4ZT1XVnh1r/atiPVNTRk=
 github.com/pkg/errors v0.8.0/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINEl0=
 github.com/pkg/errors v0.8.1/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINEl0=
 github.com/pkg/errors v0.9.1 h1:FEBLx1zS214owpjy7qsBeixbURkuhQAwrK5UwLGTwt4=
