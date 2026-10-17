@@ -70,7 +70,11 @@ func validateBridgeConfig(cfg *Config, networkDir string) error {
 	}
 
 	// So that Validate checks the margin with the delta it will run with.
-	sub.LocalHoldExpiryDelta = cfg.Invoices.HoldExpiryDelta
+	// A config built by hand (the tests') may have no invoices section;
+	// the bridge then holds to lnd's default, which it never goes under.
+	if cfg.Invoices != nil {
+		sub.LocalHoldExpiryDelta = cfg.Invoices.HoldExpiryDelta
+	}
 
 	return sub.Validate()
 }
