@@ -691,8 +691,10 @@ func (r *Remote) BestBlock(ctx context.Context) (BlockInfo, error) {
 // node's height, as the payment's limit is.
 //
 // The invoice is read by the node again for what pathfinding needs (its
-// destination, final CLTV, route hints and features): a route to a private
-// destination exists only through its hints.
+// destination, final CLTV, route hints and features, or its blinded paths): a
+// route to a private destination exists only through its hints. A payment the
+// search finds no single path for but which may be split is routable when the
+// node's balance can send it (see splitRoute).
 func (r *Remote) FindRoute(ctx context.Context, invoice string,
 	maxFeeMsat uint64, cltvLimit uint32) (node.Route, error) {
 
@@ -718,10 +720,33 @@ func (r *Remote) FindRoute(ctx context.Context, invoice string,
 	res, err := r.main.QueryRoutes(ctx, routeQuery(
 		req.GetDestination(), req.GetNumMsat(),
 		int32(req.GetCltvExpiry()), req.GetRouteHints(), features,
-		maxFeeMsat, cltvLimit,
+		req.GetBlindedPaths(), maxFeeMsat, cltvLimit,
 	))
 
-	return routeFrom(res, err, height)
+	route, err := routeFrom(res, err, height)
+	if !errors.Is(err, errNoSinglePath) || !remoteSplits(req) ||
+		req.GetNumMsat() <= 0 {
+
+		return route, err
+	}
+
+	return splitRoute(ctx, err, r.Balance, uint64(req.GetNumMsat()),
+		maxFeeMsat, cltvLimit)
+}
+
+// remoteSplits reports whether the SHA256 node's payment to the invoice may be
+// split, by the rule its router applies: the invoice declares multi-part
+// payments (feature bit 16 or 17), and has a payment address or blinded paths
+// to carry the parts.
+func remoteSplits(req *lnrpc.PayReq) bool {
+	features := req.GetFeatures()
+	_, optional := features[uint32(lnwire.MPPOptional)]
+	_, required := features[uint32(lnwire.MPPRequired)]
+	if !optional && !required {
+		return false
+	}
+
+	return len(req.GetPaymentAddr()) > 0 || len(req.GetBlindedPaths()) > 0
 }
 
 // BlockAt is a block's header by height, for seeding the chain observer.

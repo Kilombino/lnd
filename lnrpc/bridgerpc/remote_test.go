@@ -41,6 +41,19 @@ type fakeMain struct {
 	// lastChannelsReq records what was asked for, so a test can check the
 	// request and not only the answer.
 	lastChannelsReq *lnrpc.ListChannelsRequest
+
+	routes    *lnrpc.QueryRoutesResponse
+	routesErr error
+	routesReq *lnrpc.QueryRoutesRequest
+}
+
+func (f *fakeMain) QueryRoutes(_ context.Context,
+	in *lnrpc.QueryRoutesRequest, _ ...grpc.CallOption) (
+	*lnrpc.QueryRoutesResponse, error) {
+
+	f.routesReq = in
+
+	return f.routes, f.routesErr
 }
 
 func (f *fakeMain) ListChannels(_ context.Context,

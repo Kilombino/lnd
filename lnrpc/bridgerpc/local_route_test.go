@@ -14,6 +14,7 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg"
+	sphinx "github.com/lightningnetwork/lightning-onion"
 	"github.com/lightningnetwork/lnd/lnrpc"
 	"github.com/lightningnetwork/lnd/lnrpc/routerrpc"
 	"github.com/lightningnetwork/lnd/lnwire"
@@ -300,4 +301,206 @@ func TestAToBLAKE2bQuoteWithNoRouteHoldsNothing(t *testing.T) {
 	pending, err := svc.journal.Pending(context.Background())
 	require.NoError(t, err)
 	require.Empty(t, pending, "a quote with no route recorded a swap")
+}
+
+// splittableInvoice is a BLAKE2b invoice a payment may be split for: it
+// declares multi-part payments and has a payment address. With blinded set,
+// the destination is reached through one blinded path of two hops instead of
+// a route hint.
+func splittableInvoice(t *testing.T, amt lnwire.MilliSatoshi,
+	blinded bool) *zpay32.Invoice {
+
+	t.Helper()
+
+	key := func() *btcec.PublicKey {
+		k, err := btcec.NewPrivateKey()
+		require.NoError(t, err)
+
+		return k.PubKey()
+	}
+	opts := []func(*zpay32.Invoice){
+		zpay32.Amount(amt),
+		zpay32.Description("payout"),
+		zpay32.Destination(key()),
+		zpay32.PaymentAddr(hash8(9)),
+		zpay32.Features(lnwire.NewFeatureVector(
+			lnwire.NewRawFeatureVector(
+				lnwire.Blake2bRequired,
+				lnwire.TLVOnionPayloadRequired,
+				lnwire.PaymentAddrRequired,
+				lnwire.MPPOptional,
+			), lnwire.Features,
+		)),
+	}
+	if blinded {
+		noFeatures := lnwire.EmptyFeatureVector()
+		opts = append(opts, zpay32.WithBlindedPaymentPath(
+			&zpay32.BlindedPaymentPath{
+				FeeBaseMsat:                 1000,
+				CltvExpiryDelta:             80,
+				HTLCMinMsat:                 1,
+				HTLCMaxMsat:                 uint64(amt),
+				Features:                    noFeatures,
+				FirstEphemeralBlindingPoint: key(),
+				Hops: []*sphinx.BlindedHopInfo{
+					{
+						BlindedNodePub: key(),
+						CipherText:     []byte{1, 2, 3},
+					},
+					{
+						BlindedNodePub: key(),
+						CipherText:     []byte{4, 5, 6},
+					},
+				},
+			},
+		))
+	} else {
+		opts = append(opts, zpay32.CLTVExpiry(18))
+	}
+
+	inv, err := zpay32.NewInvoice(
+		&chaincfg.RegressionNetParams, hash8(6), time.Now(), opts...,
+	)
+	require.NoError(t, err)
+
+	return inv
+}
+
+// A payout the route search finds no single path for, but which the payment
+// may split (two 100k channels and a 150k payout), is routable when this
+// node's balance can send it and its fee budget, with the whole CLTV limit as
+// its route's CLTV; it was refused as no_route, though the payment could go.
+func TestLocalFindRouteSplits(t *testing.T) {
+	t.Parallel()
+
+	const amt, fee, limit = 150_000_000, 3_000, 120
+	noPath := func(*lnrpc.QueryRoutesRequest) (*lnrpc.QueryRoutesResponse,
+		error) {
+
+		return nil, status.Error(codes.Unknown, "unable to find a "+
+			"path to destination")
+	}
+	split := splittableInvoice(t, amt, false)
+	single, _ := routedInvoice(t, amt)
+
+	for _, tc := range []struct {
+		name   string
+		inv    *zpay32.Invoice
+		search func(*lnrpc.QueryRoutesRequest) (
+			*lnrpc.QueryRoutesResponse, error)
+		balance uint64
+		balErr  error
+		want    node.Route
+		noRoute bool
+	}{{
+		name: "two channels carry it", inv: split, search: noPath,
+		balance: 200_000_000,
+		want:    node.Route{CLTV: limit, FeeMsat: fee},
+	}, {
+		name: "exactly enough", inv: split, search: noPath,
+		balance: amt + fee,
+		want:    node.Route{CLTV: limit, FeeMsat: fee},
+	}, {
+		name: "not enough with the fee budget", inv: split,
+		search: noPath, balance: amt + fee - 1, noRoute: true,
+	}, {
+		name: "an invoice that cannot be split", inv: single,
+		search: noPath, balance: 200_000_000, noRoute: true,
+	}, {
+		name: "empty answer", inv: split, balance: 200_000_000,
+		search: func(*lnrpc.QueryRoutesRequest) (
+			*lnrpc.QueryRoutesResponse, error) {
+
+			return &lnrpc.QueryRoutesResponse{}, nil
+		},
+		want: node.Route{CLTV: limit, FeeMsat: fee},
+	}, {
+		name: "a refusal splitting does not help", inv: split,
+		balance: 200_000_000, noRoute: true,
+		search: func(*lnrpc.QueryRoutesRequest) (
+			*lnrpc.QueryRoutesResponse, error) {
+
+			return nil, errors.New("destination does not support " +
+				"feature 42")
+		},
+	}, {
+		name: "balance unread", inv: split, search: noPath,
+		balErr: errors.New("database is closed"),
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			l, _ := localRouting(tc.inv, tc.search)
+			l.deps.ChannelBalance = func(context.Context) (uint64,
+				error) {
+
+				return tc.balance, tc.balErr
+			}
+			got, err := l.FindRoute(context.Background(), "x", fee,
+				limit)
+			switch {
+			case tc.noRoute:
+				require.ErrorIs(t, err, node.ErrNoRoute)
+
+			case tc.balErr != nil:
+				require.ErrorIs(t, err, tc.balErr)
+				require.NotErrorIs(t, err, node.ErrNoRoute)
+
+			default:
+				require.NoError(t, err)
+				require.Equal(t, tc.want, got)
+			}
+		})
+	}
+}
+
+// An invoice with blinded paths is searched for through them, in the form
+// lnd's QueryRoutes takes: the paths, and no destination key, final CLTV,
+// hints or features of its own. Without them the search went to the
+// invoice's signing key, which a blinded destination does not route as.
+func TestLocalFindRouteBlindedPaths(t *testing.T) {
+	t.Parallel()
+
+	inv := splittableInvoice(t, 250_000, true)
+	self, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	var got *routing.RouteRequest
+	backend := &routerrpc.RouterBackend{
+		SelfNode:              route.NewVertex(self.PubKey()),
+		MaxTotalTimelock:      2016,
+		DefaultFinalCltvDelta: 40,
+		ActiveNetParams:       &chaincfg.RegressionNetParams,
+		FetchChannelCapacity: func(uint64) (btcutil.Amount, error) {
+			return 1_000_000, nil
+		},
+		FindRoute: func(req *routing.RouteRequest) (*route.Route,
+			float64, error) {
+
+			got = req
+
+			return nil, 0, errors.New("unable to find a path to " +
+				"destination")
+		},
+	}
+
+	l, asked := localRouting(inv, func(req *lnrpc.QueryRoutesRequest) (
+		*lnrpc.QueryRoutesResponse, error) {
+
+		return backend.QueryRoutes(context.Background(), req)
+	})
+	_, err = l.FindRoute(context.Background(), "x", 3_000, 200)
+	require.ErrorIs(t, err, node.ErrNoRoute)
+
+	require.Len(t, *asked, 1)
+	req := (*asked)[0]
+	require.Len(t, req.BlindedPaymentPaths, 1)
+	require.Empty(t, req.PubKey)
+	require.Empty(t, req.RouteHints)
+	require.Zero(t, req.FinalCltvDelta)
+
+	require.NotNil(t, got, "lnd refused the request before searching")
+	require.NotNil(t, got.BlindedPathSet)
+	require.EqualValues(t, 250_000, got.Amount)
+	require.EqualValues(t, 3_000, got.Restrictions.FeeLimit)
 }

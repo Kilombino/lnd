@@ -14,6 +14,7 @@ import (
 	"github.com/lightningnetwork/lnd/lnrpc"
 	"github.com/lightningnetwork/lnd/lnrpc/invoicesrpc"
 	"github.com/lightningnetwork/lnd/lnwire"
+	"github.com/lightningnetwork/lnd/zpay32"
 	"github.com/paulscode/lightning-fork-bridge/node"
 )
 
@@ -299,7 +300,9 @@ func (l *Local) Payable(ctx context.Context, invoice string) error {
 // this node's height.
 //
 // The invoice is read with this node's own decoder for what pathfinding needs
-// (its destination, amount, final CLTV, route hints and features).
+// (its destination, amount, final CLTV, route hints and features, or its
+// blinded paths). A payment the search finds no single path for but which may
+// be split is routable when this node's balance can send it (see splitRoute).
 func (l *Local) FindRoute(ctx context.Context, invoice string,
 	maxFeeMsat uint64, cltvLimit uint32) (node.Route, error) {
 
@@ -344,14 +347,39 @@ func (l *Local) FindRoute(ctx context.Context, invoice string,
 			features = append(features, lnrpc.FeatureBit(bit))
 		}
 	}
+	blinded, err := invoicesrpc.CreateRPCBlindedPayments(
+		pay.BlindedPaymentPaths,
+	)
+	if err != nil {
+		return node.Route{}, fmt.Errorf("%w: %w", ErrInvoice, err)
+	}
 	res, err := l.deps.QueryRoutes(ctx, routeQuery(
 		hex.EncodeToString(pay.Destination.SerializeCompressed()),
 		int64(*pay.MilliSat), int32(delta),
 		invoicesrpc.CreateRPCRouteHints(pay.RouteHints), features,
-		maxFeeMsat, cltvLimit,
+		blinded, maxFeeMsat, cltvLimit,
 	))
 
-	return routeFrom(res, err, height)
+	route, err := routeFrom(res, err, height)
+	if !errors.Is(err, errNoSinglePath) || !localSplits(pay) {
+		return route, err
+	}
+
+	return splitRoute(ctx, err, l.Balance, uint64(*pay.MilliSat),
+		maxFeeMsat, cltvLimit)
+}
+
+// localSplits reports whether this node's payment to the invoice may be
+// split, by the rule its router applies: the invoice declares multi-part
+// payments, and has a payment address or blinded paths to carry the parts.
+func localSplits(pay *zpay32.Invoice) bool {
+	if pay.Features == nil ||
+		!pay.Features.HasFeature(lnwire.MPPOptional) {
+
+		return false
+	}
+
+	return pay.PaymentAddr.IsSome() || len(pay.BlindedPaymentPaths) > 0
 }
 
 // A quote, and the pay gate, ask this node for a route before committing
