@@ -961,7 +961,10 @@ type DirectionInfo struct {
 	//The fraction charged on top of the rate at the bridge's current position.
 	//It can move between this call and a quote.
 	Spread float64 `protobuf:"fixed64,7,opt,name=spread,proto3" json:"spread,omitempty"`
-	// Bounds on the invoice to be paid, in the outgoing chain's millisatoshis.
+	//
+	//Bounds on the invoice to be paid, in the outgoing chain's millisatoshis.
+	//A participant is given max_msat rounded down to two significant figures
+	//of whole satoshis, and refusal as the code's fixed sentence.
 	MinMsat       uint64 `protobuf:"varint,8,opt,name=min_msat,json=minMsat,proto3" json:"min_msat,omitempty"`
 	MaxMsat       uint64 `protobuf:"varint,9,opt,name=max_msat,json=maxMsat,proto3" json:"max_msat,omitempty"`
 	unknownFields protoimpl.UnknownFields

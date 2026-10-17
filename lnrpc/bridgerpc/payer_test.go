@@ -937,3 +937,134 @@ func TestStatusNamesSwapsThatNeedTheOperator(t *testing.T) {
 		t.Errorf("needs operator %v", st.NeedsOperator)
 	}
 }
+
+// TestRefusalsSayNoMoreThanTheirCode: what a payer is told is the code and its
+// fixed sentence, whatever the error behind it carried. Headroom, a route
+// budget and the SHA256 node's address are the operator's, and the first two
+// are what a participant needs to strand a swap on purpose.
+func TestRefusalsSayNoMoreThanTheirCode(t *testing.T) {
+	t.Parallel()
+
+	cases := []error{
+		fmt.Errorf("%w: %w: 1234567 msat left, 2000000 msat asked",
+			quote.ErrRefused, quote.ErrNoLiquidity),
+		fmt.Errorf("%w: %w: final CLTV 3 leaves 77 of an 80 block "+
+			"budget", quote.ErrRefused, quote.ErrRouteBudget),
+		fmt.Errorf("%w: %w: a paying node is not answering: %w",
+			ErrNoDirection, quote.ErrRefused, status.Error(
+				codes.Unavailable, "dial tcp 10.0.0.5:10009: "+
+					"connect: connection refused")),
+		fmt.Errorf("%w: the paying node would not pay it: the "+
+			"invoice requires feature 1234", quote.ErrInvalidInvoice),
+		fmt.Errorf("%w: %w: 4 of 4 swaps in progress", quote.ErrRefused,
+			quote.ErrLimit),
+	}
+	for _, c := range cases {
+		code := quote.CodeOf(c)
+		msg := status.Convert(refusal(c)).Message()
+		if want := string(code) + ": " + refusalSentence(code); msg !=
+			want {
+
+			t.Errorf("%v: payer sees %q, want %q", c, msg, want)
+		}
+		for _, leak := range []string{"1234567", "77", "10.0.0.5",
+			"1234", "4 of 4"} {
+
+			if strings.Contains(msg, leak) {
+				t.Errorf("%v: payer sees %q", c, msg)
+			}
+		}
+	}
+}
+
+// Every code a quote can fail with has a sentence of its own, so none falls
+// back on the general one.
+func TestEveryRefusalCodeHasASentence(t *testing.T) {
+	t.Parallel()
+
+	for _, code := range []quote.Code{
+		quote.CodeInvalidInvoice, quote.CodeNoDirection,
+		quote.CodeNoAmount, quote.CodeTooSmall, quote.CodeTooLarge,
+		quote.CodeExpiresSoon, quote.CodeRouteBudget, quote.CodeNoRoute,
+		quote.CodeSelfPayment, quote.CodeNoLiquidity,
+		quote.CodePriceUnavailable, quote.CodeChainUnmeasured,
+		quote.CodeInProgress, quote.CodeAlreadyPaid,
+		quote.CodeNeedsOperator, quote.CodeLimit, quote.CodeUnavailable,
+		quote.CodeInternal,
+	} {
+		if _, ok := refusalSentences[code]; !ok {
+			t.Errorf("%s has no sentence", code)
+		}
+	}
+}
+
+func TestCoarseMsatKeepsTwoSignificantFigures(t *testing.T) {
+	t.Parallel()
+
+	for in, want := range map[uint64]uint64{
+		0:                 0,
+		999:               0,
+		42_999:            42_000,
+		123_999:           120_000,
+		1_234_567_890:     1_200_000_000,
+		98_765_432_100:    98_000_000_000,
+		500_000_000_000:   500_000_000_000,
+		4_294_967_295_000: 4_200_000_000_000,
+	} {
+		if got := coarseMsat(in); got != want {
+			t.Errorf("coarseMsat(%d) = %d, want %d", in, got, want)
+		}
+	}
+}
+
+// A participant's Info says how much a direction can pay to two significant
+// figures and why it is shut in its code's sentence; the operator's says both
+// exactly, since the console shows them.
+func TestInfoForAParticipantIsCoarse(t *testing.T) {
+	t.Parallel()
+
+	srv, _ := measuredServer(t, 123_456_789_012)
+
+	op, err := srv.Info(context.Background(), &InfoRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	them, err := srv.Info(macaroonFor(t, "17"), &InfoRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rounded := false
+	for i, d := range them.Directions {
+		exact := op.Directions[i].MaxMsat
+		want := max(coarseMsat(exact), d.MinMsat)
+		if d.MaxMsat != want {
+			t.Errorf("%s: a participant sees %d of %d, want %d",
+				d.Name, d.MaxMsat, exact, want)
+		}
+		rounded = rounded || d.MaxMsat != exact
+	}
+	if !rounded {
+		t.Error("no direction's maximum needed rounding; the test " +
+			"needs a balance that is not round")
+	}
+
+	srv, _ = measuredServer(t, 1)
+	op, err = srv.Info(context.Background(), &InfoRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	them, err = srv.Info(macaroonFor(t, "17"), &InfoRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, d := range them.Directions {
+		code := quote.Code(d.RefusalCode)
+		if d.Refusal != refusalSentence(code) {
+			t.Errorf("%s: a participant sees %q", d.Name, d.Refusal)
+		}
+		if op.Directions[i].Refusal == d.Refusal {
+			t.Errorf("%s: the operator lost the detail: %q", d.Name,
+				op.Directions[i].Refusal)
+		}
+	}
+}

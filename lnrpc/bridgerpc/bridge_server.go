@@ -1312,7 +1312,7 @@ func (s *Server) Info(ctx context.Context, _ *InfoRequest) (*InfoResponse,
 	s.infoMu.Lock()
 	defer s.infoMu.Unlock()
 	if s.info != nil && time.Since(s.infoAt) < infoFresh {
-		return proto.Clone(s.info).(*InfoResponse), nil
+		return s.infoFor(ctx), nil
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, infoTimeout)
@@ -1330,7 +1330,19 @@ func (s *Server) Info(ctx context.Context, _ *InfoRequest) (*InfoResponse,
 	}
 	s.info, s.infoAt = resp, time.Now()
 
-	return proto.Clone(resp).(*InfoResponse), nil
+	return s.infoFor(ctx), nil
+}
+
+// infoFor is a copy of the shared Info answer for the caller: whole for the
+// operator, and as forParticipant says for anyone else. Called with infoMu
+// held.
+func (s *Server) infoFor(ctx context.Context) *InfoResponse {
+	resp := proto.Clone(s.info).(*InfoResponse)
+	if participantOf(ctx) == "" {
+		return resp
+	}
+
+	return forParticipant(resp)
 }
 
 // reportRate fills in Status's rate and fees: from the running service, or,

@@ -267,7 +267,7 @@
         "min_msat": {
           "type": "string",
           "format": "uint64",
-          "description": "Bounds on the invoice to be paid, in the outgoing chain's millisatoshis."
+          "description": "Bounds on the invoice to be paid, in the outgoing chain's millisatoshis.\nA participant is given max_msat rounded down to two significant figures\nof whole satoshis, and refusal as the code's fixed sentence."
         },
         "max_msat": {
           "type": "string",

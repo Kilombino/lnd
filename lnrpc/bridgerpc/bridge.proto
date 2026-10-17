@@ -367,7 +367,11 @@ message DirectionInfo {
     */
     double spread = 7;
 
-    // Bounds on the invoice to be paid, in the outgoing chain's millisatoshis.
+    /*
+    Bounds on the invoice to be paid, in the outgoing chain's millisatoshis.
+    A participant is given max_msat rounded down to two significant figures
+    of whole satoshis, and refusal as the code's fixed sentence.
+    */
     uint64 min_msat = 8;
     uint64 max_msat = 9;
 }

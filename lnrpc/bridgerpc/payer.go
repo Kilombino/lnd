@@ -75,30 +75,24 @@ func participantOf(ctx context.Context) string {
 }
 
 // refusal turns an error from quoting into a status a payer can act on: a
-// stable code at the front of the message, then the sentence, and an HTTP
-// status through the REST gateway that says whether to try again.
+// stable code at the front of the message, then a fixed sentence for that
+// code, and an HTTP status through the REST gateway that says whether to try
+// again.
 //
-// Two kinds of error get a fixed sentence instead of their own. A swap that
-// already exists for the hash belongs to whoever quoted it, so another payer
-// holding the same invoice learns only that it exists, not its state. And an
-// internal error can carry paths and database detail that are the operator's
-// business: it goes to the log, and the payer is told to try later.
+// The sentence is the code's own, never the error's. The error can carry what
+// is the operator's business alone: how much the paying side has left, the
+// route budget a quote was sized to, the SHA256 node's address in a
+// connection error, the state of a swap someone else quoted for the same hash,
+// and paths and database detail. It goes to the log; the payer gets the code,
+// which is what a wallet branches on, and a sentence that says no more.
 func refusal(err error) error {
 	code := quote.CodeOf(err)
-	msg := string(code) + ": " + err.Error()
-
-	switch code {
-	case quote.CodeInProgress:
-		msg = string(code) + ": " + quote.ErrInProgress.Error()
-	case quote.CodeAlreadyPaid:
-		msg = string(code) + ": " + quote.ErrAlreadyPaid.Error()
-	case quote.CodeNeedsOperator:
-		msg = string(code) + ": " + quote.ErrNeedsOperator.Error()
-	case quote.CodeInternal:
+	if code == quote.CodeInternal {
 		log.Errorf("Bridge could not quote: %v", err)
-		msg = string(code) + ": the bridge could not quote this " +
-			"invoice; try again later"
+	} else {
+		log.Infof("Bridge refused a quote (%s): %v", code, err)
 	}
+	msg := string(code) + ": " + refusalSentence(code)
 
 	switch code {
 	case quote.CodeInProgress, quote.CodeAlreadyPaid,
@@ -117,6 +111,82 @@ func refusal(err error) error {
 	}
 
 	return status.Error(codes.FailedPrecondition, msg)
+}
+
+// refusalSentences is what a payer is told for each refusal code.
+var refusalSentences = map[quote.Code]string{
+	quote.CodeInvalidInvoice: "the invoice cannot be read, or the " +
+		"paying node would not pay it",
+	quote.CodeNoDirection: "this bridge does not pay invoices on that " +
+		"chain",
+	quote.CodeNoAmount: quote.ErrNoAmount.Error(),
+	quote.CodeTooSmall: "the amount is below this bridge's minimum; " +
+		"its info gives the bounds",
+	quote.CodeTooLarge: "the amount is above what this bridge can pay " +
+		"now; its info gives the bounds",
+	quote.CodeExpiresSoon: "the invoice expires too soon to be paid; " +
+		"ask the recipient for a new one",
+	quote.CodeRouteBudget: "the invoice's final CLTV delta leaves no " +
+		"room for a route within this bridge's limits",
+	quote.CodeNoRoute: "the bridge has no route to the destination " +
+		"within its limits",
+	quote.CodeSelfPayment:   quote.ErrSelfPayment.Error(),
+	quote.CodeNoLiquidity:   "not enough liquidity to pay this now",
+	quote.CodeInProgress:    quote.ErrInProgress.Error(),
+	quote.CodeAlreadyPaid:   quote.ErrAlreadyPaid.Error(),
+	quote.CodeNeedsOperator: quote.ErrNeedsOperator.Error(),
+	quote.CodeLimit: "this bridge code has reached its limit of " +
+		"unpaid quotes, swaps in progress or quotes a minute; try " +
+		"again later",
+	quote.CodePriceUnavailable: "the bridge has no usable rate right " +
+		"now; try again later",
+	quote.CodeChainUnmeasured: "the bridge cannot size a swap against " +
+		"the chains right now; try again later",
+	quote.CodeUnavailable: "the bridge cannot quote this right now; " +
+		"try again later",
+	quote.CodeInternal: "the bridge could not quote this invoice; try " +
+		"again later",
+}
+
+// refusalSentence is the fixed sentence for a refusal code, and a general one
+// for a code this build does not know.
+func refusalSentence(code quote.Code) string {
+	if s, ok := refusalSentences[code]; ok {
+		return s
+	}
+
+	return "the bridge declined to quote this invoice"
+}
+
+// forParticipant is an Info answer as a participant sees it: each shut
+// direction's refusal as its code's fixed sentence, as a quote's would be,
+// and the most a direction can pay rounded down.
+//
+// What a direction can pay is bounded by what is left on its paying side, so
+// the exact number would tell every participant the bridge's outbound to the
+// satoshi, and how it moves with each swap. Two significant figures say how
+// large a payment to try without that.
+func forParticipant(resp *InfoResponse) *InfoResponse {
+	for _, d := range resp.GetDirections() {
+		if d.GetRefusalCode() != "" {
+			d.Refusal = refusalSentence(quote.Code(d.GetRefusalCode()))
+		}
+		d.MaxMsat = max(coarseMsat(d.GetMaxMsat()), d.GetMinMsat())
+	}
+
+	return resp
+}
+
+// coarseMsat rounds an amount down to whole satoshis and then to two
+// significant figures of them.
+func coarseMsat(msat uint64) uint64 {
+	sat := msat / 1000
+	step := uint64(1)
+	for sat/step >= 100 {
+		step *= 10
+	}
+
+	return sat / step * step * 1000
 }
 
 // coded is an error with a code the quote package does not produce, in the
