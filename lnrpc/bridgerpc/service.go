@@ -572,12 +572,23 @@ func (s *service) pricer(sd *side) quote.Pricer {
 
 		// The direction's own side of the books, and what the reading
 		// could not vouch for (feed.side), added to the fee too.
-		at, extra, err := m.forSide(sd.invert)
+		_, extra, err := m.forSide(sd.invert)
 		if err != nil {
 			return rate.Reading{}, fmt.Errorf("%w: %w", quote.ErrRefused,
 				err)
 		}
 		moved += extra
+
+		// At the median of the last readings or the newest one,
+		// whichever is worse for the bridge, as the check before
+		// paying takes it (forCheck): the median follows a sharp move
+		// a reading or two late, and a quote made at it in between
+		// would only be given back when funded.
+		at, err := m.forCheck(sd.invert)
+		if err != nil {
+			return rate.Reading{}, fmt.Errorf("%w: %w", quote.ErrRefused,
+				err)
+		}
 
 		r := rate.Reading{
 			OutgoingPerIncoming: at,

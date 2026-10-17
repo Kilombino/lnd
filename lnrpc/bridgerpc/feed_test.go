@@ -1241,8 +1241,10 @@ func TestTheMarketRateIsQuotedWithEachDirectionsFee(t *testing.T) {
 	svc.positionOf = f.deps().ChannelBalance
 	fwd, rev := sidesOf(t, svc)
 
-	// The median of the bids, 0.006 and 0.0063, and of the asks.
-	want, wantBack := 0.00615, 0.0062115
+	// toSHA256 at the median of the bids, 0.006 and 0.0063, under the
+	// newest; toBLAKE2b at the newest ask, 0.006363, over the median of
+	// the asks: each the worse for the bridge.
+	want, wantBack := 0.00615, 0.006363
 	got, err := svc.pricer(fwd)(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -1608,6 +1610,71 @@ func TestThePriceCheckTakesTheNewestReading(t *testing.T) {
 
 		t.Errorf("paid a toBLAKE2b swap the market rose 8%% against "+
 			"since its quote: %v %v", ok, err)
+	}
+}
+
+// A quote is made at the newest reading when it is worse for the bridge than
+// the median: just after a sharp move it is already at the new price, rather
+// than at one the check before paying would give back.
+func TestAQuoteTakesTheNewestReading(t *testing.T) {
+	t.Parallel()
+
+	cfg := usable()
+	cfg.RateSource = RateSourceNeoxa
+	m := newMarket(feedStart)
+	mkt := testFeed(t, m)
+	at := func(bid float64) {
+		m.set(pairDirect, bid, bid*1.01)
+		m.ticker(pairDirect, bid, bid, bid*1.01)
+		m.set(pairUSDC, bid*fakeUSD, bid*1.01*fakeUSD)
+		m.nonKYC(bid*fakeUSD, bid*1.01*fakeUSD)
+		mkt.read(context.Background())
+		m.advance(30 * time.Second)
+	}
+	at(0.006)
+	at(0.006)
+	at(0.006)
+	// 8% down in one reading, under the breaker.
+	at(0.00552)
+	m.advance(-30 * time.Second)
+
+	f := &fakeNode{synced: true,
+		balance: cfg.resolve().inventory.TargetOutgoingMsat}
+	svc := serviceForMarket(t, cfg, f, mkt)
+	svc.positionOf = f.deps().ChannelBalance
+	fwd, rev := sidesOf(t, svc)
+
+	got, err := svc.pricer(fwd)(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !near(got.OutgoingPerIncoming, 0.00552) {
+		t.Errorf("toSHA256 quoted at %g, wanted the newest 0.00552",
+			got.OutgoingPerIncoming)
+	}
+	// The volatility widening is as before: the oracle's measure.
+	if got.Volatility <= 0 || got.Spread <= DefaultFee {
+		t.Errorf("volatility %g, spread %g", got.Volatility, got.Spread)
+	}
+	// toBLAKE2b: the newest ask is in the bridge's favour, and the median
+	// is the price.
+	back, err := svc.pricer(rev)(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !near(back.OutgoingPerIncoming, 1/0.00606) {
+		t.Errorf("toBLAKE2b quoted at %g, wanted 1/0.00606",
+			back.OutgoingPerIncoming)
+	}
+
+	// The quote passes the check before paying at once.
+	sw := &driver.Swap{IncomingMsat: 1_000_000, OutgoingMsat: 5_000,
+		MaxFeeMsat: 50, Rate: got.OutgoingPerIncoming,
+		Spread: got.Spread}
+	if ok, err := svc.priceCheck(fwd)(context.Background(), sw); err != nil ||
+		!ok {
+
+		t.Errorf("a quote just made was refused: %v %v", ok, err)
 	}
 }
 

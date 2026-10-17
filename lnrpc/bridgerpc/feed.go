@@ -103,13 +103,14 @@ func (m marketRate) forSide(invert bool) (float64, float64, error) {
 	return s.rate, s.extra, nil
 }
 
-// forCheck is the rate a funded swap is checked against just before it is
-// paid: the direction's rate (forSide) or the newest reading's, whichever is
-// worse for the bridge. The rate quoted is the median of the last few
-// readings, which follows a sharp move a reading or two late; a quote made
-// before the move and funded just after it would otherwise pass the check at
-// the price from before the move. Refusing gives the payer's funds back, so
-// the stricter of the two costs no swap that is still worth paying.
+// forCheck is the rate a direction is quoted at and a funded swap checked
+// against just before it is paid: the direction's median rate (forSide) or
+// the newest reading's, whichever is worse for the bridge. The median follows
+// a sharp move a reading or two late; a quote made at it in between would be
+// given back when funded, and one made before the move and funded just after
+// it would otherwise pass the check at the price from before the move.
+// Refusing gives the payer's funds back, so the stricter of the two costs no
+// swap that is still worth paying.
 func (m marketRate) forCheck(invert bool) (float64, error) {
 	r, _, err := m.forSide(invert)
 	if err != nil {
