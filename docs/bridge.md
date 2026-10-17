@@ -151,7 +151,9 @@ through Tor when this node uses Tor:
   minutes, as payers' wallets allow for it.
 - **A quote's rate holds for one minute.** Payers' wallets fund a quote within
   seconds of asking for it.
-- **Just before paying,** the bridge checks the swap again at the rate then. If
+- **Just before paying,** the bridge checks the swap again at the rate then:
+  the median it quotes at, or the newest reading alone when that is worse for
+  the bridge (the median follows a sharp move a reading or two late). If
   what the payer sent no longer covers the payout and its routing budget, or
   the market moved against the bridge by more than half the quote's fee since
   it was quoted, the payment is given back instead of paid out.

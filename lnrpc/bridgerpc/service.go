@@ -503,7 +503,9 @@ func (s *service) priceCheck(sd *side) runner.PriceCheck {
 		if err != nil {
 			return false, err
 		}
-		r, _, err := m.forSide(sd.invert)
+		// The direction's rate or the newest reading's, whichever is
+		// worse for the bridge (see forCheck).
+		r, err := m.forCheck(sd.invert)
 		if err != nil {
 			return false, err
 		}

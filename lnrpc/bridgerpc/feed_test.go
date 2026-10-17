@@ -1361,6 +1361,85 @@ func TestThePriceCheckRefusesAMoveAgainstTheBridge(t *testing.T) {
 	}
 }
 
+// The check before paying takes the newest reading when it is worse for the
+// bridge than the median the quotes are made at: the median follows a sharp
+// move a reading or two late, and a swap quoted before the move and funded
+// just after it would pass at the price from before.
+func TestThePriceCheckTakesTheNewestReading(t *testing.T) {
+	t.Parallel()
+
+	cfg := usable()
+	cfg.RateSource = RateSourceNeoxa
+	m := newMarket(feedStart)
+	mkt := testFeed(t, m)
+	at := func(bid float64) {
+		m.set(pairDirect, bid, bid*1.01)
+		m.ticker(pairDirect, bid, bid, bid*1.01)
+		m.set(pairUSDC, bid*fakeUSD, bid*1.01*fakeUSD)
+		m.nonKYC(bid*fakeUSD, bid*1.01*fakeUSD)
+		mkt.read(context.Background())
+		m.advance(30 * time.Second)
+	}
+	at(0.006)
+	at(0.006)
+	at(0.006)
+	// 8% down in one reading, under the breaker: the median of the four
+	// is still 0.006.
+	at(0.00552)
+	m.advance(-30 * time.Second)
+
+	f := &fakeNode{synced: true, balance: 100_000_000_000}
+	svc := serviceForMarket(t, cfg, f, mkt)
+	fwd, rev := sidesOf(t, svc)
+	got, err := mkt.quoteRate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := sideOf(t, got, false); !near(r, 0.006) {
+		t.Fatalf("toSHA256 quotes at %g, wanted the median 0.006", r)
+	}
+
+	// toSHA256 quoted at 0.006 with the 1.5% fee just before the drop.
+	sw := &driver.Swap{IncomingMsat: 1_000_000, OutgoingMsat: 5_000,
+		MaxFeeMsat: 50, Rate: 0.006, Spread: 0.015}
+	if ok, err := svc.priceCheck(fwd)(context.Background(), sw); err != nil ||
+		ok {
+
+		t.Errorf("paid a swap the market fell 8%% under since its "+
+			"quote: %v %v", ok, err)
+	}
+
+	// toBLAKE2b quoted at 1/0.00606, the ask before the drop: the
+	// newest reading is in the bridge's favour there, and the median is
+	// the check.
+	sw = &driver.Swap{IncomingMsat: 6_060, OutgoingMsat: 900_000,
+		MaxFeeMsat: 3_000, Rate: 1 / 0.00606, Spread: 0.015}
+	if ok, err := svc.priceCheck(rev)(context.Background(), sw); err != nil ||
+		!ok {
+
+		t.Errorf("refused a toBLAKE2b swap the market moved in the "+
+			"bridge's favour: %v %v", ok, err)
+	}
+
+	// The same the other way: BLAKE2b coin 8% dearer on the newest
+	// reading refuses a toBLAKE2b swap quoted before it.
+	m = newMarket(feedStart)
+	mkt = testFeed(t, m)
+	at(0.006)
+	at(0.006)
+	at(0.006)
+	at(0.00648)
+	m.advance(-30 * time.Second)
+	svc = serviceForMarket(t, cfg, f, mkt)
+	_, rev = sidesOf(t, svc)
+	if ok, err := svc.priceCheck(rev)(context.Background(), sw); err != nil ||
+		ok {
+
+		t.Errorf("paid a toBLAKE2b swap the market rose 8%% against "+
+			"since its quote: %v %v", ok, err)
+	}
+}
+
 // Status names what the reading lacks, and a direction the market refuses on
 // its own, while the other quotes.
 func TestStatusNotesTheMarket(t *testing.T) {

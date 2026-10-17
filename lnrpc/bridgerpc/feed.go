@@ -73,6 +73,11 @@ type sideRate struct {
 
 	// err is why the direction quotes nothing, when it does not.
 	err error
+
+	// latest is what the direction would trade at on the newest reading
+	// alone, zero when unset: rate is a median of the last few, which
+	// lags a sharp move by a reading or two (see forCheck).
+	latest float64
 }
 
 // forSide is the rate a direction trades at and what its fee is widened by:
@@ -96,6 +101,33 @@ func (m marketRate) forSide(invert bool) (float64, float64, error) {
 	}
 
 	return s.rate, s.extra, nil
+}
+
+// forCheck is the rate a funded swap is checked against just before it is
+// paid: the direction's rate (forSide) or the newest reading's, whichever is
+// worse for the bridge. The rate quoted is the median of the last few
+// readings, which follows a sharp move a reading or two late; a quote made
+// before the move and funded just after it would otherwise pass the check at
+// the price from before the move. Refusing gives the payer's funds back, so
+// the stricter of the two costs no swap that is still worth paying.
+func (m marketRate) forCheck(invert bool) (float64, error) {
+	r, _, err := m.forSide(invert)
+	if err != nil {
+		return 0, err
+	}
+	s := m.toSHA256
+	if invert {
+		s = m.toBLAKE2b
+	}
+	// toSHA256 pays out SHA256 coin per BLAKE2b coin taken in: the lower
+	// rate is worse for the bridge. toBLAKE2b is the rate turned over.
+	if s.latest > 0 && ((!invert && s.latest < r) ||
+		(invert && s.latest > r)) {
+
+		r = s.latest
+	}
+
+	return r, nil
 }
 
 // quoteRate is the operator's rate while it is fresh.
@@ -1158,6 +1190,13 @@ func (f *feed) quoteRate() (marketRate, error) {
 	m.toBLAKE2b, notes = f.side(true, neoxa, second, anchor, newest.extra)
 	m.notes = append(m.notes, notes...)
 
+	// What each direction would trade at on the newest reading alone,
+	// for the check before paying (see forCheck).
+	m.toSHA256.latest, _, _ = worseVenue(false, newest.neoxa,
+		newest.second)
+	m.toBLAKE2b.latest, _, _ = worseVenue(true, newest.neoxa,
+		newest.second)
+
 	return m, nil
 }
 
@@ -1176,34 +1215,27 @@ func (f *feed) quoteRate() (marketRate, error) {
 func (f *feed) side(invert bool, neoxa, second depth, anchor,
 	extra float64) (sideRate, []string) {
 
-	name, pick, short, venue := "toSHA256", neoxa.bid, neoxa.bidShort,
-		"Neoxa"
-	other, otherShort := second.bid, second.bidShort
+	name := "toSHA256"
 	if invert {
-		name, pick, short = "toBLAKE2b", neoxa.ask, neoxa.askShort
-		other, otherShort = second.ask, second.askShort
+		name = "toBLAKE2b"
 	}
 
-	if other > 0 {
-		if gap := math.Abs(pick-other) / math.Min(pick, other); gap >
+	if second.bid > 0 {
+		at, _, _ := worseVenue(invert, neoxa, depth{})
+		other, _, _ := worseVenue(invert, second, depth{})
+		if gap := math.Abs(at-other) / math.Min(at, other); gap >
 			f.policy.maxVenueGap {
 
 			err := fmt.Errorf("%w: %s quotes nothing while "+
 				"Neoxa (%.8g) and NonKYC (%.8g) are %.1f%% "+
 				"apart, more than the %.1f%% allowed",
-				rate.ErrDisagreement, name, pick, other,
+				rate.ErrDisagreement, name, at, other,
 				gap*100, f.policy.maxVenueGap*100)
 
 			return sideRate{err: err}, nil
 		}
-		worse := other < pick
-		if invert {
-			worse = other > pick
-		}
-		if worse {
-			pick, short, venue = other, otherShort, "NonKYC"
-		}
 	}
+	pick, short, venue := worseVenue(invert, neoxa, second)
 
 	var notes []string
 	if short > 0 {
@@ -1243,6 +1275,29 @@ func (f *feed) side(invert bool, neoxa, second depth, anchor,
 	}
 
 	return sideRate{rate: pick, extra: extra}, notes
+}
+
+// worseVenue is the side of the two books a direction trades against and
+// which is worse for its payer (see forSide): the lower bid for toSHA256
+// (invert false), the higher ask for toBLAKE2b; and the fraction of the
+// largest swap that side could not fill, and the venue's name. A second
+// book not read (zero) is not taken.
+func worseVenue(invert bool, neoxa, second depth) (float64, float64,
+	string) {
+
+	pick, short := neoxa.bid, neoxa.bidShort
+	other, otherShort := second.bid, second.bidShort
+	if invert {
+		pick, short = neoxa.ask, neoxa.askShort
+		other, otherShort = second.ask, second.askShort
+	}
+	if other > 0 && ((!invert && other < pick) ||
+		(invert && other > pick)) {
+
+		return other, otherShort, "NonKYC"
+	}
+
+	return pick, short, "Neoxa"
 }
 
 // anchorOf is the median of the day's readings, or zero with too few to
