@@ -424,7 +424,9 @@ type StatusResponse struct {
 	SwapsInFlight uint32 `protobuf:"varint,4,opt,name=swaps_in_flight,json=swapsInFlight,proto3" json:"swaps_in_flight,omitempty"`
 	//
 	//The rate in force, as SHA256 coin per BLAKE2b coin: the market's last
-	//reading (rate_source neoxa) or the operator's own (fixed).
+	//reading (rate_source neoxa), the middle of Neoxa's book at the largest
+	//swap, each direction then trading at its own side of the books; or the
+	//operator's own (fixed).
 	Rate float64 `protobuf:"fixed64,5,opt,name=rate,proto3" json:"rate,omitempty"`
 	// When it was set or read, as a Unix timestamp in seconds.
 	RateSetAt int64 `protobuf:"varint,6,opt,name=rate_set_at,json=rateSetAt,proto3" json:"rate_set_at,omitempty"`
@@ -458,7 +460,7 @@ type StatusResponse struct {
 	RateSource string `protobuf:"bytes,11,opt,name=rate_source,json=rateSource,proto3" json:"rate_source,omitempty"`
 	//
 	//Following the market: the cross-check's last reading, Neoxa's BTCB2_USDC
-	//market over a BTC/USD price, in the same unit as rate. The bridge quotes
+	//book over a BTC/USD price, in the same unit as rate. The bridge quotes
 	//only while the two agree.
 	RateCrossCheck float64 `protobuf:"fixed64,12,opt,name=rate_cross_check,json=rateCrossCheck,proto3" json:"rate_cross_check,omitempty"`
 	//
@@ -468,8 +470,15 @@ type StatusResponse struct {
 	//
 	//The fee each direction charges on top of the rate, as a fraction, before
 	//the market's movement and the inventory policy widen it.
-	FeeToSha256   float64 `protobuf:"fixed64,14,opt,name=fee_to_sha256,json=feeToSha256,proto3" json:"fee_to_sha256,omitempty"`
-	FeeToBlake2B  float64 `protobuf:"fixed64,15,opt,name=fee_to_blake2b,json=feeToBlake2b,proto3" json:"fee_to_blake2b,omitempty"`
+	FeeToSha256  float64 `protobuf:"fixed64,14,opt,name=fee_to_sha256,json=feeToSha256,proto3" json:"fee_to_sha256,omitempty"`
+	FeeToBlake2B float64 `protobuf:"fixed64,15,opt,name=fee_to_blake2b,json=feeToBlake2b,proto3" json:"fee_to_blake2b,omitempty"`
+	//
+	//Following the market: what the reading lacks, and what widened the fee,
+	//while the bridge still quotes. For example, the second venue not being
+	//read (the bridge then prices on Neoxa alone), a venue's book without a
+	//time of its own, a book too thin for the largest swap, or the market far
+	//from its last day's median.
+	RateNotes     []string `protobuf:"bytes,16,rep,name=rate_notes,json=rateNotes,proto3" json:"rate_notes,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -607,6 +616,13 @@ func (x *StatusResponse) GetFeeToBlake2B() float64 {
 		return x.FeeToBlake2B
 	}
 	return 0
+}
+
+func (x *StatusResponse) GetRateNotes() []string {
+	if x != nil {
+		return x.RateNotes
+	}
+	return nil
 }
 
 type Sha256Node struct {
@@ -1256,7 +1272,7 @@ const file_bridgerpc_bridge_proto_rawDesc = "" +
 	"\rincoming_msat\x18\x03 \x01(\x04R\fincomingMsat\x12#\n" +
 	"\routgoing_msat\x18\x04 \x01(\x04R\foutgoingMsat\x12\x1a\n" +
 	"\bpreimage\x18\x05 \x01(\fR\bpreimage\"\x0f\n" +
-	"\rStatusRequest\"\xa7\x04\n" +
+	"\rStatusRequest\"\xc6\x04\n" +
 	"\x0eStatusResponse\x12\x18\n" +
 	"\aenabled\x18\x01 \x01(\bR\aenabled\x12\x1e\n" +
 	"\n" +
@@ -1279,7 +1295,9 @@ const file_bridgerpc_bridge_proto_rawDesc = "" +
 	"\x10rate_cross_check\x18\f \x01(\x01R\x0erateCrossCheck\x12'\n" +
 	"\x0frate_volatility\x18\r \x01(\x01R\x0erateVolatility\x12\"\n" +
 	"\rfee_to_sha256\x18\x0e \x01(\x01R\vfeeToSha256\x12$\n" +
-	"\x0efee_to_blake2b\x18\x0f \x01(\x01R\ffeeToBlake2b\"\xbb\x04\n" +
+	"\x0efee_to_blake2b\x18\x0f \x01(\x01R\ffeeToBlake2b\x12\x1d\n" +
+	"\n" +
+	"rate_notes\x18\x10 \x03(\tR\trateNotes\"\xbb\x04\n" +
 	"\n" +
 	"Sha256Node\x12\x12\n" +
 	"\x04mode\x18\x01 \x01(\tR\x04mode\x12\x14\n" +

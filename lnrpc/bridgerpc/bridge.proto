@@ -205,7 +205,9 @@ message StatusResponse {
 
     /*
     The rate in force, as SHA256 coin per BLAKE2b coin: the market's last
-    reading (rate_source neoxa) or the operator's own (fixed).
+    reading (rate_source neoxa), the middle of Neoxa's book at the largest
+    swap, each direction then trading at its own side of the books; or the
+    operator's own (fixed).
     */
     double rate = 5;
 
@@ -252,7 +254,7 @@ message StatusResponse {
 
     /*
     Following the market: the cross-check's last reading, Neoxa's BTCB2_USDC
-    market over a BTC/USD price, in the same unit as rate. The bridge quotes
+    book over a BTC/USD price, in the same unit as rate. The bridge quotes
     only while the two agree.
     */
     double rate_cross_check = 12;
@@ -269,6 +271,15 @@ message StatusResponse {
     */
     double fee_to_sha256 = 14;
     double fee_to_blake2b = 15;
+
+    /*
+    Following the market: what the reading lacks, and what widened the fee,
+    while the bridge still quotes. For example, the second venue not being
+    read (the bridge then prices on Neoxa alone), a venue's book without a
+    time of its own, a book too thin for the largest swap, or the market far
+    from its last day's median.
+    */
+    repeated string rate_notes = 16;
 }
 
 message Sha256Node {

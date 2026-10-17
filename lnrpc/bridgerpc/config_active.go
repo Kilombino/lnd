@@ -119,7 +119,7 @@ type Config struct {
 	// (feed.go) and quotes nothing while it cannot be read. A fixed rate
 	// is for test networks, which have no market; on mainnet it is
 	// refused (lnd's validateBridgeConfig).
-	RateSource string `long:"ratesource" description:"Where the rate comes from. neoxa (the default) follows Neoxa's BTCB2_BTC market live, cross-checked against its BTCB2_USDC market and a BTC/USD price, and quotes nothing while the market cannot be read or the two disagree. fixed, on test networks only, trades at a rate you set (fixedrate, or lncli bridge setrate)."`
+	RateSource string `long:"ratesource" description:"Where the rate comes from. neoxa (the default) follows the market live: Neoxa's BTCB2_BTC order book read at the largest swap, cross-checked against its BTCB2_USDC book over a BTC/USD price, and NonKYC's BTCB2_USDT book as a second venue, each direction trading at the worse of the two for its payer. It quotes nothing while the market cannot be read or Neoxa's two books disagree. fixed, on test networks only, trades at a rate you set (fixedrate, or lncli bridge setrate)."`
 
 	// FixedRate is what the bridge trades at with ratesource=fixed (test
 	// networks only),
@@ -144,6 +144,27 @@ type Config struct {
 	// policy already moves both with the position; these move the base.
 	FeeToSHA256  float64 `long:"fee.tosha256" description:"Your fee for swaps that pay out on the SHA256 chain, as a fraction (0.015 is 1.5%). Default: spread."`
 	FeeToBLAKE2b float64 `long:"fee.toblake2b" description:"Your fee for swaps that pay out on this chain, as a fraction (0.015 is 1.5%). Default: spread."`
+
+	// MaxVenueGap is how far apart Neoxa and NonKYC may be, per
+	// direction, before that direction stops quoting.
+	//
+	// Each direction already trades at the venue worse for its payer, so
+	// a gap costs payers rather than the bridge; past this one of the two
+	// is wrong or being moved by more than the fee and the payers' own
+	// allowance can carry, and nothing is quoted.
+	MaxVenueGap float64 `long:"maxvenuegap" description:"Following the market: how far apart Neoxa's and NonKYC's prices may be, as a fraction, before a direction stops quoting. Each direction trades at whichever is worse for its payer, so this bounds what payers are charged for the gap. Default 0.04 (4%)."`
+
+	// DriftBand, DriftWiden and DriftMax price a market away from the
+	// median of its last day (the anchor): a fast move that a short window
+	// would take for the new price.
+	//
+	// They widen the fee rather than stop quoting, which would be an
+	// outage on every real move of a market that moves tens of percent
+	// in a day, and only the direction that buys BLAKE2b coin at the moved
+	// price: one above the anchor widens toSHA256, one below it toBLAKE2b.
+	DriftBand  float64 `long:"drift.band" description:"Following the market: how far the price may be from the median of its last 24 hours, as a fraction, before the fee is widened. Default 0.10 (10%)."`
+	DriftWiden float64 `long:"drift.widen" description:"Following the market: the share of the distance past drift.band added to the fee of the direction that buys at the moved price. Default 0.25: 20% from the median adds 2.5%."`
+	DriftMax   float64 `long:"drift.max" description:"Following the market: how far from the median of its last 24 hours the price may be before the direction that buys at it stops quoting. Default 0.35 (35%)."`
 
 	// MaxSwapMsat caps a single swap, in SHA256 millisatoshis.
 	//
@@ -237,6 +258,14 @@ const DefaultFee = 0.015
 // swaps that would have refilled it.
 const discountFloorOverRouting = 0.001
 
+// The market's defaults: see Config.MaxVenueGap and the drift options.
+const (
+	DefaultMaxVenueGap = 0.04
+	DefaultDriftBand   = 0.10
+	DefaultDriftWiden  = 0.25
+	DefaultDriftMax    = 0.35
+)
+
 // DefaultFloorFraction is the share of the working balance held back for swaps
 // already in flight, when the bounds are derived rather than configured. It is
 // the ratio the shipped defaults use.
@@ -322,6 +351,7 @@ type resolved struct {
 	margin      margin.Policy
 	inventory   inventory.Policy
 	rate        rate.Policy
+	market      feedPolicy
 	rateSource  string
 	feeToSHA256 float64
 	feeToB2B    float64
@@ -426,6 +456,14 @@ func (c *Config) resolve() resolved {
 		r.rate.BreakerMove = maxVolatilitySpread
 	}
 
+	r.market = feedPolicy{
+		rate: r.rate, sizeMsat: r.quote.MaxSwapMsat,
+		maxVenueGap: orDefault(c.MaxVenueGap, DefaultMaxVenueGap),
+		driftBand:   orDefault(c.DriftBand, DefaultDriftBand),
+		driftWiden:  orDefault(c.DriftWiden, DefaultDriftWiden),
+		driftMax:    orDefault(c.DriftMax, DefaultDriftMax),
+	}
+
 	both := DefaultFee
 	if c.Spread > 0 {
 		both = c.Spread
@@ -439,6 +477,15 @@ func (c *Config) resolve() resolved {
 	}
 
 	return r
+}
+
+// orDefault is v, or def when v is unset.
+func orDefault(v, def float64) float64 {
+	if v > 0 {
+		return v
+	}
+
+	return def
 }
 
 // maxVolatilitySpread caps what the market's own movement adds to the fee.
@@ -589,6 +636,20 @@ func (c *Config) Validate() error {
 			maxSpread)
 	}
 
+	for _, f := range []struct {
+		name string
+		v    float64
+	}{
+		{"maxvenuegap", c.MaxVenueGap}, {"drift.band", c.DriftBand},
+		{"drift.widen", c.DriftWiden}, {"drift.max", c.DriftMax},
+	} {
+		if f.v < 0 || f.v >= 1 || math.IsNaN(f.v) {
+			return fmt.Errorf("%w: bridgerpc.%s is a fraction "+
+				"between 0 and 1 (0.04 is 4%%), or left out for "+
+				"the default; got %g", ErrConfig, f.name, f.v)
+		}
+	}
+
 	r := c.resolve()
 
 	if r.quote.MaxSwapMsat < r.quote.MinSwapMsat {
@@ -613,6 +674,12 @@ func (c *Config) Validate() error {
 	}
 	if !r.rate.Valid() {
 		return fmt.Errorf("%w: the rate policy is unusable", ErrConfig)
+	}
+	if r.market.driftBand >= r.market.driftMax {
+		return fmt.Errorf("%w: bridgerpc.drift.band (%g) must be below "+
+			"bridgerpc.drift.max (%g), or the fee is never widened "+
+			"before quoting stops", ErrConfig, r.market.driftBand,
+			r.market.driftMax)
 	}
 	if !r.b2bChain.Valid() || !r.shaChain.Valid() {
 		return fmt.Errorf("%w: a chain observer is unusable", ErrConfig)

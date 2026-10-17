@@ -340,7 +340,7 @@ func (s *Server) startMarket() {
 	if s.cfg.Deps != nil {
 		dial = s.cfg.Deps.Dial
 	}
-	market, err := newFeed(s.cfg.resolve().rate, dial)
+	market, err := newFeed(s.cfg.resolve().market, dial)
 	if err != nil {
 		// The policy is a fixed one, checked by Validate; a service
 		// built without the feed builds its own and says why it has
@@ -1400,10 +1400,25 @@ func (s *Server) reportRate(resp *StatusResponse, svc *service) {
 	} else if exp := svc.rates.expiresAt(); !exp.IsZero() {
 		resp.RateExpiresAt = exp.Unix()
 	}
-	if m, err := prices.quoteRate(); err != nil {
+	m, err := prices.quoteRate()
+	if err != nil {
 		resp.Refusals = append(resp.Refusals, rateRefusal(err))
-	} else {
-		resp.RateVolatility = m.volatility
+
+		return
+	}
+	resp.RateVolatility = m.volatility
+	resp.RateNotes = m.notes
+
+	// A direction the market refuses on its own (the venues too far apart,
+	// the market too far from its day) while the other still quotes. Named
+	// first, so that it is not taken for the whole market's refusal.
+	for _, d := range []struct {
+		on     bool
+		invert bool
+	}{{s.cfg.ToSHA256, false}, {s.cfg.ToBLAKE2b, true}} {
+		if _, _, err := m.forSide(d.invert); d.on && err != nil {
+			resp.Refusals = append(resp.Refusals, err.Error())
+		}
 	}
 }
 

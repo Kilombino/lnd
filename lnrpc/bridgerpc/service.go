@@ -279,7 +279,7 @@ func newServiceWith(cfg *Config, local *Local, remote *Remote,
 	s.prices = s.rates
 	if s.res.rateSource == RateSourceNeoxa {
 		if market == nil {
-			if market, err = newFeed(s.res.rate, nil); err != nil {
+			if market, err = newFeed(s.res.market, nil); err != nil {
 				s.close()
 
 				return nil, fmt.Errorf("the market rate feed: %w",
@@ -483,24 +483,28 @@ func (s *service) priceCheck(sd *side) runner.PriceCheck {
 		if err != nil {
 			return false, err
 		}
-
-		r := m.forSide(sd.invert)
+		r, _, err := m.forSide(sd.invert)
+		if err != nil {
+			return false, err
+		}
 		if sd.invert {
 			r = 1 / r
 		}
+
 		worth := float64(sw.IncomingMsat) * r
 		owed := float64(sw.OutgoingMsat) + float64(sw.MaxFeeMsat)
-		if worth >= owed {
-			return true, nil
+		if worth < owed {
+			log.Warnf("Bridge giving back %s swap %x: the market "+
+				"moved since it was quoted, and at %.8g the %d "+
+				"msat paid in is worth %.0f msat, under the %d "+
+				"msat payout and its %d msat routing budget",
+				sd.name, sw.Hash[:8], r, sw.IncomingMsat, worth,
+				sw.OutgoingMsat, sw.MaxFeeMsat)
+
+			return false, nil
 		}
 
-		log.Warnf("Bridge giving back %s swap %x: the market moved "+
-			"since it was quoted, and at %.8g the %d msat paid in "+
-			"is worth %.0f msat, under the %d msat payout and its "+
-			"%d msat routing budget", sd.name, sw.Hash[:8], m.rate,
-			sw.IncomingMsat, worth, sw.OutgoingMsat, sw.MaxFeeMsat)
-
-		return false, nil
+		return true, nil
 	}
 }
 
@@ -531,8 +535,18 @@ func (s *service) pricer(sd *side) quote.Pricer {
 		if moved > s.res.rate.MaxSpread {
 			moved = s.res.rate.MaxSpread
 		}
+
+		// The direction's own side of the books, and what the reading
+		// could not vouch for (feed.side), added to the fee too.
+		at, extra, err := m.forSide(sd.invert)
+		if err != nil {
+			return rate.Reading{}, fmt.Errorf("%w: %w", quote.ErrRefused,
+				err)
+		}
+		moved += extra
+
 		r := rate.Reading{
-			OutgoingPerIncoming: m.forSide(sd.invert),
+			OutgoingPerIncoming: at,
 			At:                  m.at,
 			Sources:             m.sources,
 			Spread:              sd.fee + moved,
@@ -569,7 +583,8 @@ func (s *service) pricer(sd *side) quote.Pricer {
 		// The inventory policy's spread is the fee moved by the
 		// position: wider on the side running low, narrower (down to the
 		// routing budget and a little) on the side that refills it. The
-		// market's own movement is added on top of either.
+		// market's own movement and the reading's doubts are added on
+		// top of either.
 		r.Spread = pos.Spread + moved
 
 		return r, nil

@@ -94,27 +94,45 @@ off or moving it to another SHA256 node.
 ## The rate
 
 The rate is SHA256 coin per BLAKE2b coin. By default
-(`bridgerpc.ratesource=neoxa`) the bridge reads it from Neoxa every 30
-seconds, through Tor when this node uses Tor:
+(`bridgerpc.ratesource=neoxa`) the bridge reads the market every 30 seconds,
+through Tor when this node uses Tor:
 
-- **The price** is Neoxa's BTCB2_BTC market, the middle of its last trade, best
-  bid and best ask, so that one trade off the book does not move it. It is
-  what payers' wallets check a quote against, so the premium they see is your
-  fee. The bridge trades at the median of the last few readings.
-- **The cross-check** is Neoxa's BTCB2_USDC market over a BTC/USD price
-  (CoinGecko's, or Neoxa's own BTC_USDC market). If the two are more than 5%
-  apart, or the cross-check cannot be read, nothing is quoted.
-- **A second venue** is NonKYC's BTCB2_USDT market over the same BTC/USD
-  price: another exchange, both books above being Neoxa's. Each direction
-  trades at whichever of the two is worse for its payer (the lower rate when
-  paying out SHA256 coin, the higher when paying out BLAKE2b coin), so pushing
-  BLAKE2b coin up or down on one exchange gains nothing against the bridge.
-  The two venues often sit a few percent apart, so this prices rather than
-  stops. If NonKYC cannot be read (it refuses many Tor exits), the bridge
-  prices on Neoxa alone, as before.
+- **The price is read from order books at the largest swap**
+  (`bridgerpc.maxswapmsat`): what selling that much BLAKE2b coin into the bids
+  fetches, for swaps paying out SHA256 coin, and what buying it from the asks
+  costs, for swaps paying out BLAKE2b coin. A small order placed at the top of
+  a book and cancelled again moves this only by what it would fill. The
+  bridge trades at the median of the last few readings.
+- **The cross-check** is Neoxa's BTCB2_USDC book over a BTC/USD price. If the
+  middle of the two Neoxa books is more than 5% apart, or the cross-check
+  cannot be read, nothing is quoted.
+- **A second venue** is NonKYC's BTCB2_USDT book over the same BTC/USD price.
+  Each direction trades at whichever venue is worse for its payer, so pushing
+  BLAKE2b coin up or down on one exchange gains nothing against the bridge. If
+  the two are more than `bridgerpc.maxvenuegap` apart (4% by default) on the
+  side a direction trades against, that direction quotes nothing until they
+  come back together; the other one goes on. If NonKYC cannot be read (it
+  refuses many Tor exits), the bridge prices on Neoxa alone and says so in
+  `rate_notes`.
+- **BTC/USD** is CoinGecko's, asked at most every five minutes, or
+  mempool.space's when CoinGecko does not answer. Only when neither has
+  answered for fifteen minutes is Neoxa's own BTC_USDC market used, with the
+  fee widened by 0.5%.
 - **No market, no quotes.** With no reading in the last 90 seconds, or a
   ticker that has stopped updating, nothing is quoted. A move of 10% within
   ten minutes (the most the fee widens for) stops quoting for half an hour.
+- **What a reading cannot vouch for widens the fee rather than stopping the
+  bridge.** A book that holds less than the largest swap is priced at what it
+  holds, with the fee widened by up to 5% for the rest. A venue whose book
+  carries no time of its own, or has not changed at all in ten minutes while
+  the other venue moved, widens the fee by 0.5%.
+- **The day's median.** The bridge keeps the median of the last 24 hours
+  (started from Neoxa's hourly candles, so a restarted node has it at once).
+  When the price is more than `bridgerpc.drift.band` (10%) from it, the
+  direction that buys BLAKE2b coin at that price (toSHA256 above the median,
+  toBLAKE2b below it) has its fee widened by `bridgerpc.drift.widen` (a
+  quarter) of the distance past the band, and past `bridgerpc.drift.max`
+  (35%) that direction quotes nothing.
 - **Your fee is widened by the market's own movement** over the last ten
   minutes, as payers' wallets allow for it.
 - **Just before paying,** the bridge checks the swap again at the rate then. If
@@ -122,8 +140,10 @@ seconds, through Tor when this node uses Tor:
   that rate (the market moved against the bridge by more than what it
   charged), it is given back instead of paying out at a loss.
 
-`lncli bridge status` shows the rate, the cross-check (`rate_cross_check`),
-the market's movement (`rate_volatility`) and, when nothing is quoted, why.
+`lncli bridge status` shows the rate (the middle of Neoxa's book), the
+cross-check (`rate_cross_check`), the market's movement (`rate_volatility`),
+what widened the fee or is missing from the reading (`rate_notes`) and, when a
+direction or the whole bridge quotes nothing, why.
 
 On test networks, which have no market, `bridgerpc.ratesource=fixed` trades at
 a rate you set instead, with `bridgerpc.fixedrate` or
@@ -138,9 +158,10 @@ mainnet the node refuses `ratesource=fixed` at startup: a posted rate that has
 drifted past the fee is drained by whoever notices, and the bridge cannot
 tell, since the rate it checks against is that same number.
 
-Payers' wallets check every quote against Neoxa and, by default, refuse one
-more than 5% above it (widened by the last hour's range), so a rate set far
-from the market is refused rather than paid.
+Payers' wallets check every quote against the market, the worse of Neoxa and
+NonKYC for the payer, and by default refuse one more than 5% above it
+(widened by the last hour's range), so a rate set far from the market is
+refused rather than paid.
 
 ## The fee
 
@@ -154,7 +175,11 @@ up to three times the fee near empty, and less, never below the routing budget
 plus 0.1%, on the side that refills it.
 
 Why 1.5%: payers allow 5% over the market by default, and three times 1.5% is
-4.5%, so a bridge running low is still paid. Much below 1%, what is left after
+4.5%, so a bridge running low is still paid. Payers measure from the venues'
+tickers and the bridge prices from the side of the book a swap trades
+against, so what payers see is your fee plus about half the book's spread,
+less what the last hour's range adds to their allowance; a fee far above 1.5%
+can be refused by payers when the book is wide. Much below 1%, what is left after
 routing is smaller than an ordinary two-minute move of this market, and quotes
 funded a minute or two later are given back more often. A higher fee in one
 direction makes sense when you want the coin the other one brings in.

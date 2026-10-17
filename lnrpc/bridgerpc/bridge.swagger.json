@@ -531,7 +531,7 @@
         "rate": {
           "type": "number",
           "format": "double",
-          "description": "The rate in force, as SHA256 coin per BLAKE2b coin: the market's last\nreading (rate_source neoxa) or the operator's own (fixed)."
+          "description": "The rate in force, as SHA256 coin per BLAKE2b coin: the market's last\nreading (rate_source neoxa), the middle of Neoxa's book at the largest\nswap, each direction then trading at its own side of the books; or the\noperator's own (fixed)."
         },
         "rate_set_at": {
           "type": "string",
@@ -566,7 +566,7 @@
         "rate_cross_check": {
           "type": "number",
           "format": "double",
-          "description": "Following the market: the cross-check's last reading, Neoxa's BTCB2_USDC\nmarket over a BTC/USD price, in the same unit as rate. The bridge quotes\nonly while the two agree."
+          "description": "Following the market: the cross-check's last reading, Neoxa's BTCB2_USDC\nbook over a BTC/USD price, in the same unit as rate. The bridge quotes\nonly while the two agree."
         },
         "rate_volatility": {
           "type": "number",
@@ -581,6 +581,13 @@
         "fee_to_blake2b": {
           "type": "number",
           "format": "double"
+        },
+        "rate_notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Following the market: what the reading lacks, and what widened the fee,\nwhile the bridge still quotes. For example, the second venue not being\nread (the bridge then prices on Neoxa alone), a venue's book without a\ntime of its own, a book too thin for the largest swap, or the market far\nfrom its last day's median."
         }
       }
     },
