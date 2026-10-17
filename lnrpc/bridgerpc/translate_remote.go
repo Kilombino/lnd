@@ -9,8 +9,11 @@ import (
 )
 
 // ErrNodeContradiction is returned when a node says two things that cannot
-// both be true. It is deliberately not recoverable by retrying: the bridge
-// cannot act on an answer it does not believe, and an operator should look.
+// both be true. The bridge cannot act on an answer it does not believe, so it
+// waits and asks again; the SHA256 adapter reports it as the bridge module's
+// node.ErrContradiction too, which the runner counts and, when a swap keeps
+// meeting it, raises to the operator. Not that error itself, because this
+// file is in every build and the module is only in bridging ones.
 var ErrNodeContradiction = errors.New("the node contradicted itself")
 
 // The SHA256 side of a swap is a stock lnd reached over gRPC, so its answers

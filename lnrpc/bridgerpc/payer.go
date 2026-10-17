@@ -126,7 +126,7 @@ func refusal(err error) error {
 
 	switch code {
 	case quote.CodeInProgress, quote.CodeAlreadyPaid,
-		quote.CodeNeedsOperator:
+		quote.CodeNeedsOperator, quote.CodeFundedBefore:
 
 		return status.Error(codes.AlreadyExists, msg)
 
@@ -165,6 +165,8 @@ var refusalSentences = map[quote.Code]string{
 	quote.CodeInProgress:    quote.ErrInProgress.Error(),
 	quote.CodeAlreadyPaid:   quote.ErrAlreadyPaid.Error(),
 	quote.CodeNeedsOperator: quote.ErrNeedsOperator.Error(),
+	quote.CodeFundedBefore: "an earlier attempt to pay this invoice " +
+		"was funded; ask the recipient for a new invoice",
 	quote.CodeLimit: "this bridge code has reached its limit of " +
 		"unpaid quotes, swaps in progress or quotes a minute; try " +
 		"again later",

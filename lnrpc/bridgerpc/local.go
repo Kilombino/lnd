@@ -128,6 +128,7 @@ func (l *Local) LookupInvoice(ctx context.Context, hash node.Hash) (
 		State:        invoiceState(status.State),
 		AmountMsat:   status.AmountMsat,
 		ExpiryHeight: status.ExpiryHeight,
+		HTLCs:        status.HTLCs,
 	}, nil
 }
 

@@ -167,6 +167,11 @@ type service struct {
 	stoppedMu sync.Mutex
 	stopped   map[node.Hash]string
 
+	// alerted holds swaps the runner raised to the operator while it goes
+	// on driving them (a paying node that keeps contradicting itself), by
+	// hash, with why, until their driving ends. Guarded by stoppedMu.
+	alerted map[node.Hash]string
+
 	// resolveMu lets one operator's resolve decide a stopped swap at a
 	// time; see resolve.
 	resolveMu sync.Mutex
@@ -440,6 +445,7 @@ func (s *service) build(name string, in node.Incoming, out node.Outgoing,
 		PriceCheck:  s.priceCheck(sd),
 		Log:         bridgeLogger(name),
 		FundedGrace: s.res.fundedGrace,
+		Alert:       s.markAlerted,
 	}
 
 	return sd
@@ -999,8 +1005,29 @@ func (s *service) markStopped(hash node.Hash, why string) {
 	s.stopped[hash] = why
 }
 
+// markAlerted records a swap the runner raised to the operator while still
+// driving it, for the operator to see.
+func (s *service) markAlerted(hash node.Hash, why string) {
+	s.stoppedMu.Lock()
+	defer s.stoppedMu.Unlock()
+
+	if s.alerted == nil {
+		s.alerted = map[node.Hash]string{}
+	}
+	s.alerted[hash] = why
+}
+
+// driven forgets an alert once its swap is no longer being driven: finished,
+// stopped (and listed as such), or left for the next start.
+func (s *service) driven(hash node.Hash) {
+	s.stoppedMu.Lock()
+	defer s.stoppedMu.Unlock()
+
+	delete(s.alerted, hash)
+}
+
 // needsOperator lists the swaps a person has to look at: those that ended
-// lost, and those the runner stopped driving. The bridge keeps quoting
+// lost, those the runner stopped driving, and those it raised while driving. The bridge keeps quoting
 // either way; this is so they are seen rather than found in a log.
 func (s *service) needsOperator(ctx context.Context) []string {
 	var out []string
@@ -1020,6 +1047,9 @@ func (s *service) needsOperator(ctx context.Context) []string {
 	defer s.stoppedMu.Unlock()
 	for hash, why := range s.stopped {
 		out = append(out, fmt.Sprintf("%x stopped: %s", hash, why))
+	}
+	for hash, why := range s.alerted {
+		out = append(out, fmt.Sprintf("%x %s", hash, why))
 	}
 	sort.Strings(out)
 

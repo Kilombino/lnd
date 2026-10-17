@@ -133,6 +133,7 @@ func (r *Remote) LookupInvoice(ctx context.Context, hash node.Hash) (
 		State:        invoiceState(st.State),
 		AmountMsat:   st.AmountMsat,
 		ExpiryHeight: st.ExpiryHeight,
+		HTLCs:        st.HTLCs,
 	}, nil
 }
 
@@ -448,7 +449,7 @@ func (r *Remote) Pay(ctx context.Context, req node.PayRequest) (node.Payment,
 
 		status, err := TranslateRemotePayment(update)
 		if err != nil {
-			return node.Payment{}, err
+			return node.Payment{}, contradiction(err)
 		}
 		pmt := payment(status)
 		last = pmt
@@ -500,10 +501,21 @@ func (r *Remote) LookupPayment(ctx context.Context, hash node.Hash) (
 
 	st, err := TranslateRemotePayment(update)
 	if err != nil {
-		return node.Payment{}, err
+		return node.Payment{}, contradiction(err)
 	}
 
 	return payment(st), nil
+}
+
+// contradiction reports a node contradicting itself as the bridge module's
+// node.ErrContradiction as well as this package's ErrNodeContradiction, so the
+// runner can count it.
+func contradiction(err error) error {
+	if errors.Is(err, ErrNodeContradiction) {
+		return fmt.Errorf("%w: %w", node.ErrContradiction, err)
+	}
+
+	return err
 }
 
 // Check confirms the node answers and is synced to its chain.

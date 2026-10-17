@@ -361,6 +361,9 @@ func (s *service) drive(sd *side, hash node.Hash) {
 		defer s.wg.Done()
 
 		err := sd.runner.Drive(s.ctx, hash)
+		if !errors.Is(err, runner.ErrBusy) {
+			s.driven(hash)
+		}
 		switch {
 		case err == nil:
 
