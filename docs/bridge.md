@@ -154,8 +154,18 @@ through Tor when this node uses Tor:
   (35%) that direction quotes nothing.
 - **Your fee is widened by the market's own movement** over the last ten
   minutes, as payers' wallets allow for it.
-- **A quote's rate holds for one minute.** Payers' wallets fund a quote within
-  seconds of asking for it.
+- **A quote's rate holds for one minute,** or until 10 seconds before the
+  invoice being paid expires, if that is sooner. Payers' wallets fund a quote
+  within seconds of asking for it.
+- **An invoice needs 20 seconds left to be quoted**
+  (`bridgerpc.minremaininglife`), so a point-of-sale invoice that lives a
+  minute can be paid; one with less is refused as `expires_soon`, and the
+  payer asks for a new one. The bridge pays an invoice while it has 5 seconds
+  left, and gives up on a payout that has not arrived a few seconds after the
+  invoice expires: the payment fails and the payer's funds come back. An
+  invoice's expiry decides only whether the payout arrives in time, never who
+  keeps the money, since the payer's payment is claimed only with the proof
+  the payout returns.
 - **Just before paying,** the bridge checks the swap again at the rate then,
   taken as for a quote. If
   what the payer sent no longer covers the payout and its routing budget, or

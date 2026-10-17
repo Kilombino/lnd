@@ -7,8 +7,10 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lightningnetwork/lnd/lnrpc"
+	"github.com/lightningnetwork/lnd/lnrpc/invoicesrpc"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/lightningnetwork/lnd/zpay32"
 	"github.com/paulscode/lightning-fork-bridge/quote"
@@ -157,4 +159,102 @@ func TestAParticipantIsHeldToTheShownMaximum(t *testing.T) {
 	require.Equal(t, quote.CodeInternal, headroomQuote(t, op, shown+1))
 	require.Equal(t, quote.CodeInternal, headroomQuote(t, op, exact))
 	require.Equal(t, quote.CodeNoLiquidity, headroomQuote(t, op, exact+1))
+}
+
+// shortQuote quotes a toBLAKE2b payout of an invoice made now that expires
+// after life, on a measuredServer whose SHA256 node creates the hold invoice,
+// and answers the response or its refusal code, and what the hold invoice was
+// asked for.
+func shortQuote(t *testing.T, life time.Duration) (*QuoteResponse,
+	quote.Code, *invoicesrpc.AddHoldInvoiceRequest, time.Time) {
+
+	t.Helper()
+
+	srv, svc := measuredServer(t, 100_000_000_000)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	svc.ctx = ctx
+
+	held := &fakeInvoices{
+		addResp:   &invoicesrpc.AddHoldInvoiceResp{PaymentRequest: "lnbc1h"},
+		lookupErr: status.Error(codes.NotFound, "no invoice"),
+	}
+	svc.remote.invoices = held
+	var inv *zpay32.Invoice
+	for _, sd := range svc.sides {
+		if r, ok := sd.in.(*Remote); ok {
+			r.invoices = held
+		}
+		if sd.name != "toBLAKE2b" {
+			continue
+		}
+		p := sd.quoter.Policy
+		inv, _ = routedInvoice(t, lnwire.MilliSatoshi(
+			p.MinSwapMsat+(p.MaxSwapMsat-p.MinSwapMsat)/2),
+			zpay32.Expiry(life))
+		l := sd.out.(*Local)
+		l.deps.DecodeInvoice = func(context.Context, string) (
+			*zpay32.Invoice, error) {
+
+			return inv, nil
+		}
+		l.deps.QueryRoutes = func(context.Context,
+			*lnrpc.QueryRoutesRequest) (*lnrpc.QueryRoutesResponse,
+			error) {
+
+			return &lnrpc.QueryRoutesResponse{Routes: []*lnrpc.Route{{
+				TotalTimeLock: 800_000 + 60,
+			}}}, nil
+		}
+	}
+	require.NotNil(t, inv)
+
+	resp, err := srv.Quote(ctx, &QuoteRequest{Invoice: "lnbcrt1toblake2b"})
+	code, _, _ := strings.Cut(status.Convert(err).Message(), ": ")
+	if err == nil {
+		code = ""
+	}
+
+	return resp, quote.Code(code), held.added,
+		inv.Timestamp.Add(inv.Expiry())
+}
+
+// A quote on an invoice with less life left than a quote's validity expires
+// QuoteReserve (10 s) before the invoice does, and expires_at says so: the
+// payer's deadline is never later than the bridge can still deliver. The
+// hold invoice lives no longer. One with under 20 s left is refused as
+// expires_soon.
+func TestAQuoteOnAShortInvoiceExpiresBeforeIt(t *testing.T) {
+	t.Parallel()
+
+	reserve := quote.DefaultPolicy.QuoteReserve
+
+	for _, life := range []time.Duration{45 * time.Second, 25 * time.Second} {
+		resp, code, added, expiry := shortQuote(t, life)
+		require.Empty(t, code, "%v", life)
+
+		// Whole seconds, cut down: a second or two under the invoice's
+		// expiry less the reserve, as the quote took a moment.
+		latest := expiry.Add(-reserve)
+		require.LessOrEqual(t, resp.ExpiresAt, latest.Unix(), "%v", life)
+		require.Greater(t, resp.ExpiresAt, latest.Unix()-3, "%v", life)
+
+		require.NotNil(t, added)
+		require.LessOrEqual(t, added.Expiry,
+			int64((life-reserve)/time.Second), "%v", life)
+		require.Greater(t, added.Expiry,
+			int64((life-reserve)/time.Second)-3, "%v", life)
+	}
+
+	// An hour: the quote's own minute and the hold invoice's ten.
+	resp, code, added, _ := shortQuote(t, time.Hour)
+	require.Empty(t, code)
+	require.InDelta(t, time.Now().Add(DefaultQuoteValidity).Unix(),
+		resp.ExpiresAt, 2)
+	require.EqualValues(t, quote.DefaultPolicy.InvoiceExpiry/time.Second,
+		added.Expiry)
+
+	_, code, added, _ = shortQuote(t, 15*time.Second)
+	require.Equal(t, quote.CodeExpiresSoon, code)
+	require.Nil(t, added, "a hold invoice was created anyway")
 }

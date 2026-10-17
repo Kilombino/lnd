@@ -495,19 +495,72 @@ func TestTheCLTVBudgetsAreTheLargestThatFit(t *testing.T) {
 	}
 }
 
-// A funded swap may not wait so long that the invoice it pays has expired:
-// the grace is capped below that invoice's guaranteed life.
-func TestFundedGraceStaysInsideTheInvoicesLife(t *testing.T) {
+// The funded grace is bounded on its own, at 12 minutes, and no longer by the
+// life a quote requires of an invoice: that is seconds now, and the old bound
+// (that life less the quote's validity and a minute) would refuse every
+// grace. Each swap's grace ends with its invoice instead, at the gate.
+func TestFundedGraceIsBoundedApartFromTheInvoicesLife(t *testing.T) {
+	t.Parallel()
+
+	for _, life := range []time.Duration{0, minRemainingLifeFloor, time.Hour} {
+		c := usable()
+		c.MinRemainingLife = life
+		c.FundedGrace = 12 * time.Minute
+		if err := c.Validate(); err != nil {
+			t.Fatalf("12 minutes should be accepted with "+
+				"minremaininglife %v: %v", life, err)
+		}
+		c.FundedGrace = 12*time.Minute + time.Second
+		if err := c.Validate(); !errors.Is(err, ErrConfig) {
+			t.Fatalf("12m1s should be refused, got %v", err)
+		}
+	}
+}
+
+// bridgerpc.minremaininglife: unset is the quote package's 20 s; set, it is
+// used, from the least that leaves a quote a second past its 10 s reserve to
+// an hour.
+func TestMinRemainingLife(t *testing.T) {
 	t.Parallel()
 
 	c := usable()
-	c.FundedGrace = 12 * time.Minute
-	if err := c.Validate(); err != nil {
-		t.Fatalf("12 minutes should be accepted: %v", err)
+	if got := c.resolve().quote.MinRemainingLife; got != 20*time.Second {
+		t.Errorf("unset resolves to %v, want 20s", got)
 	}
-	c.FundedGrace = 13 * time.Minute
-	if err := c.Validate(); !errors.Is(err, ErrConfig) {
-		t.Fatalf("13 minutes should be refused, got %v", err)
+
+	for _, c := range []struct {
+		life time.Duration
+		ok   bool
+	}{
+		{11 * time.Second, true},
+		{30 * time.Second, true},
+		{15 * time.Minute, true},
+		{time.Hour, true},
+		{11*time.Second - time.Millisecond, false},
+		{10 * time.Second, false},
+		{time.Second, false},
+		{-time.Second, false},
+		{time.Hour + time.Second, false},
+	} {
+		cfg := usable()
+		cfg.MinRemainingLife = c.life
+		err := cfg.Validate()
+		if c.ok != (err == nil) {
+			t.Errorf("%v: %v", c.life, err)
+		}
+		if c.ok && err == nil {
+			got := cfg.resolve().quote.MinRemainingLife
+			if got != c.life {
+				t.Errorf("%v resolves to %v", c.life, got)
+			}
+		}
+		// Named, so the operator knows which option to change.
+		if !c.ok && (!errors.Is(err, ErrConfig) || !strings.Contains(
+			err.Error(), "bridgerpc.minremaininglife")) {
+
+			t.Errorf("%v: want ErrConfig naming the option, got %v",
+				c.life, err)
+		}
 	}
 }
 

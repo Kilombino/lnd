@@ -220,6 +220,15 @@ type Config struct {
 	// quote's expiry before it is given back.
 	FundedGrace time.Duration `long:"fundedgrace" description:"How long a paid-for swap may wait to be delivered past its quote's expiry before the payer's funds are returned instead. Default 10m, at most 12m."`
 
+	// MinRemainingLife is how long an invoice must still be payable for
+	// the bridge to quote it.
+	//
+	// It can be short: an invoice that expires before the payout arrives
+	// fails the payout, and the payer's funds come back. A quote is valid
+	// for what is left of the invoice less the quote package's
+	// QuoteReserve (10 seconds), so this must leave a second past that.
+	MinRemainingLife time.Duration `long:"minremaininglife" description:"How long an invoice must still be payable for the bridge to quote it; with less it is refused as expires_soon. A quote on an invoice with little time left expires 10s before the invoice does. Default 20s, at least 11s, at most 1h."`
+
 	// MaxUnpaid, MaxInProgress and PerMinute limit each participant: a
 	// caller whose macaroon has a root key of its own. The operator's own
 	// macaroons are not limited.
@@ -275,6 +284,29 @@ const (
 // moves against the bridge is the bridge's, so it is kept short (a payer's
 // wallet funds a quote within seconds of asking for it).
 const DefaultQuoteValidity = time.Minute
+
+// maxFundedGrace bounds bridgerpc.fundedgrace.
+//
+// It is not derived from the invoice's life. It once was, as the life a quote
+// required less the validity and a minute, because a swap waiting out the
+// whole grace had to find its invoice still payable; but invoices are now
+// quoted with seconds left, which would leave no grace at all. The invoice is
+// bounded per swap instead: past its quote's expiry a funded swap is paid only
+// while its invoice has the runner's GateReserve left, and given back at once
+// after, so a short invoice ends its swap's wait at its own expiry whatever
+// the grace. What is left to bound is how long a payer's funds may be held
+// for a swap the bridge cannot pay on a long-lived invoice, and that stays
+// where it was documented.
+const maxFundedGrace = 12 * time.Minute
+
+// minRemainingLifeFloor and maxMinRemainingLife bound
+// bridgerpc.minremaininglife: the least the quote package accepts, a quote
+// valid for MinValidity past its reserve, and an hour, past which ordinary
+// invoices, which live an hour, would all be refused.
+var minRemainingLifeFloor = quote.DefaultPolicy.QuoteReserve +
+	quote.MinValidity
+
+const maxMinRemainingLife = time.Hour
 
 // DefaultFloorFraction is the share of the working balance held back for swaps
 // already in flight, when the bounds are derived rather than configured. It is
@@ -406,6 +438,9 @@ func (c *Config) resolve() resolved {
 	r.fundedGrace = runner.DefaultFundedGrace
 	if c.FundedGrace > 0 {
 		r.fundedGrace = c.FundedGrace
+	}
+	if c.MinRemainingLife > 0 {
+		r.quote.MinRemainingLife = c.MinRemainingLife
 	}
 
 	r.margin.MaxIncomingBlocks = DefaultMaxIncomingBlocks
@@ -599,18 +634,21 @@ func (c *Config) Validate() error {
 			"use the bridge", ErrConfig, c.Spread)
 	}
 
-	// A funded swap waits at most the quote's validity plus this before it
-	// is paid or given back, and the invoice it pays must still be payable
-	// then: it was quoted with MinRemainingLife left. Past that, the payout
-	// is refused by the paying node for an expired invoice. The swap
-	// package's default validity, longer than DefaultQuoteValidity, keeps
-	// the bound where it was documented.
-	maxGrace := quote.DefaultPolicy.MinRemainingLife -
-		quote.DefaultPolicy.Validity - time.Minute
-	if c.FundedGrace > maxGrace {
-		return fmt.Errorf("%w: fundedgrace %v is longer than the invoice "+
-			"being paid is sure to stay payable; at most %v",
-			ErrConfig, c.FundedGrace, maxGrace)
+	if c.FundedGrace > maxFundedGrace {
+		return fmt.Errorf("%w: fundedgrace %v holds a payer's funds "+
+			"longer than the bridge allows for a swap it cannot pay; at "+
+			"most %v", ErrConfig, c.FundedGrace, maxFundedGrace)
+	}
+	if life := c.MinRemainingLife; life != 0 &&
+		(life < minRemainingLifeFloor || life > maxMinRemainingLife) {
+
+		return fmt.Errorf("%w: bridgerpc.minremaininglife %v is outside "+
+			"%v..%v: a quote is valid for what is left of the invoice "+
+			"less %v, so less than %v leaves it no time, and more than "+
+			"%v refuses invoices that could be paid", ErrConfig,
+			c.MinRemainingLife, minRemainingLifeFloor,
+			maxMinRemainingLife, quote.DefaultPolicy.QuoteReserve,
+			minRemainingLifeFloor, maxMinRemainingLife)
 	}
 	for _, f := range []struct {
 		name string

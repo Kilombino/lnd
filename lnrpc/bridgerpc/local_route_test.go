@@ -30,8 +30,9 @@ import (
 
 // routedInvoice is a BLAKE2b invoice to a private destination behind one route
 // hint, with a small final CLTV delta.
-func routedInvoice(t *testing.T, amt lnwire.MilliSatoshi) (*zpay32.Invoice,
-	*btcec.PublicKey) {
+func routedInvoice(t *testing.T, amt lnwire.MilliSatoshi,
+	opts ...func(*zpay32.Invoice)) (*zpay32.Invoice, *btcec.PublicKey) {
+
 	t.Helper()
 
 	dest, err := btcec.NewPrivateKey()
@@ -39,8 +40,7 @@ func routedInvoice(t *testing.T, amt lnwire.MilliSatoshi) (*zpay32.Invoice,
 	hop, err := btcec.NewPrivateKey()
 	require.NoError(t, err)
 
-	inv, err := zpay32.NewInvoice(
-		&chaincfg.RegressionNetParams, hash8(5), time.Now(),
+	all := append([]func(*zpay32.Invoice){
 		zpay32.Amount(amt),
 		zpay32.Description("payout"),
 		zpay32.Destination(dest.PubKey()),
@@ -56,6 +56,9 @@ func routedInvoice(t *testing.T, amt lnwire.MilliSatoshi) (*zpay32.Invoice,
 				lnwire.PaymentAddrRequired,
 			), lnwire.Features,
 		)),
+	}, opts...)
+	inv, err := zpay32.NewInvoice(
+		&chaincfg.RegressionNetParams, hash8(5), time.Now(), all...,
 	)
 	require.NoError(t, err)
 
