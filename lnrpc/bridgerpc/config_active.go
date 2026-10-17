@@ -128,7 +128,7 @@ type Config struct {
 	//
 	// There is deliberately no default. A wrong rate loses money on every
 	// swap and does it quietly, so the bridge refuses to guess one.
-	FixedRate float64 `long:"fixedrate" description:"With ratesource=fixed (test networks only): what you will trade at, as SHA256 coin per BLAKE2b coin. There is no default: a wrong rate loses money silently, so until one is set here or with lncli bridge setrate the bridge quotes nothing."`
+	FixedRate float64 `long:"fixedrate" description:"With ratesource=fixed (test networks only): what you will trade at, as SHA256 coin per BLAKE2b coin. No rate is assumed, since a wrong one loses money silently, so until one is set here or with lncli bridge setrate the bridge quotes nothing."`
 
 	// Spread is the fee charged on top of the rate, in both directions
 	// unless one of the per-direction fees says otherwise.
