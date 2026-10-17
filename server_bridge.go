@@ -448,15 +448,19 @@ func (s *server) bridgeBlockAt(_ context.Context, height int32) (
 			"%d: %w", height, err)
 	}
 
-	block, err := s.cc.ChainIO.GetBlock(hash)
+	// The header alone: the timestamp and the difficulty are all the
+	// observer reads, and a neutrino backend would otherwise download each
+	// whole block.
+	header, err := s.cc.ChainIO.GetBlockHeader(hash)
 	if err != nil {
-		return bridgerpc.BlockInfo{}, fmt.Errorf("the block at height "+
+		return bridgerpc.BlockInfo{}, fmt.Errorf("the header at height "+
 			"%d: %w", height, err)
 	}
 
 	return bridgerpc.BlockInfo{
 		Height: height,
-		Time:   block.Header.Timestamp,
+		Time:   header.Timestamp,
+		Bits:   header.Bits,
 
 		// Historical, so by definition already in the chain.
 		SyncedToChain: true,

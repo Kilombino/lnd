@@ -188,6 +188,11 @@ type service struct {
 	b2bChain *chainrate.Observer
 	shaChain *chainrate.Observer
 
+	// headerRead is, per chain, the tip height whose header the sampler
+	// has already added with its difficulty, so a tip is read once rather
+	// than every poll. Guarded by chainMu.
+	headerRead map[string]int32
+
 	// sideOf remembers which direction each swap belongs to, so that what
 	// is already committed can be counted per side.
 	//
@@ -312,6 +317,7 @@ func newServiceWith(cfg *Config, local *Local, remote *Remote,
 
 		return nil, fmt.Errorf("the SHA256 chain observer: %w", err)
 	}
+	s.headerRead = make(map[string]int32)
 
 	// A direction turned off with swaps unfinished is built all the same,
 	// to finish them, and quotes nothing: left undriven, a payer's HTLC

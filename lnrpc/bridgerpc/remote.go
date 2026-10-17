@@ -793,6 +793,10 @@ func (r *Remote) BlockAt(ctx context.Context, height int32) (BlockInfo, error) {
 	return BlockInfo{
 		Height: height, Time: time.Unix(int64(ts), 0),
 
+		// Bytes 72 to 76 are the compact difficulty target, which the
+		// observer needs to carry spacing across a retarget.
+		Bits: binary.LittleEndian.Uint32(raw[72:76]),
+
 		// Historical, so by definition already in the chain.
 		SyncedToChain: true,
 	}, nil

@@ -126,10 +126,11 @@ func (s *service) sample(ctx context.Context) {
 	for _, src := range []struct {
 		name string
 		read func(context.Context) (BlockInfo, error)
+		at   func(context.Context, int32) (BlockInfo, error)
 		obs  *chainrate.Observer
 	}{
-		{"blake2b", s.local.BestBlock, s.b2bChain},
-		{"bitcoin", s.remote.BestBlock, s.shaChain},
+		{"blake2b", s.local.BestBlock, s.local.BlockAt, s.b2bChain},
+		{"bitcoin", s.remote.BestBlock, s.remote.BlockAt, s.shaChain},
 	} {
 		info, err := src.read(ctx)
 		if err != nil {
@@ -153,11 +154,37 @@ func (s *service) sample(ctx context.Context) {
 		}
 
 		s.chainMu.Lock()
-		// Add rejects a height it already holds, which is the common
-		// case between blocks and is not worth logging.
-		_ = src.obs.Add(chainrate.Block{
-			Height: info.Height, Time: info.Time,
-		})
+		read := s.headerRead[src.name] == info.Height
+		s.chainMu.Unlock()
+		if read {
+			// This tip's header is already in the observer, with
+			// its difficulty; between blocks there is nothing new.
+			continue
+		}
+
+		// The tip's own header, for its difficulty: the observer
+		// carries spacing across a retarget by scaling the previous
+		// epoch by the difficulty change, and without it the bridge
+		// refuses every swap for the first hundred blocks of each new
+		// epoch, most of a day. A header that cannot be read leaves
+		// the tip without one, and it is read again next poll.
+		block := chainrate.Block{Height: info.Height, Time: info.Time}
+		hdr, err := src.at(ctx, info.Height)
+		haveHeader := err == nil && hdr.Height == info.Height &&
+			!hdr.Time.IsZero()
+		if haveHeader {
+			block.Time = hdr.Time
+			block.Difficulty = hdr.difficulty()
+		} else if err != nil {
+			log.Debugf("Bridge could not read the %s tip's header "+
+				"at %d: %v", src.name, info.Height, err)
+		}
+
+		s.chainMu.Lock()
+		err = src.obs.Add(block)
+		if err == nil && haveHeader && block.Difficulty > 0 {
+			s.headerRead[src.name] = info.Height
+		}
 		s.chainMu.Unlock()
 	}
 }
@@ -434,6 +461,7 @@ func (s *service) backfill(ctx context.Context) {
 			s.chainMu.Lock()
 			if err := src.obs.Add(chainrate.Block{
 				Height: info.Height, Time: info.Time,
+				Difficulty: info.difficulty(),
 			}); err == nil {
 				added++
 			}

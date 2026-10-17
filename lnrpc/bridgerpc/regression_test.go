@@ -427,6 +427,162 @@ func TestBackfillFallsBackWhenHistoryIsUnavailable(t *testing.T) {
 	}
 }
 
+// A retarget a few blocks back leaves too few blocks of the new epoch to
+// estimate from, so the observer scales the previous epoch by the difficulty
+// change. That needs each block's difficulty: read without it, the bridge
+// refused every swap for the first hundred blocks of each epoch, most of a day
+// on either chain, which is what a live bridge did after the SHA256 retarget
+// at 971712.
+//
+// The chain here: the previous epoch at ten minutes a block, then a retarget
+// that doubles the difficulty with the hashrate unchanged, so twenty minutes a
+// block since. Ten blocks in, the estimate must come from the previous epoch
+// scaled to twenty minutes, not refuse and not take ten.
+type retargetChain struct {
+	// start is the new epoch's first height, mined at base.
+	start int32
+	base  time.Time
+
+	// tip is the chain's current height, which a test may move.
+	tip int32
+}
+
+const (
+	easyBits = 0x1d00ffff // difficulty 1
+	hardBits = 0x1c7fff80 // difficulty 2, as near as compact bits allow
+)
+
+func (c *retargetChain) bits(h int32) uint32 {
+	if h >= c.start {
+		return hardBits
+	}
+
+	return easyBits
+}
+
+func (c *retargetChain) time(h int32) time.Time {
+	if h >= c.start {
+		return c.base.Add(time.Duration(h-c.start) * 20 * time.Minute)
+	}
+
+	return c.base.Add(-time.Duration(c.start-h) * 10 * time.Minute)
+}
+
+func (c *retargetChain) info(h int32) BlockInfo {
+	return BlockInfo{
+		Height: h, Time: c.time(h), Bits: c.bits(h),
+		SyncedToChain: true,
+	}
+}
+
+// retargetChains are both chains ten blocks past a retarget at now.
+func retargetChains(now time.Time) (*retargetChain, *retargetChain) {
+	base := now.Add(-10 * 20 * time.Minute)
+
+	return &retargetChain{start: 977_760, base: base, tip: 977_770},
+		&retargetChain{start: 971_712, base: base, tip: 971_722}
+}
+
+// retargetService is a bridge on the two chains, each node serving its tip
+// and its history (with difficulty) as the chain stands when asked.
+func retargetService(t *testing.T, b2b, sha *retargetChain) (*service,
+	*fakeMain) {
+
+	t.Helper()
+
+	f := &fakeNode{synced: true}
+	deps := f.deps()
+	deps.BestBlock = func(context.Context) (BlockInfo, error) {
+		return b2b.info(b2b.tip), nil
+	}
+	deps.BlockAt = func(_ context.Context, h int32) (BlockInfo, error) {
+		return b2b.info(h), nil
+	}
+
+	main := &fakeMain{}
+	chain := &fakeChain{
+		at: func(h int32) (int64, error) {
+			return sha.time(h).Unix(), nil
+		},
+		bits: sha.bits,
+	}
+
+	svc := serviceFor(t, usable(), f, remoteWithChain(main, chain))
+	svc.local = NewLocal(deps)
+	shaTip(main, sha)
+
+	return svc, main
+}
+
+// shaTip points the SHA256 node's GetInfo at the chain's current tip.
+func shaTip(main *fakeMain, sha *retargetChain) {
+	main.info = &lnrpc.GetInfoResponse{
+		BlockHeight: uint32(sha.tip), SyncedToChain: true,
+		BestHeaderTimestamp: sha.time(sha.tip).Unix(),
+	}
+}
+
+// assertScaledSpacing checks an observer estimates from the previous epoch
+// scaled by the doubled difficulty: twenty minutes, not ten, and not a refusal.
+func assertScaledSpacing(t *testing.T, name string, obs *chainrate.Observer,
+	now time.Time) {
+
+	t.Helper()
+
+	est, err := obs.Estimate(now)
+	if err != nil {
+		t.Fatalf("%s: ten blocks after a retarget the bridge cannot "+
+			"estimate, so it refuses every swap until a hundred "+
+			"blocks of the new epoch exist: %v", name, err)
+	}
+	if d := est.Spacing - 20*time.Minute; d < -12*time.Second ||
+		d > 12*time.Second {
+
+		t.Errorf("%s: spacing %v, want 20m: the previous epoch was "+
+			"not scaled by the difficulty change", name, est.Spacing)
+	}
+}
+
+func TestBackfillCarriesSpacingAcrossARetarget(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	b2b, sha := retargetChains(now)
+	svc, _ := retargetService(t, b2b, sha)
+
+	svc.backfill(context.Background())
+
+	assertScaledSpacing(t, "BLAKE2b", svc.b2bChain, now)
+	assertScaledSpacing(t, "SHA256", svc.shaChain, now)
+}
+
+// The case the live bridge hit: it was running when the retarget came, so the
+// new epoch's blocks arrived through the sampler, one tip per poll. Each must
+// carry its difficulty too.
+func TestSampledTipsCarrySpacingAcrossARetarget(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	b2b, sha := retargetChains(now)
+
+	// Started the block before the retarget: history is the old epoch.
+	b2b.tip, sha.tip = b2b.start-1, sha.start-1
+	svc, main := retargetService(t, b2b, sha)
+	svc.backfill(context.Background())
+
+	// Then eleven blocks arrive on each chain, one poll each.
+	for i := 0; i < 11; i++ {
+		b2b.tip++
+		sha.tip++
+		shaTip(main, sha)
+
+		svc.sample(context.Background())
+	}
+
+	assertScaledSpacing(t, "BLAKE2b", svc.b2bChain, now)
+	assertScaledSpacing(t, "SHA256", svc.shaChain, now)
+}
+
 // ---------------------------------------------------------------------------
 // 5. The journal's directory is created.
 //
@@ -708,6 +864,9 @@ type fakeChain struct {
 	chainrpc.ChainKitClient
 
 	at func(height int32) (int64, error)
+
+	// bits is each height's compact difficulty target; nil leaves it zero.
+	bits func(height int32) uint32
 }
 
 func (f *fakeChain) GetBlockHash(_ context.Context,
@@ -736,6 +895,9 @@ func (f *fakeChain) GetBlockHeader(_ context.Context,
 	// A header is 80 bytes with the timestamp at 68.
 	raw := make([]byte, 80)
 	binary.LittleEndian.PutUint32(raw[68:72], uint32(ts))
+	if f.bits != nil {
+		binary.LittleEndian.PutUint32(raw[72:76], f.bits(height))
+	}
 
 	return &chainrpc.GetBlockHeaderResponse{RawBlockHeader: raw}, nil
 }

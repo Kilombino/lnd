@@ -3,9 +3,11 @@ package bridgerpc
 import (
 	"context"
 	"errors"
+	"math/big"
 	"net"
 	"time"
 
+	"github.com/btcsuite/btcd/blockchain"
 	"github.com/lightningnetwork/lnd/aezeed"
 	"github.com/lightningnetwork/lnd/zpay32"
 )
@@ -234,6 +236,35 @@ type BlockInfo struct {
 	// a chain running a hundred times too fast.
 	Time time.Time
 
+	// Bits is the header's compact difficulty target, or zero when this
+	// node did not read the header. The observer scales the previous
+	// retarget epoch's spacing by the difficulty change, which is what lets
+	// it estimate in the first blocks after a retarget; without it the
+	// bridge refuses swaps until a hundred blocks of the new epoch exist.
+	Bits uint32
+
 	// SyncedToChain is whether this node has caught up.
 	SyncedToChain bool
+}
+
+// difficulty is a block's difficulty for the chain observer, in units of its
+// chain's easiest target: only its ratio to another block's of the same chain
+// is used, so the unit does not matter. Zero when the bits are unknown or
+// encode no positive target, which the observer reads as "not available".
+func (b BlockInfo) difficulty() float64 {
+	if b.Bits == 0 {
+		return 0
+	}
+	target := blockchain.CompactToBig(b.Bits)
+	if target.Sign() <= 0 {
+		return 0
+	}
+
+	// 2^256 / target, which fits a float64 for every 256-bit target.
+	d, _ := new(big.Float).Quo(
+		new(big.Float).SetInt(new(big.Int).Lsh(big.NewInt(1), 256)),
+		new(big.Float).SetInt(target),
+	).Float64()
+
+	return d
 }
