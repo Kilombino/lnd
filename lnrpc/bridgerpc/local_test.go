@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -40,6 +41,7 @@ type fakeNode struct {
 
 	payStatus PaymentStatus
 	payErr    error
+	payReq    PayRequest
 
 	lookup    PaymentStatus
 	lookupErr error
@@ -88,8 +90,10 @@ func (f *fakeNode) deps() *Deps {
 
 			return nil, errors.New("not used in this test")
 		},
-		PayInvoice: func(context.Context, PayRequest) (PaymentStatus,
-			error) {
+		PayInvoice: func(_ context.Context, req PayRequest) (
+			PaymentStatus, error) {
+
+			f.payReq = req
 
 			return f.payStatus, f.payErr
 		},
@@ -414,6 +418,44 @@ func TestPayReportsInFlightRatherThanFailing(t *testing.T) {
 	}
 	if got.State != node.PaymentInFlight {
 		t.Errorf("got %v, wanted in flight", got.State)
+	}
+}
+
+// The timeout the runner cut to the outgoing invoice's life reaches the node
+// as it was asked, to the nanosecond: the node rounds it to whole seconds
+// itself (PayRequest.TimeoutSeconds).
+func TestLocalPayPassesTheTimeoutThrough(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeNode{payStatus: PaymentStatus{Known: true, InFlight: true}}
+	timeout := 10*time.Second + 300*time.Millisecond
+	_, err := local(f).Pay(context.Background(), node.PayRequest{
+		Invoice: "lnbcrt1payme", CLTVLimit: 80, Timeout: timeout,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.payReq.Timeout != timeout {
+		t.Errorf("the node was given %v, want %v", f.payReq.Timeout,
+			timeout)
+	}
+}
+
+// PayRequest.TimeoutSeconds is node.TimeoutSeconds, written again for the
+// untagged build that cannot import the module: the two must agree.
+func TestPayTimeoutSecondsMatchTheModule(t *testing.T) {
+	t.Parallel()
+
+	for _, d := range []time.Duration{
+		-time.Second, 0, time.Nanosecond, 999 * time.Millisecond,
+		time.Second, time.Second + 1, 10*time.Second + 300*time.Millisecond,
+		11 * time.Second, 2 * time.Minute, math.MaxInt32 * time.Second,
+		math.MaxInt64,
+	} {
+		got := PayRequest{Timeout: d}.TimeoutSeconds()
+		if want := node.TimeoutSeconds(d); got != want {
+			t.Errorf("%v: %d, the module says %d", d, got, want)
+		}
 	}
 }
 

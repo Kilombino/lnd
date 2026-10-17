@@ -82,6 +82,7 @@ type fakeInvoices struct {
 
 	addResp *invoicesrpc.AddHoldInvoiceResp
 	addErr  error
+	added   *invoicesrpc.AddHoldInvoiceRequest
 
 	lookup    *lnrpc.Invoice
 	lookupErr error
@@ -93,8 +94,10 @@ type fakeInvoices struct {
 }
 
 func (f *fakeInvoices) AddHoldInvoice(_ context.Context,
-	_ *invoicesrpc.AddHoldInvoiceRequest, _ ...grpc.CallOption) (
+	req *invoicesrpc.AddHoldInvoiceRequest, _ ...grpc.CallOption) (
 	*invoicesrpc.AddHoldInvoiceResp, error) {
+
+	f.added = req
 
 	return f.addResp, f.addErr
 }
@@ -152,15 +155,17 @@ type fakeRouter struct {
 
 	send    *fakeStream
 	sendErr error
+	sent    *routerrpc.SendPaymentRequest
 
 	track    *fakeStream
 	trackErr error
 }
 
-func (f *fakeRouter) SendPaymentV2(context.Context,
-	*routerrpc.SendPaymentRequest, ...grpc.CallOption) (
+func (f *fakeRouter) SendPaymentV2(_ context.Context,
+	req *routerrpc.SendPaymentRequest, _ ...grpc.CallOption) (
 	routerrpc.Router_SendPaymentV2Client, error) {
 
+	f.sent = req
 	if f.sendErr != nil {
 		return nil, f.sendErr
 	}
@@ -541,6 +546,39 @@ func TestRemotePayReportsInFlightWhenTheStreamDies(t *testing.T) {
 				t.Errorf("got %v, wanted in flight", got.State)
 			}
 		})
+	}
+}
+
+// The timeout the runner cut to the outgoing invoice's life reaches the SHA256
+// node in whole seconds, rounded up: truncated, a timeout of 10.3 s became 10,
+// and one under a second became zero, which lnd reads as a minute.
+func TestRemotePaySendsTheTimeoutInWholeSeconds(t *testing.T) {
+	t.Parallel()
+
+	for _, c := range []struct {
+		timeout time.Duration
+		want    int32
+	}{
+		{11 * time.Second, 11},
+		{10*time.Second + 300*time.Millisecond, 11},
+		{300 * time.Millisecond, 1},
+		{2 * time.Minute, 120},
+	} {
+		router := &fakeRouter{send: &fakeStream{updates: []*lnrpc.Payment{
+			{Status: lnrpc.Payment_FAILED},
+		}}}
+		_, err := remote(nil, nil, router).Pay(context.Background(),
+			node.PayRequest{
+				Invoice: "lnbc1payme", CLTVLimit: 80,
+				Timeout: c.timeout,
+			})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := router.sent.GetTimeoutSeconds(); got != c.want {
+			t.Errorf("%v: timeout_seconds %d, want %d", c.timeout, got,
+				c.want)
+		}
 	}
 }
 

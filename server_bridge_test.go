@@ -272,3 +272,71 @@ func TestBridgeDepsSearchRoutesWithTheRouter(t *testing.T) {
 	require.ErrorContains(t, err, "unable to find a path")
 	require.True(t, searched)
 }
+
+// The in-process payment's timeout is the bridge's, in whole seconds rounded
+// up, as the router builds the intent from it: the bridge cuts it to the
+// outgoing invoice's last seconds, and truncating 10.3 s to 10, or 0.3 s to
+// none at all, would undo that.
+func TestBridgePaymentTimeoutReachesTheIntent(t *testing.T) {
+	key, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	var hash, addr [32]byte
+	hash[0], addr[0] = 1, 2
+	invoice, err := zpay32.NewInvoice(
+		&chaincfg.RegressionNetParams, hash, time.Now(),
+		zpay32.Amount(lnwire.MilliSatoshi(100_000)),
+		zpay32.Description("bridge payout"),
+		zpay32.Destination(key.PubKey()),
+		zpay32.CLTVExpiry(18),
+		zpay32.PaymentAddr(addr),
+		zpay32.Features(lnwire.NewFeatureVector(
+			lnwire.NewRawFeatureVector(
+				lnwire.Blake2bRequired,
+				lnwire.TLVOnionPayloadRequired,
+				lnwire.PaymentAddrRequired,
+			),
+			lnwire.Features,
+		)),
+	)
+	require.NoError(t, err)
+	payReq, err := invoice.Encode(zpay32.MessageSigner{
+		SignCompact: func(msg []byte) ([]byte, error) {
+			return ecdsa.SignCompact(
+				key, chainhash.HashB(msg), true,
+			), nil
+		},
+	})
+	require.NoError(t, err)
+
+	backend := &routerrpc.RouterBackend{
+		MaxTotalTimelock:      2016,
+		ActiveNetParams:       &chaincfg.RegressionNetParams,
+		DefaultFinalCltvDelta: 40,
+		Clock:                 clock.NewDefaultClock(),
+		ShouldSetExpAccountability: func() bool {
+			return false
+		},
+	}
+
+	for _, c := range []struct {
+		timeout, want time.Duration
+	}{
+		{11 * time.Second, 11 * time.Second},
+		{10*time.Second + 300*time.Millisecond, 11 * time.Second},
+		{300 * time.Millisecond, time.Second},
+		{2 * time.Minute, 2 * time.Minute},
+	} {
+		intent, err := backend.ExtractIntent(bridgeSendRequest(
+			bridgerpc.PayRequest{
+				Invoice: payReq, CLTVLimit: 200,
+				MaxFeeMsat: 1000, Timeout: c.timeout,
+			},
+		))
+		require.NoError(t, err)
+		require.Equal(t, c.want, intent.PayAttemptTimeout, "%v",
+			c.timeout)
+		require.EqualValues(t, 200, intent.CltvLimit)
+		require.EqualValues(t, 1000, intent.FeeLimit)
+	}
+}

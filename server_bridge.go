@@ -294,6 +294,21 @@ func addBridgeHoldInvoiceWith(ctx context.Context,
 	return string(dbInvoice.PaymentRequest), nil
 }
 
+// bridgeSendRequest is the payment the bridge asks for, as an RPC client would
+// ask it. Its timeout is in whole seconds, rounded up and never none
+// (bridgerpc.PayRequest.TimeoutSeconds): the bridge cuts it to an invoice's
+// last seconds, and the router reads zero as no timeout at all.
+func bridgeSendRequest(
+	req bridgerpc.PayRequest) *routerrpc.SendPaymentRequest {
+
+	return &routerrpc.SendPaymentRequest{
+		PaymentRequest: req.Invoice,
+		TimeoutSeconds: req.TimeoutSeconds(),
+		FeeLimitMsat:   int64(req.MaxFeeMsat),
+		CltvLimit:      int32(req.CLTVLimit),
+	}
+}
+
 // payBridgeInvoice sends a payment and blocks until it resolves.
 //
 // The intent is built by the router backend's own ExtractIntent rather than
@@ -326,14 +341,7 @@ func (s *server) payBridgeInvoice(ctx context.Context,
 			"incoming HTLC until it expires")
 	}
 
-	intent, err := routerBackend.ExtractIntent(
-		&routerrpc.SendPaymentRequest{
-			PaymentRequest: req.Invoice,
-			TimeoutSeconds: int32(req.Timeout.Seconds()),
-			FeeLimitMsat:   int64(req.MaxFeeMsat),
-			CltvLimit:      int32(req.CLTVLimit),
-		},
-	)
+	intent, err := routerBackend.ExtractIntent(bridgeSendRequest(req))
 	if err != nil {
 		return bridgerpc.PaymentStatus{}, fmt.Errorf("%w: %v",
 			bridgerpc.ErrPaymentNotSent, err)

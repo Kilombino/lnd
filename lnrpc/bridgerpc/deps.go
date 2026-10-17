@@ -3,6 +3,7 @@ package bridgerpc
 import (
 	"context"
 	"errors"
+	"math"
 	"math/big"
 	"net"
 	"time"
@@ -234,8 +235,30 @@ type PayRequest struct {
 
 	// Timeout abandons the attempt. It bounds how long the payment may sit
 	// in flight, not how long an HTLC that has already left takes to
-	// resolve on chain, which is what CLTVLimit bounds.
+	// resolve on chain, which is what CLTVLimit bounds. The bridge cuts it
+	// to the life the invoice has left, which may be seconds; see
+	// TimeoutSeconds.
 	Timeout time.Duration
+}
+
+// TimeoutSeconds is the request's Timeout in the whole seconds the router
+// counts a payment's timeout in. Rounded up, so an attempt is never cut
+// shorter than the bridge asked, and never under one: zero reads as no
+// timeout, or a default of a minute, which would undo a timeout cut to an
+// invoice's last seconds.
+//
+// The bridge module's node.TimeoutSeconds, which this build cannot import
+// untagged; TestPayTimeoutSecondsMatchTheModule holds the two together.
+func (r PayRequest) TimeoutSeconds() int32 {
+	if r.Timeout >= math.MaxInt32*time.Second {
+		return math.MaxInt32
+	}
+	secs := (r.Timeout + time.Second - 1) / time.Second
+	if secs < 1 {
+		return 1
+	}
+
+	return int32(secs)
 }
 
 // BlockInfo is a chain tip as this node sees it.
