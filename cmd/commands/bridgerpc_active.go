@@ -227,7 +227,13 @@ var bridgeResolveCommand = cli.Command{
 	and the payer's held payment is cancelled, which refunds them.
 	Succeeded: the payer's payment is settled with the preimage. Still in
 	flight: refused, and the swap is left as it is. Needs an admin
-	macaroon.`,
+	macaroon.
+
+	The bridge must still point at the SHA256 node it used for the swap,
+	the one that made the payment for a payout on the SHA256 chain:
+	another node has no record of the payment, which reads as never sent
+	and refunds a payer whose payout may have been made. A swap raised in
+	needs_operator while the bridge is still driving it is refused.`,
 	Action: actionDecorator(func(ctx *cli.Context) error {
 		if ctx.NArg() != 1 {
 			return cli.ShowCommandHelp(ctx, "resolve")

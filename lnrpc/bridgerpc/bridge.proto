@@ -91,8 +91,9 @@ service Bridge {
     failed: the swap fails, and the payer's held payment is cancelled, which
     refunds them. Succeeded: the payer's payment is settled with the preimage
     and the swap is paid. Still in flight: refused, since the payment may yet
-    go either way. Only for an admin macaroon, and only for a swap listed in
-    needs_operator.
+    go either way. Only for an admin macaroon, and only for a swap
+    needs_operator lists as stopped, not one raised while it is still being
+    driven.
     */
     rpc ResolveSwap (ResolveSwapRequest) returns (Swap);
 }
@@ -223,10 +224,11 @@ message StatusResponse {
 
     /*
     Swaps that need the operator: ones that ended lost (paid out and the
-    claim on the money coming in could not be settled) or that the bridge
-    stopped driving because it must not decide them alone. Each is the
-    payment hash, the state and why. The bridge keeps quoting; these are for
-    a person to look at.
+    claim on the money coming in could not be settled), that the bridge
+    stopped driving because it must not decide them alone, or that it raised
+    while still driving them (a paying node contradicting itself again and
+    again), until their driving ends. Each is the payment hash, the state
+    and why. The bridge keeps quoting; these are for a person to look at.
     */
     repeated string needs_operator = 8;
 
@@ -380,8 +382,11 @@ message DirectionInfo {
 
     /*
     Bounds on the invoice to be paid, in the outgoing chain's millisatoshis.
-    A participant is given max_msat rounded down to two significant figures
-    of whole satoshis, and refusal as the code's fixed sentence.
+    max_msat is the largest payout that fits, with its routing budget, in
+    what is left on the paying side. A participant is given it rounded down
+    to two significant figures of whole satoshis, and a quote from them
+    above that is refused as no_liquidity; refusal is given as the code's
+    fixed sentence.
     */
     uint64 min_msat = 8;
     uint64 max_msat = 9;

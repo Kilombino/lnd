@@ -87,15 +87,20 @@ on this node's network, the bridge stays down and tries again every minute
 (every ten seconds while a SHA256 node Lightning Fork runs is coming up)
 while this node runs as usual. `needs_operator`
 lists swaps that need you: one that ended lost (paid out, and the payment
-coming in could not be claimed), or one the bridge stopped driving because it
-must not decide it alone. Watch that list. It is filled while the bridge is
+coming in could not be claimed), one the bridge stopped driving because it
+must not decide it alone, or one it raised while still driving it (a paying
+node that contradicted itself ten times in a row), which stays listed until
+its driving ends. Watch that list. It is filled while the bridge is
 on, and while it is off but still finishing swaps. A swap stopped while paying
 means the paying node has no record of a payment the bridge started, which
 almost always means it never left. Once you have ruled out the two cases where
 it did (that node's database restored from a backup, or payments deleted by
 hand), `lncli bridge resolve <payment_hash>` asks the node again: no record or
 failed refunds the payer, succeeded settles their payment, and still in
-flight is refused. It needs the admin macaroon. `unfinished` counts the
+flight is refused. It is only for a swap listed as stopped (one still being
+driven is refused), and the bridge must still point at the SHA256 node it
+used for that swap: another one has no record of the payment, which reads as
+never sent. It needs the admin macaroon. `unfinished` counts the
 swaps the journal has not finished (a lost one is final and not counted),
 whatever the bridge's state: wait for it to be 0 before turning the bridge
 off or moving it to another SHA256 node.
@@ -197,9 +202,9 @@ direction makes sense when you want the coin the other one brings in.
 
 ## Routes
 
-Before quoting a payout on the SHA256 chain, the bridge asks its SHA256 node
-for a route to the invoice's destination within two budgets (payouts on this
-chain are sized to their whole budget, without asking first):
+Before quoting a payout, the bridge asks the node that will pay it (its SHA256
+node, or this node for a payout on this chain) for a route to the invoice's
+destination within two budgets, and asks again just before paying:
 
 - **Fees:** 0.3% of the payout, and at least 10 sats; it comes out of the fee.
   A payout too small for its fee to cover that is refused.
@@ -213,6 +218,15 @@ With no such route the quote is refused (`no_route`) and nothing is held.
 With one, the swap is sized to that route plus 40 blocks of slack, not to the
 whole budget: the payer's payment is held for as long as the bridge's could
 take to resolve, so a short route asks a short hold.
+
+The search finds single paths, and a payout can be split over several. When
+no single path carries a payout whose invoice allows splitting (two 100k
+channels and a 150k payout), it is quoted if the paying node's spendable
+balance on its active channels covers the payout and its fee budget, and
+sized to the whole time-lock budget, since there is no path to measure. A
+funded swap with no route when it comes to pay (channels still coming up
+after a restart, say) waits for one, and is given back if none appears in
+time.
 
 The budgets are the largest the bridge's timing safety allows. The payer's
 hold must outlast the payout even if this chain's blocks come three times
@@ -261,6 +275,11 @@ unfinished (`participant.maxinprogress`, 4), and how many quotes a minute
 them nothing, which is why the first one matters. Your admin macaroon is not
 limited. Any other macaroon of this node's own (one you baked for an app, say)
 is counted as one participant, all of them together.
+
+A participant sees the most each direction can pay rounded down to two
+significant figures, and a quote of theirs above that is refused as if there
+were no more, so asking for quotes tells them no more about your balance than
+that. Your admin macaroon sees and quotes the exact amount.
 
 A participant code is one payer's credential. Everyone holding it shares its
 limits (2 unpaid quotes, 4 swaps in progress, 6 quotes a minute), so one

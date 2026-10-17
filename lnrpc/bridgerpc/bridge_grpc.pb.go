@@ -66,8 +66,9 @@ type BridgeClient interface {
 	//failed: the swap fails, and the payer's held payment is cancelled, which
 	//refunds them. Succeeded: the payer's payment is settled with the preimage
 	//and the swap is paid. Still in flight: refused, since the payment may yet
-	//go either way. Only for an admin macaroon, and only for a swap listed in
-	//needs_operator.
+	//go either way. Only for an admin macaroon, and only for a swap
+	//needs_operator lists as stopped, not one raised while it is still being
+	//driven.
 	ResolveSwap(ctx context.Context, in *ResolveSwapRequest, opts ...grpc.CallOption) (*Swap, error)
 }
 
@@ -194,8 +195,9 @@ type BridgeServer interface {
 	//failed: the swap fails, and the payer's held payment is cancelled, which
 	//refunds them. Succeeded: the payer's payment is settled with the preimage
 	//and the swap is paid. Still in flight: refused, since the payment may yet
-	//go either way. Only for an admin macaroon, and only for a swap listed in
-	//needs_operator.
+	//go either way. Only for an admin macaroon, and only for a swap
+	//needs_operator lists as stopped, not one raised while it is still being
+	//driven.
 	ResolveSwap(context.Context, *ResolveSwapRequest) (*Swap, error)
 	mustEmbedUnimplementedBridgeServer()
 }

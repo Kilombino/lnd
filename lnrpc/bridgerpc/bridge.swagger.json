@@ -108,7 +108,7 @@
     },
     "/v2/bridge/resolve": {
       "post": {
-        "summary": "lncli: `bridge resolve`\nResolveSwap decides a swap the bridge stopped in paying for the operator,\nby asking the paying node again what became of the payment. None or\nfailed: the swap fails, and the payer's held payment is cancelled, which\nrefunds them. Succeeded: the payer's payment is settled with the preimage\nand the swap is paid. Still in flight: refused, since the payment may yet\ngo either way. Only for an admin macaroon, and only for a swap listed in\nneeds_operator.",
+        "summary": "lncli: `bridge resolve`\nResolveSwap decides a swap the bridge stopped in paying for the operator,\nby asking the paying node again what became of the payment. None or\nfailed: the swap fails, and the payer's held payment is cancelled, which\nrefunds them. Succeeded: the payer's payment is settled with the preimage\nand the swap is paid. Still in flight: refused, since the payment may yet\ngo either way. Only for an admin macaroon, and only for a swap\nneeds_operator lists as stopped, not one raised while it is still being\ndriven.",
         "operationId": "Bridge_ResolveSwap",
         "responses": {
           "200": {
@@ -267,7 +267,7 @@
         "min_msat": {
           "type": "string",
           "format": "uint64",
-          "description": "Bounds on the invoice to be paid, in the outgoing chain's millisatoshis.\nA participant is given max_msat rounded down to two significant figures\nof whole satoshis, and refusal as the code's fixed sentence."
+          "description": "Bounds on the invoice to be paid, in the outgoing chain's millisatoshis.\nmax_msat is the largest payout that fits, with its routing budget, in\nwhat is left on the paying side. A participant is given it rounded down\nto two significant figures of whole satoshis, and a quote from them\nabove that is refused as no_liquidity; refusal is given as the code's\nfixed sentence."
         },
         "max_msat": {
           "type": "string",
@@ -548,7 +548,7 @@
           "items": {
             "type": "string"
           },
-          "description": "Swaps that need the operator: ones that ended lost (paid out and the\nclaim on the money coming in could not be settled) or that the bridge\nstopped driving because it must not decide them alone. Each is the\npayment hash, the state and why. The bridge keeps quoting; these are for\na person to look at."
+          "description": "Swaps that need the operator: ones that ended lost (paid out and the\nclaim on the money coming in could not be settled), that the bridge\nstopped driving because it must not decide them alone, or that it raised\nwhile still driving them (a paying node contradicting itself again and\nagain), until their driving ends. Each is the payment hash, the state\nand why. The bridge keeps quoting; these are for a person to look at."
         },
         "sha256_node": {
           "$ref": "#/definitions/bridgerpcSha256Node",

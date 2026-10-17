@@ -437,10 +437,11 @@ type StatusResponse struct {
 	RateExpiresAt int64 `protobuf:"varint,7,opt,name=rate_expires_at,json=rateExpiresAt,proto3" json:"rate_expires_at,omitempty"`
 	//
 	//Swaps that need the operator: ones that ended lost (paid out and the
-	//claim on the money coming in could not be settled) or that the bridge
-	//stopped driving because it must not decide them alone. Each is the
-	//payment hash, the state and why. The bridge keeps quoting; these are for
-	//a person to look at.
+	//claim on the money coming in could not be settled), that the bridge
+	//stopped driving because it must not decide them alone, or that it raised
+	//while still driving them (a paying node contradicting itself again and
+	//again), until their driving ends. Each is the payment hash, the state
+	//and why. The bridge keeps quoting; these are for a person to look at.
 	NeedsOperator []string `protobuf:"bytes,8,rep,name=needs_operator,json=needsOperator,proto3" json:"needs_operator,omitempty"`
 	//
 	//The Lightning node on the SHA256 chain: how far it has got and what it
@@ -979,8 +980,11 @@ type DirectionInfo struct {
 	Spread float64 `protobuf:"fixed64,7,opt,name=spread,proto3" json:"spread,omitempty"`
 	//
 	//Bounds on the invoice to be paid, in the outgoing chain's millisatoshis.
-	//A participant is given max_msat rounded down to two significant figures
-	//of whole satoshis, and refusal as the code's fixed sentence.
+	//max_msat is the largest payout that fits, with its routing budget, in
+	//what is left on the paying side. A participant is given it rounded down
+	//to two significant figures of whole satoshis, and a quote from them
+	//above that is refused as no_liquidity; refusal is given as the code's
+	//fixed sentence.
 	MinMsat       uint64 `protobuf:"varint,8,opt,name=min_msat,json=minMsat,proto3" json:"min_msat,omitempty"`
 	MaxMsat       uint64 `protobuf:"varint,9,opt,name=max_msat,json=maxMsat,proto3" json:"max_msat,omitempty"`
 	unknownFields protoimpl.UnknownFields
