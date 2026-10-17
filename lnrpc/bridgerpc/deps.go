@@ -77,10 +77,10 @@ type Deps struct {
 	// testnet, regtest, ...). The SHA256 node must be on the same one.
 	Network string
 
-	// Dial reaches the world as this node does: through Tor when the node
-	// is set to. The rate feed reads the market with it, so a node that
-	// keeps its address to itself does not hand it to an exchange. Nil
-	// dials directly.
+	// Dial reaches the world through Tor whenever this node uses Tor, for
+	// clearnet targets too. The rate feed reads the market with it, so a
+	// node that keeps its address to itself does not hand it to an
+	// exchange. Nil dials directly.
 	Dial func(network, address string, timeout time.Duration) (net.Conn,
 		error)
 

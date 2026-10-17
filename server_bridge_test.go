@@ -13,9 +13,11 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/lightningnetwork/lnd/clock"
 	"github.com/lightningnetwork/lnd/invoices"
+	"github.com/lightningnetwork/lnd/lncfg"
 	"github.com/lightningnetwork/lnd/lnrpc/bridgerpc"
 	"github.com/lightningnetwork/lnd/lnrpc/routerrpc"
 	"github.com/lightningnetwork/lnd/lnwire"
+	"github.com/lightningnetwork/lnd/tor"
 	"github.com/lightningnetwork/lnd/zpay32"
 	"github.com/stretchr/testify/require"
 )
@@ -89,4 +91,30 @@ func TestBridgePayRefusedBeforeARecordIsNotSent(t *testing.T) {
 	)
 	require.ErrorIs(t, err, bridgerpc.ErrPaymentNotSent)
 	require.ErrorContains(t, err, "cltv limit")
+}
+
+// The bridge's market reads go through Tor whenever the node uses it, even
+// when the node itself dials clearnet targets directly: an exchange polled
+// all day would otherwise see the bridge's address with every poll.
+func TestBridgeNetGoesThroughTorForEveryTarget(t *testing.T) {
+	clearNet := &tor.ClearNet{}
+
+	require.Equal(t, tor.Net(clearNet), bridgeNet(nil, clearNet))
+	require.Equal(t, tor.Net(clearNet), bridgeNet(&lncfg.Tor{}, clearNet))
+
+	onlyTor := &tor.ProxyNet{SOCKS: "127.0.0.1:9050"}
+	require.Equal(t, tor.Net(onlyTor), bridgeNet(&lncfg.Tor{
+		Active: true, SOCKS: "127.0.0.1:9050",
+	}, onlyTor))
+
+	hybrid := &tor.ProxyNet{
+		SOCKS: "127.0.0.1:9050", SkipProxyForClearNetTargets: true,
+	}
+	got := bridgeNet(&lncfg.Tor{
+		Active: true, SOCKS: "127.0.0.1:9050", DNS: "dns:53",
+		StreamIsolation: true, SkipProxyForClearNetTargets: true,
+	}, hybrid)
+	require.Equal(t, &tor.ProxyNet{
+		SOCKS: "127.0.0.1:9050", DNS: "dns:53", StreamIsolation: true,
+	}, got)
 }

@@ -14,12 +14,14 @@ import (
 	"github.com/lightningnetwork/lnd/feature"
 	"github.com/lightningnetwork/lnd/invoices"
 	"github.com/lightningnetwork/lnd/keychain"
+	"github.com/lightningnetwork/lnd/lncfg"
 	"github.com/lightningnetwork/lnd/lnrpc/bridgerpc"
 	"github.com/lightningnetwork/lnd/lnrpc/invoicesrpc"
 	"github.com/lightningnetwork/lnd/lnrpc/routerrpc"
 	"github.com/lightningnetwork/lnd/lntypes"
 	"github.com/lightningnetwork/lnd/lnwire"
 	paymentsdb "github.com/lightningnetwork/lnd/payments/db"
+	"github.com/lightningnetwork/lnd/tor"
 	"github.com/lightningnetwork/lnd/zpay32"
 )
 
@@ -72,7 +74,7 @@ func (s *server) bridgeDeps(
 
 		Network: bridgeNetworkName(s.cfg.ActiveNetParams.Params.Name),
 
-		Dial: s.cfg.net.Dial,
+		Dial: bridgeNet(s.cfg.Tor, s.cfg.net).Dial,
 
 		DeriveSha256Seed: s.deriveSha256Seed,
 
@@ -113,6 +115,29 @@ func (s *server) bridgeDeps(
 		ChannelBalance: s.bridgeChannelBalance,
 
 		Blake2bActivation: s.bridgeBlake2bActivation,
+	}
+}
+
+// bridgeNet is how the bridge reaches the world: the node's own network,
+// except that a node using Tor goes through it for every target.
+//
+// The node's network skips Tor for clearnet targets when
+// tor.skip-proxy-for-clearnet-targets is set, which a node that is reachable
+// on both is often set to. What the bridge dials is a market, polled all day,
+// and an exchange that sees this node's address with every poll learns where
+// a bridge, and the funds behind it, are. Nothing it reaches needs a direct
+// connection.
+func bridgeNet(torCfg *lncfg.Tor, nodeNet tor.Net) tor.Net {
+	if torCfg == nil || !torCfg.Active ||
+		!torCfg.SkipProxyForClearNetTargets {
+
+		return nodeNet
+	}
+
+	return &tor.ProxyNet{
+		SOCKS:           torCfg.SOCKS,
+		DNS:             torCfg.DNS,
+		StreamIsolation: torCfg.StreamIsolation,
 	}
 }
 
