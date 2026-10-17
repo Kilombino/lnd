@@ -1033,6 +1033,9 @@ func (s *Server) Quote(ctx context.Context, req *QuoteRequest) (*QuoteResponse,
 	// caller's own deadline still ends their wait.
 	ctx, cancel := context.WithTimeout(svc.ctx, quoteTimeout)
 	defer cancel()
+	if who != "" {
+		ctx = participantQuote(ctx)
+	}
 
 	sd, dec, err := svc.routeQuote(ctx, req.GetInvoice())
 	if err != nil {

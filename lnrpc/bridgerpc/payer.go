@@ -204,10 +204,51 @@ func forParticipant(resp *InfoResponse) *InfoResponse {
 		if d.GetRefusalCode() != "" {
 			d.Refusal = refusalSentence(quote.Code(d.GetRefusalCode()))
 		}
-		d.MaxMsat = max(coarseMsat(d.GetMaxMsat()), d.GetMinMsat())
+		d.MaxMsat = shownMaxMsat(d.GetMaxMsat(), d.GetMinMsat())
 	}
 
 	return resp
+}
+
+// shownMaxMsat is the most a direction can pay as a participant is shown it:
+// rounded down (coarseMsat), and never below the minimum swap.
+func shownMaxMsat(exact, minMsat uint64) uint64 {
+	return max(coarseMsat(exact), minMsat)
+}
+
+// participantRoom is what a participant's quote is measured against on a side
+// with room left: enough for the payout Info shows them as the most and its
+// routing budget, and no more. A quote above the shown maximum is then refused
+// as no_liquidity, as one above the exact maximum is, so success against
+// no_liquidity tells a participant probing with quotes nothing Info does not.
+//
+// A side that cannot pay the minimum is shut for everyone, so its room is
+// left as it is.
+func participantRoom(p quote.Policy, room uint64) uint64 {
+	exact := min(payableWithin(p, room), p.MaxSwapMsat)
+	if exact < p.MinSwapMsat {
+		return room
+	}
+	shown := shownMaxMsat(exact, p.MinSwapMsat)
+
+	return shown + feeBudget(p, shown)
+}
+
+// participantQuoteKey marks a quote's context as asked by a participant rather
+// than the operator.
+type participantQuoteKey struct{}
+
+// participantQuote marks ctx as a participant's quote, for the headroom it is
+// measured against (participantRoom).
+func participantQuote(ctx context.Context) context.Context {
+	return context.WithValue(ctx, participantQuoteKey{}, true)
+}
+
+// participantQuoting reports whether ctx is a participant's quote.
+func participantQuoting(ctx context.Context) bool {
+	marked, _ := ctx.Value(participantQuoteKey{}).(bool)
+
+	return marked
 }
 
 // feeBudget is the routing budget a quote gives a payout of amountMsat, by the

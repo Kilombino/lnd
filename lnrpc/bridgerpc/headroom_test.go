@@ -18,17 +18,15 @@ import (
 )
 
 // headroomServer is measuredServer with toBLAKE2b's paying side (this node)
-// holding room, halfway between the side's bounds, and a quote function
-// that asks for a payout of the amount given, from the caller in ctx, and
-// answers the refusal code: internal for one that passed every check, since
-// the SHA256 node then refuses to create its hold invoice.
-func headroomServer(t *testing.T) (*Server, *side,
-	func(ctx context.Context, amt uint64) quote.Code) {
-
+// holding room halfway between the side's bounds, and the payout invoice
+// read as inv.
+func headroomServer(t *testing.T, inv **zpay32.Invoice) *Server {
 	t.Helper()
 
 	srv, svc := measuredServer(t, 100_000_000_000)
-	svc.ctx = context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	svc.ctx = ctx
 
 	var sd *side
 	for _, s := range svc.sides {
@@ -44,12 +42,11 @@ func headroomServer(t *testing.T) (*Server, *side,
 		return room, nil
 	}
 
-	var inv *zpay32.Invoice
 	l := sd.out.(*Local)
 	l.deps.DecodeInvoice = func(context.Context, string) (*zpay32.Invoice,
 		error) {
 
-		return inv, nil
+		return *inv, nil
 	}
 	l.deps.QueryRoutes = func(context.Context,
 		*lnrpc.QueryRoutesRequest) (*lnrpc.QueryRoutesResponse, error) {
@@ -59,9 +56,8 @@ func headroomServer(t *testing.T) (*Server, *side,
 		}}}, nil
 	}
 
-	// The hold invoice is refused, so a quote that gets that far records
-	// a swap nothing holds against the headroom, and the next quote sees
-	// the same room.
+	// The SHA256 node refuses to create the hold invoice, so a quote that
+	// passed every check fails as internal.
 	held := &fakeInvoices{
 		addErr:    status.Error(codes.Internal, "not today"),
 		lookupErr: status.Error(codes.NotFound, "no invoice"),
@@ -72,20 +68,41 @@ func headroomServer(t *testing.T) (*Server, *side,
 		}
 	}
 
-	ask := func(ctx context.Context, amt uint64) quote.Code {
-		inv, _ = routedInvoice(t, lnwire.MilliSatoshi(amt))
-		_, err := srv.Quote(ctx, &QuoteRequest{
-			Invoice: "lnbcrt1toblake2b",
-		})
-		msg := status.Convert(err).Message()
-		if code, _, ok := strings.Cut(msg, ": "); ok {
-			return quote.Code(code)
+	return srv
+}
+
+// headroomInfo is toBLAKE2b's maximum in Info, as the caller in ctx sees it.
+func headroomInfo(t *testing.T, ctx context.Context) uint64 {
+	t.Helper()
+
+	var inv *zpay32.Invoice
+	resp, err := headroomServer(t, &inv).Info(ctx, &InfoRequest{})
+	require.NoError(t, err)
+	for _, d := range resp.Directions {
+		if d.Name == "toBLAKE2b" {
+			require.True(t, d.Open, "%s", d.Refusal)
+
+			return d.MaxMsat
 		}
-
-		return ""
 	}
+	t.Fatal("no toBLAKE2b direction")
 
-	return srv, sd, ask
+	return 0
+}
+
+// headroomQuote asks a fresh headroomServer for a toBLAKE2b payout of amt from
+// the caller in ctx, and answers its refusal code: internal for a quote that
+// passed every check.
+func headroomQuote(t *testing.T, ctx context.Context, amt uint64) quote.Code {
+	t.Helper()
+
+	inv, _ := routedInvoice(t, lnwire.MilliSatoshi(amt))
+	_, err := headroomServer(t, &inv).Quote(ctx, &QuoteRequest{
+		Invoice: "lnbcrt1toblake2b",
+	})
+	code, _, _ := strings.Cut(status.Convert(err).Message(), ": ")
+
+	return quote.Code(code)
 }
 
 // Info's maximum is the largest payout a quote takes: one whose routing
@@ -94,22 +111,10 @@ func headroomServer(t *testing.T) (*Server, *side,
 func TestInfoMaximumFitsTheFeeBudget(t *testing.T) {
 	t.Parallel()
 
-	srv, _, ask := headroomServer(t)
-	resp, err := srv.Info(context.Background(), &InfoRequest{})
-	require.NoError(t, err)
-
-	var most uint64
-	for _, d := range resp.Directions {
-		if d.Name == "toBLAKE2b" {
-			require.True(t, d.Open, "%s", d.Refusal)
-			most = d.MaxMsat
-		}
-	}
-	require.NotZero(t, most)
-
-	require.Equal(t, quote.CodeNoLiquidity, ask(context.Background(),
-		most+1))
-	require.Equal(t, quote.CodeInternal, ask(context.Background(), most))
+	ctx := context.Background()
+	most := headroomInfo(t, ctx)
+	require.Equal(t, quote.CodeNoLiquidity, headroomQuote(t, ctx, most+1))
+	require.Equal(t, quote.CodeInternal, headroomQuote(t, ctx, most))
 }
 
 func TestPayableWithin(t *testing.T) {
@@ -133,4 +138,23 @@ func TestPayableWithin(t *testing.T) {
 				"%d also fits in %d", next, room)
 		}
 	}
+}
+
+// A participant's quote above the maximum Info shows them is refused as
+// no_liquidity, as one above the exact maximum is, so probing with quotes
+// pins the headroom no closer than Info's rounding. The operator's quotes
+// keep the exact limit.
+func TestAParticipantIsHeldToTheShownMaximum(t *testing.T) {
+	t.Parallel()
+
+	op, them := context.Background(), macaroonFor(t, "17")
+	shown, exact := headroomInfo(t, them), headroomInfo(t, op)
+	require.Less(t, shown+1, exact, "the test needs a maximum that "+
+		"rounds down")
+
+	require.Equal(t, quote.CodeNoLiquidity, headroomQuote(t, them, shown+1))
+	require.Equal(t, quote.CodeInternal, headroomQuote(t, them, shown))
+	require.Equal(t, quote.CodeInternal, headroomQuote(t, op, shown+1))
+	require.Equal(t, quote.CodeInternal, headroomQuote(t, op, exact))
+	require.Equal(t, quote.CodeNoLiquidity, headroomQuote(t, op, exact+1))
 }

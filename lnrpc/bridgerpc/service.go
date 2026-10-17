@@ -685,8 +685,16 @@ func (s *service) headroom(sd *side) quote.Headroom {
 		if promised >= held {
 			return 0, nil
 		}
+		room := held - promised
 
-		return held - promised, nil
+		// A participant's quote is held to the maximum Info shows
+		// them, so that probing with quotes learns no more of the
+		// bridge's outbound than Info says.
+		if participantQuoting(ctx) {
+			return participantRoom(sd.quoter.Policy, room), nil
+		}
+
+		return room, nil
 	}
 }
 
