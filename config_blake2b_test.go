@@ -353,6 +353,14 @@ func TestCheckNeutrinoBlake2b(t *testing.T) {
 	}))
 	require.ErrorContains(t, err, "fee.url")
 
+	// The deprecated feeurl alone is a fee URL too: chainreg copies it
+	// into fee.url when it builds the fee estimator.
+	require.NoError(t, checkNeutrinoBlake2b(mainnet(func(c *Config) {
+		c.Fee.URL = ""
+		c.FeeURL = "https://fees.example/fees.json"
+		c.NeutrinoMode.ConnectPeers = []string{"knots.example:8333"}
+	})))
+
 	err = checkNeutrinoBlake2b(mainnet(func(*Config) {}))
 	require.ErrorContains(t, err, "neutrino.connect")
 
