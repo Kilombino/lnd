@@ -472,12 +472,13 @@ func TestEachDirectionTakesTheWorseVenue(t *testing.T) {
 	}
 }
 
-// Past maxvenuegap between the venues' middles nothing is quoted, and the
-// refusal says why.
-func TestTheVenueGapStops(t *testing.T) {
+// Past maxvenuegap between the venues on the side a direction trades against,
+// read at the smallest swap, that direction quotes nothing, and says why; the
+// other one, whose side of the two books still agrees, goes on quoting.
+func TestTheVenueGapStopsADirection(t *testing.T) {
 	m := newMarket(feedStart)
-	// NonKYC's book 5% under Neoxa's.
-	m.nonKYC(0.0057*fakeUSD, 0.005757*fakeUSD)
+	// NonKYC's bid 5% under Neoxa's, its ask the same.
+	m.nonKYC(0.0057*fakeUSD, 0.00606*fakeUSD)
 	f := testFeed(t, m)
 	f.read(context.Background())
 
@@ -485,20 +486,38 @@ func TestTheVenueGapStops(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, tc := range []struct {
-		invert bool
-		name   string
-	}{{false, "toSHA256"}, {true, "toBLAKE2b"}} {
-		_, _, err = got.forSide(tc.invert)
-		if !errors.Is(err, rate.ErrDisagreement) ||
-			!strings.Contains(err.Error(), tc.name+" quotes nothing") ||
-			!strings.Contains(err.Error(), "more than the 4.0% allowed") {
+	_, _, err = got.forSide(false)
+	if !errors.Is(err, rate.ErrDisagreement) ||
+		!strings.Contains(err.Error(), "toSHA256 quotes nothing") ||
+		!strings.Contains(err.Error(), "more than the 4.0% allowed") {
 
-			t.Errorf("%s with the venues 5%% apart: %v", tc.name, err)
-		}
+		t.Errorf("toSHA256 with the bids 5%% apart: %v", err)
+	}
+	if v, _ := sideOf(t, got, true); !near(v, 0.00606) {
+		t.Errorf("toBLAKE2b at %g", v)
+	}
+
+	// NonKYC's ask 5% over Neoxa's, its bid the same: the other way.
+	m.nonKYC(0.006*fakeUSD, 0.006363*fakeUSD)
+	m.advance(30 * time.Second)
+	f = testFeed(t, m)
+	f.read(context.Background())
+	got, err = f.quoteRate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = got.forSide(true)
+	if !errors.Is(err, rate.ErrDisagreement) ||
+		!strings.Contains(err.Error(), "toBLAKE2b quotes nothing") {
+
+		t.Errorf("toBLAKE2b with the asks 5%% apart: %v", err)
+	}
+	if v, _ := sideOf(t, got, false); !near(v, 0.006) {
+		t.Errorf("toSHA256 at %g", v)
 	}
 
 	// The option moves the bound.
+	m.nonKYC(0.0057*fakeUSD, 0.00606*fakeUSD)
 	c := usable()
 	c.MaxVenueGap = 0.06
 	f = testFeedWith(t, m, c.resolve().market)
@@ -506,9 +525,6 @@ func TestTheVenueGapStops(t *testing.T) {
 	got, _ = f.quoteRate()
 	if v, _ := sideOf(t, got, false); !near(v, 0.0057) {
 		t.Errorf("toSHA256 at %g with a 6%% bound", v)
-	}
-	if v, _ := sideOf(t, got, true); !near(v, 0.00606) {
-		t.Errorf("toBLAKE2b at %g with a 6%% bound", v)
 	}
 }
 
@@ -1632,12 +1648,12 @@ func TestStatusNotesTheMarket(t *testing.T) {
 		t.Errorf("notes %q, refusals %q", resp.RateNotes, resp.Refusals)
 	}
 
-	// NonKYC 5% under Neoxa: both directions stop, each saying so.
-	m.nonKYC(0.0057*fakeUSD, 0.005757*fakeUSD)
+	// NonKYC's bid 5% under Neoxa's: toSHA256 alone stops.
+	m.nonKYC(0.0057*fakeUSD, 0.00606*fakeUSD)
 	m.advance(time.Second)
 	srv.market.read(context.Background())
 	resp, _ = srv.Status(context.Background(), &StatusRequest{})
-	if refused() != 2 || !strings.Contains(strings.Join(resp.Refusals,
+	if refused() != 1 || !strings.Contains(strings.Join(resp.Refusals,
 		"; "), "toSHA256 quotes nothing") {
 
 		t.Errorf("refusals %q", resp.Refusals)

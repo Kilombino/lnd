@@ -145,9 +145,9 @@ type Config struct {
 	FeeToSHA256  float64 `long:"fee.tosha256" description:"Your fee for swaps that pay out on the SHA256 chain, as a fraction (0.015 is 1.5%). Default: spread."`
 	FeeToBLAKE2b float64 `long:"fee.toblake2b" description:"Your fee for swaps that pay out on this chain, as a fraction (0.015 is 1.5%). Default: spread."`
 
-	// MaxVenueGap is how far apart the middles of Neoxa's and NonKYC's
-	// books, read at the smallest swap, may be before the directions stop
-	// quoting.
+	// MaxVenueGap is how far apart Neoxa's and NonKYC's books may be, per
+	// direction, on the side it trades against read at the smallest swap,
+	// before that direction stops quoting.
 	//
 	// Each direction already trades at the venue worse for its payer, so
 	// a gap costs payers rather than the bridge; past this one of the two
@@ -155,7 +155,7 @@ type Config struct {
 	// allowance can carry, and nothing is quoted. Their depth is not
 	// compared: two honest books of different depth read apart at the
 	// largest swap, and each direction pays for that at the worse one.
-	MaxVenueGap float64 `long:"maxvenuegap" description:"Following the market: how far apart the middles of Neoxa's and NonKYC's books, read at the smallest swap, may be as a fraction before the bridge stops quoting. Each direction trades at whichever venue is worse for its payer at the largest swap. Default 0.04 (4%)."`
+	MaxVenueGap float64 `long:"maxvenuegap" description:"Following the market: how far apart Neoxa's and NonKYC's prices may be, as a fraction, before a direction stops quoting: their bids for swaps paying out SHA256 coin, their asks for the other way, read at the smallest swap. Each direction trades at whichever venue is worse for its payer at the largest swap. Default 0.04 (4%)."`
 
 	// DriftBand, DriftWiden and DriftMax price a market away from the
 	// median of its last day (the anchor): a fast move that a short window

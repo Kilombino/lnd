@@ -125,10 +125,11 @@ through Tor when this node uses Tor:
 - **A second venue** is NonKYC's BTCB2_USDT book over the same BTC/USD price.
   Each direction trades at whichever venue is worse for its payer, so pushing
   BLAKE2b coin up or down on one exchange gains nothing against the bridge. If
-  the middles of the two are more than `bridgerpc.maxvenuegap` apart (4% by
-  default), nothing is quoted until they come back together. If NonKYC cannot
-  be read (it refuses many Tor exits), the bridge prices on Neoxa alone and
-  says so in `rate_notes`.
+  the two are more than `bridgerpc.maxvenuegap` apart (4% by default) on the
+  side a direction trades against (read at the smallest swap), that
+  direction quotes nothing until they come back together; the other one goes
+  on. If NonKYC cannot be read (it refuses many Tor exits), the bridge prices
+  on Neoxa alone and says so in `rate_notes`.
 - **BTC/USD** is CoinGecko's, asked at most every five minutes, or
   mempool.space's when CoinGecko does not answer. Only when neither has
   answered for fifteen minutes is Neoxa's own BTC_USDC market used, with the
