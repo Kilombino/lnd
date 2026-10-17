@@ -497,6 +497,10 @@ func TestInvoiceRegistry(t *testing.T) {
 			test: testExpiryOfDeletedInvoiceSparesItsReplacement,
 		},
 		{
+			name: "HeightExpiryOfDeletedInvoiceSparesItsReplacement",
+			test: testHeightExpiryOfDeletedInvoiceSparesItsReplacement,
+		},
+		{
 			name: "OldInvoiceRemovalOnStart",
 			test: testOldInvoiceRemovalOnStart,
 		},
@@ -1829,6 +1833,129 @@ func testExpiryOfDeletedInvoiceSparesItsReplacement(t *testing.T,
 		return nil
 	}, testTimeout)
 	require.NoError(t, err)
+}
+
+// testHeightExpiryOfDeletedInvoiceSparesItsReplacement is the block height
+// half of the case above, the one that costs funds: a hold invoice accepted,
+// canceled and deleted leaves its height entry queued, and when that height
+// comes the watcher force-cancels by payment hash. A second hold invoice for
+// the same hash, accepted meanwhile, must not be the one canceled: a bridge
+// that paid out against it would have its incoming refunded and lose the
+// payout.
+func testHeightExpiryOfDeletedInvoiceSparesItsReplacement(t *testing.T,
+	makeDB func(t *testing.T) (invpkg.InvoiceDB, *clock.TestClock)) {
+
+	t.Parallel()
+	defer timeout()()
+
+	ctx := newTestContext(t, nil, makeDB)
+	ctxb := t.Context()
+
+	const (
+		firstExpiry  = testHtlcExpiry
+		secondExpiry = testHtlcExpiry + 20
+	)
+
+	// accept adds a hold invoice for the test hash and accepts one htlc
+	// for it expiring at expiry.
+	accept := func(created time.Time, expiry uint32,
+		key invpkg.CircuitKey) chan interface{} {
+
+		inv := newInvoice(t, false, false)
+		inv.HodlInvoice = true
+		inv.Terms.PaymentPreimage = nil
+		inv.PaymentRequest = []byte{1, 2, 3}
+		inv.CreationDate = created
+
+		_, err := ctx.registry.AddInvoice(
+			ctxb, inv, testInvoicePaymentHash,
+		)
+		require.NoError(t, err)
+
+		hodlChan := make(chan interface{}, 1)
+		resolution, err := ctx.registry.NotifyExitHopHtlc(
+			testInvoicePaymentHash, inv.Terms.Value, expiry,
+			testCurrentHeight, key, hodlChan, nil, testPayload,
+		)
+		require.NoError(t, err)
+		require.Nil(t, resolution, "did not expect direct resolution")
+
+		require.Eventually(t, func() bool {
+			got, err := ctx.registry.LookupInvoice(
+				ctxb, testInvoicePaymentHash,
+			)
+			require.NoError(t, err)
+
+			return got.State == invpkg.ContractAccepted
+		}, time.Second, 10*time.Millisecond)
+
+		return hodlChan
+	}
+
+	// The first attempt: accepted, then canceled (its htlc failed back)
+	// and deleted, as the bridge does before quoting the hash again.
+	firstChan := accept(
+		testInvoiceCreationDate, firstExpiry, getCircuitKey(0),
+	)
+	require.NoError(t, ctx.registry.CancelInvoice(
+		ctxb, testInvoicePaymentHash,
+	))
+	resolution, _ := (<-firstChan).(invpkg.HtlcResolution)
+	require.NotNil(t, resolution)
+	checkFailResolution(t, resolution, invpkg.ResultCanceled)
+
+	first, err := ctx.registry.LookupInvoice(ctxb, testInvoicePaymentHash)
+	require.NoError(t, err)
+	require.NoError(t, ctx.idb.DeleteInvoice(
+		ctxb, []invpkg.InvoiceDeleteRef{{
+			PayHash:  testInvoicePaymentHash,
+			PayAddr:  &first.Terms.PaymentAddr,
+			AddIndex: first.AddIndex,
+		}},
+	))
+
+	// The second, a minute later, accepted with a later expiry.
+	secondChan := accept(
+		testInvoiceCreationDate.Add(time.Minute), secondExpiry,
+		getCircuitKey(1),
+	)
+
+	state := func() invpkg.ContractState {
+		inv, err := ctx.registry.LookupInvoice(
+			ctxb, testInvoicePaymentHash,
+		)
+		require.NoError(t, err)
+
+		return inv.State
+	}
+
+	// The first attempt's height comes: the second stays accepted and its
+	// htlc stays held. The mock notifier blocks until the watcher has
+	// consumed each height, so the one after it proves the first was
+	// processed.
+	ctx.notifier.blockChan <- &chainntnfs.BlockEpoch{
+		Height: int32(firstExpiry),
+	}
+	ctx.notifier.blockChan <- &chainntnfs.BlockEpoch{
+		Height: int32(firstExpiry + 1),
+	}
+	require.Equal(t, invpkg.ContractAccepted, state(), "the first "+
+		"attempt's expiry canceled the accepted invoice that "+
+		"replaced it")
+	select {
+	case r := <-secondChan:
+		t.Fatalf("the replacement's htlc was resolved: %v", r)
+	default:
+	}
+
+	// Its own height: canceled, as any hold invoice left unsettled is.
+	ctx.notifier.blockChan <- &chainntnfs.BlockEpoch{
+		Height: int32(secondExpiry),
+	}
+	resolution, _ = (<-secondChan).(invpkg.HtlcResolution)
+	require.NotNil(t, resolution)
+	checkFailResolution(t, resolution, invpkg.ResultCanceled)
+	require.Equal(t, invpkg.ContractCanceled, state())
 }
 
 // testOldInvoiceRemovalOnStart tests that we'll attempt to remove old canceled
