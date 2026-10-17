@@ -204,8 +204,9 @@ Each participant is limited on their own: how many quotes they may have unpaid
 at once (`bridgerpc.participant.maxunpaid`, default 2), how many swaps
 unfinished (`participant.maxinprogress`, 4), and how many quotes a minute
 (`participant.perminute`, 6). An unpaid quote reserves your liquidity and costs
-them nothing, which is why the first one matters. Your own macaroons are not
-limited.
+them nothing, which is why the first one matters. Your admin macaroon is not
+limited. Any other macaroon of this node's own (one you baked for an app, say)
+is counted as one participant, all of them together.
 
 The calls a participant's wallet makes, the checks it must run before paying,
 and the refusal codes it can receive are described in `docs/payer-api.md` in

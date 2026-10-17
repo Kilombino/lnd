@@ -14,8 +14,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lightningnetwork/lnd/kvdb"
 	"github.com/lightningnetwork/lnd/lnrpc"
 	"github.com/lightningnetwork/lnd/lnwire"
+	"github.com/lightningnetwork/lnd/macaroons"
 	"github.com/lightningnetwork/lnd/zpay32"
 	"github.com/paulscode/lightning-fork-bridge/node"
 	"github.com/paulscode/lightning-fork-bridge/quote"
@@ -219,18 +221,86 @@ func macaroonFor(t *testing.T, rootKeyID string) context.Context {
 		metadata.Pairs("macaroon", hex.EncodeToString(raw)))
 }
 
+// bakedBy bakes a macaroon the way lnd does, under a root key id and for the
+// given operations, and returns a context carrying it as the RPC server would
+// receive it.
+func bakedBy(t *testing.T, rootKeyID string, ops ...bakery.Op) context.Context {
+	t.Helper()
+
+	db, err := kvdb.Create(
+		kvdb.BoltBackendName, filepath.Join(t.TempDir(), "mac.db"),
+		true, kvdb.DefaultDBTimeout, false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	keys, err := macaroons.NewRootKeyStorage(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := macaroons.NewService(keys, "lnd", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = svc.Close() })
+	pw := []byte("password")
+	if err := svc.CreateUnlock(&pw); err != nil {
+		t.Fatal(err)
+	}
+
+	mac, err := svc.NewMacaroon(context.Background(), []byte(rootKeyID),
+		ops...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := mac.M().MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return metadata.NewIncomingContext(context.Background(),
+		metadata.Pairs("macaroon", hex.EncodeToString(raw)))
+}
+
 func TestParticipantIsTheMacaroonsRootKey(t *testing.T) {
 	t.Parallel()
+
+	generate := bakery.Op{Entity: "macaroon", Action: "generate"}
+	pay := bakery.Op{Entity: "offchain", Action: "write"}
 
 	if got := participantOf(context.Background()); got != "" {
 		t.Errorf("no macaroon (a node without them) read as %q, "+
 			"wanted the operator", got)
 	}
-	if got := participantOf(macaroonFor(t, "0")); got != "" {
-		t.Errorf("the node's own root key read as %q, wanted the "+
-			"operator", got)
+	if got := participantOf(bakedBy(t, "0", pay, generate)); got != "" {
+		t.Errorf("an admin macaroon read as %q, wanted the operator",
+			got)
 	}
-	if got := participantOf(macaroonFor(t, "17")); got != "17" {
+	if got := participantOf(bakedBy(t, "17", pay)); got != "17" {
+		t.Errorf("participant %q, wanted 17", got)
+	}
+
+	// Under the node's own root key without the power to make macaroons:
+	// an app's macaroon that can pay, which is no reason to quote without
+	// limit. They share one participant's limits.
+	if got := participantOf(bakedBy(t, "0", pay)); got !=
+		operatorRootKeyID {
+
+		t.Errorf("a paying macaroon under root key 0 read as %q, "+
+			"wanted participant %q", got, operatorRootKeyID)
+	}
+	if got := participantOf(macaroonFor(t, "0")); got !=
+		operatorRootKeyID {
+
+		t.Errorf("a macaroon with no operations under root key 0 "+
+			"read as %q", got)
+	}
+
+	// Making macaroons under a participant's own root key does not make
+	// the holder the operator.
+	if got := participantOf(bakedBy(t, "17", pay, generate)); got != "17" {
 		t.Errorf("participant %q, wanted 17", got)
 	}
 
@@ -894,11 +964,22 @@ func TestParticipantsSeeOnlyTheirOwnSwaps(t *testing.T) {
 	if err := ask(macaroonFor(t, "17")); err != nil {
 		t.Errorf("its participant: %v", err)
 	}
-	if err := ask(macaroonFor(t, "0")); err != nil {
+	if err := ask(bakedBy(t, "0", bakery.Op{
+		Entity: "macaroon", Action: "generate",
+	})); err != nil {
+
 		t.Errorf("the operator: %v", err)
 	}
 	if err := ask(macaroonFor(t, "18")); status.Code(err) != codes.NotFound {
 		t.Errorf("another participant got %v, want NotFound", err)
+	}
+
+	// Under the node's own root key, but not the operator's own.
+	if err := ask(bakedBy(t, "0", bakery.Op{
+		Entity: "offchain", Action: "read",
+	})); status.Code(err) != codes.NotFound {
+
+		t.Errorf("a read-only macaroon got %v, want NotFound", err)
 	}
 }
 

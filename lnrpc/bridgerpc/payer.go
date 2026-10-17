@@ -24,8 +24,8 @@ import (
 const PayerAPIVersion = 1
 
 // operatorRootKeyID is the root key every macaroon the node creates for
-// itself is baked under. A caller presenting one is the operator, who is not
-// limited as a participant is.
+// itself is baked under, and the participant every such macaroon is counted as
+// unless it is the operator's own (see participantOf).
 const operatorRootKeyID = "0"
 
 // unknownParticipant stands for a caller whose macaroon cannot be read. Such a
@@ -41,6 +41,13 @@ const unknownParticipant = "unknown"
 // makes it revocable alone (lncli deletemacaroonid) and what identifies it
 // here. Nothing secret is read: the id is the macaroon's public identifier,
 // and the macaroon itself was verified before this call was reached.
+//
+// The operator is a macaroon under the node's own root key that can also make
+// macaroons: admin.macaroon, or one baked as capable. Every other macaroon
+// under that root key (invoice.macaroon, one baked for an app with offchain
+// write) is a participant, and they share one set of limits: being able to
+// ask for a quote is not being the operator, and an app holding one of those
+// should not be able to reserve the bridge's liquidity without limit.
 func participantOf(ctx context.Context) string {
 	raw, err := macaroons.RawMacaroonFromContext(ctx)
 	if err != nil {
@@ -67,11 +74,34 @@ func participantOf(ctx context.Context) string {
 	}
 
 	storage := string(decoded.GetStorageId())
-	if storage == operatorRootKeyID || storage == "" {
+	if storage != operatorRootKeyID && storage != "" {
+		return storage
+	}
+	if canGenerate(decoded.GetOps()) {
 		return ""
 	}
 
-	return storage
+	return operatorRootKeyID
+}
+
+// canGenerate reports whether a macaroon's operations include making
+// macaroons, which only the operator's own carries.
+//
+// Read from the macaroon's id, which its signature covers, so a holder cannot
+// add the operation without the root key.
+func canGenerate(ops []*lnrpc.Op) bool {
+	for _, op := range ops {
+		if op.GetEntity() != "macaroon" {
+			continue
+		}
+		for _, action := range op.GetActions() {
+			if action == "generate" {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 // refusal turns an error from quoting into a status a payer can act on: a
