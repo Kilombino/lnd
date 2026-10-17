@@ -101,6 +101,8 @@ func (s *server) bridgeDeps(
 			return err
 		},
 
+		QueryRoutes: routerBackend.QueryRoutes,
+
 		PayInvoice: func(ctx context.Context, req bridgerpc.PayRequest) (
 			bridgerpc.PaymentStatus, error) {
 

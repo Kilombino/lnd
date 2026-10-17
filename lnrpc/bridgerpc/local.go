@@ -5,11 +5,14 @@ package bridgerpc
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
 	"time"
 
+	"github.com/lightningnetwork/lnd/lnrpc"
+	"github.com/lightningnetwork/lnd/lnrpc/invoicesrpc"
 	"github.com/lightningnetwork/lnd/lnwire"
 	"github.com/paulscode/lightning-fork-bridge/node"
 )
@@ -289,6 +292,71 @@ func (l *Local) Payable(ctx context.Context, invoice string) error {
 
 	return l.deps.CheckPayable(ctx, invoice)
 }
+
+// FindRoute asks this node's router for a route to the invoice's destination
+// within a routing budget and a CLTV limit, as Remote.FindRoute asks the SHA256
+// node: node.ErrNoRoute when it has none, and the route's CLTV counted from
+// this node's height.
+//
+// The invoice is read with this node's own decoder for what pathfinding needs
+// (its destination, amount, final CLTV, route hints and features).
+func (l *Local) FindRoute(ctx context.Context, invoice string,
+	maxFeeMsat uint64, cltvLimit uint32) (node.Route, error) {
+
+	if err := l.ready(); err != nil {
+		return node.Route{}, err
+	}
+	if l.deps.QueryRoutes == nil {
+		return node.Route{}, fmt.Errorf("%w: no route search",
+			ErrNoDeps)
+	}
+	if maxFeeMsat > math.MaxInt64 || cltvLimit > math.MaxInt32 {
+		return node.Route{}, fmt.Errorf("limits %d msat, %d blocks do "+
+			"not fit", maxFeeMsat, cltvLimit)
+	}
+
+	pay, err := l.deps.DecodeInvoice(ctx, invoice)
+	if err != nil {
+		return node.Route{}, fmt.Errorf("%w: %w", ErrInvoice, err)
+	}
+	if pay == nil || pay.Destination == nil || pay.MilliSat == nil {
+		return node.Route{}, fmt.Errorf("%w: no destination or "+
+			"amount to find a route for", ErrInvoice)
+	}
+	if *pay.MilliSat > math.MaxInt64 {
+		return node.Route{}, fmt.Errorf("%w: amount %d does not fit",
+			ErrInvoice, *pay.MilliSat)
+	}
+	delta := pay.MinFinalCLTVExpiry()
+	if delta > math.MaxInt32 {
+		return node.Route{}, fmt.Errorf("%w: final CLTV delta %d",
+			ErrInvoice, delta)
+	}
+
+	height, err := l.BlockHeight(ctx)
+	if err != nil {
+		return node.Route{}, err
+	}
+
+	var features []lnrpc.FeatureBit
+	if pay.Features != nil {
+		for bit := range pay.Features.Features() {
+			features = append(features, lnrpc.FeatureBit(bit))
+		}
+	}
+	res, err := l.deps.QueryRoutes(ctx, routeQuery(
+		hex.EncodeToString(pay.Destination.SerializeCompressed()),
+		int64(*pay.MilliSat), int32(delta),
+		invoicesrpc.CreateRPCRouteHints(pay.RouteHints), features,
+		maxFeeMsat, cltvLimit,
+	))
+
+	return routeFrom(res, err, height)
+}
+
+// A quote, and the pay gate, ask this node for a route before committing
+// anything, as they ask the SHA256 node.
+var _ node.RouteFinder = (*Local)(nil)
 
 // Decode reads a payment request with this node's own decoder.
 func (l *Local) Decode(ctx context.Context, invoice string) (node.Decoded,

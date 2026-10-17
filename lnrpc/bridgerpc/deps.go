@@ -9,6 +9,7 @@ import (
 
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/lightningnetwork/lnd/aezeed"
+	"github.com/lightningnetwork/lnd/lnrpc"
 	"github.com/lightningnetwork/lnd/zpay32"
 )
 
@@ -33,6 +34,15 @@ type Deps struct {
 	// runs it, so an invoice that would be refused at send time is refused
 	// while nothing is held.
 	CheckPayable func(ctx context.Context, invoice string) error
+
+	// QueryRoutes searches for a route as the QueryRoutes RPC does, with
+	// this node's own router. A quote asks it before committing anything,
+	// and the bridge asks again just before paying, so a payout is not
+	// sent while this node has no route (its channels still coming up
+	// after a start, say).
+	QueryRoutes func(ctx context.Context,
+		req *lnrpc.QueryRoutesRequest) (*lnrpc.QueryRoutesResponse,
+		error)
 
 	// HoldExpiryDelta is this node's invoices.holdexpirydelta: how many
 	// blocks before an accepted hold invoice's HTLC expires the node

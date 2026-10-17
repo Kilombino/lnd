@@ -2,6 +2,7 @@ package lnd
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sync/atomic"
@@ -12,12 +13,17 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/lightningnetwork/lnd/chainreg"
 	"github.com/lightningnetwork/lnd/clock"
 	"github.com/lightningnetwork/lnd/invoices"
+	"github.com/lightningnetwork/lnd/keychain"
 	"github.com/lightningnetwork/lnd/lncfg"
+	"github.com/lightningnetwork/lnd/lnrpc"
 	"github.com/lightningnetwork/lnd/lnrpc/bridgerpc"
 	"github.com/lightningnetwork/lnd/lnrpc/routerrpc"
 	"github.com/lightningnetwork/lnd/lnwire"
+	"github.com/lightningnetwork/lnd/routing"
+	"github.com/lightningnetwork/lnd/routing/route"
 	"github.com/lightningnetwork/lnd/tor"
 	"github.com/lightningnetwork/lnd/zpay32"
 	"github.com/stretchr/testify/require"
@@ -217,4 +223,52 @@ func TestBridgePaymentLeftToTheRouterOnStop(t *testing.T) {
 			t.Fatal("the stop waited for a held HTLC")
 		}
 	})
+}
+
+// The bridge searches for routes with this node's own router, through the
+// same QueryRoutes the RPC server answers with.
+func TestBridgeDepsSearchRoutesWithTheRouter(t *testing.T) {
+	key, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	s := &server{
+		cfg: &Config{
+			Invoices:        &lncfg.Invoices{},
+			ActiveNetParams: chainreg.BitcoinRegTestNetParams,
+			Tor:             &lncfg.Tor{},
+			net:             &tor.ClearNet{},
+		},
+		identityECDH: &keychain.PrivKeyECDH{PrivKey: key},
+	}
+
+	searched := false
+	backend := &routerrpc.RouterBackend{
+		SelfNode:              route.NewVertex(key.PubKey()),
+		MaxTotalTimelock:      2016,
+		DefaultFinalCltvDelta: 40,
+		ActiveNetParams:       &chaincfg.RegressionNetParams,
+		FindRoute: func(*routing.RouteRequest) (*route.Route, float64,
+			error) {
+
+			searched = true
+
+			return nil, 0, errors.New("unable to find a path to " +
+				"destination")
+		},
+	}
+
+	deps := s.bridgeDeps(backend)
+	require.NotNil(t, deps.QueryRoutes)
+
+	dest, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	_, err = deps.QueryRoutes(context.Background(),
+		&lnrpc.QueryRoutesRequest{
+			PubKey: hex.EncodeToString(
+				dest.PubKey().SerializeCompressed(),
+			),
+			AmtMsat: 100_000,
+		})
+	require.ErrorContains(t, err, "unable to find a path")
+	require.True(t, searched)
 }

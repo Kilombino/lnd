@@ -715,52 +715,13 @@ func (r *Remote) FindRoute(ctx context.Context, invoice string,
 	for bit := range req.GetFeatures() {
 		features = append(features, lnrpc.FeatureBit(bit))
 	}
-	res, err := r.main.QueryRoutes(ctx, &lnrpc.QueryRoutesRequest{
-		PubKey:         req.GetDestination(),
-		AmtMsat:        req.GetNumMsat(),
-		FinalCltvDelta: int32(req.GetCltvExpiry()),
-		FeeLimit: &lnrpc.FeeLimit{
-			Limit: &lnrpc.FeeLimit_FixedMsat{
-				FixedMsat: int64(maxFeeMsat),
-			},
-		},
-		CltvLimit:         cltvLimit,
-		RouteHints:        req.GetRouteHints(),
-		DestFeatures:      features,
-		UseMissionControl: true,
-	})
-	if err != nil {
-		// lnd answers a search that found nothing with an error, not
-		// an empty list: "unable to find a path to destination".
-		// The other ways lnd says the payment cannot go (too little
-		// to send, a destination needing a feature it lacks) are as
-		// final for this quote.
-		msg := strings.ToLower(err.Error())
-		for _, no := range []string{"unable to find a path", "no route",
-			"insufficient", "not enough", "feature"} {
+	res, err := r.main.QueryRoutes(ctx, routeQuery(
+		req.GetDestination(), req.GetNumMsat(),
+		int32(req.GetCltvExpiry()), req.GetRouteHints(), features,
+		maxFeeMsat, cltvLimit,
+	))
 
-			if strings.Contains(msg, no) {
-				return node.Route{}, fmt.Errorf("%w: %v",
-					node.ErrNoRoute, err)
-			}
-		}
-
-		return node.Route{}, fmt.Errorf("finding a route: %w", err)
-	}
-	if len(res.GetRoutes()) == 0 {
-		return node.Route{}, node.ErrNoRoute
-	}
-
-	route := res.GetRoutes()[0]
-	lock := int64(route.GetTotalTimeLock()) - int64(height)
-	if lock < 0 || lock > math.MaxInt32 {
-		return node.Route{}, fmt.Errorf("a route locking until %d at "+
-			"height %d", route.GetTotalTimeLock(), height)
-	}
-
-	return node.Route{
-		CLTV: uint32(lock), FeeMsat: uint64(route.GetTotalFeesMsat()),
-	}, nil
+	return routeFrom(res, err, height)
 }
 
 // BlockAt is a block's header by height, for seeding the chain observer.
