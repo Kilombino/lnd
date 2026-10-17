@@ -653,7 +653,8 @@ func (s *service) headroom(sd *side) quote.Headroom {
 }
 
 // committedOn is what this direction has already promised to pay out, in the
-// units of the chain it pays on.
+// units of the chain it pays on: each swap's payout and its routing budget,
+// since the payment leaves with both and the balance has to cover both.
 //
 // Only the states store.Committed counts, and for the same reason: a swap
 // merely quoted has no HTLC yet, but a payer can fund it at any moment, and
@@ -679,28 +680,23 @@ func (s *service) committedOn(ctx context.Context, sd *side) (uint64, error) {
 			continue
 		}
 
+		// A swap that cannot be attributed is counted against every
+		// side. Leaving it out of the one it belongs to would let the
+		// bridge promise those funds twice, and over-counting only
+		// refuses swaps it might have served.
 		name, err := s.sideNameOf(ctx, rec.Hash, rec.Invoice)
-		if err != nil {
-			// A swap that cannot be attributed is counted against
-			// every side. Leaving it out of the one it belongs to
-			// would let the bridge promise those funds twice, and
-			// over-counting only refuses swaps it might have
-			// served.
-			total += rec.OutgoingMsat
-
-			continue
-		}
-		if name != sd.name {
+		if err == nil && name != sd.name {
 			continue
 		}
 
-		// Saturating, because an overflow here would report a small
-		// commitment for an enormous one, in the direction that
-		// oversells.
-		if total+rec.OutgoingMsat < total {
+		// Refusing rather than wrapping, because an overflow here
+		// would report a small commitment for an enormous one, in the
+		// direction that oversells.
+		owed := rec.OutgoingMsat + rec.MaxFeeMsat
+		if owed < rec.OutgoingMsat || total+owed < total {
 			return 0, errors.New("committed amounts overflow")
 		}
-		total += rec.OutgoingMsat
+		total += owed
 	}
 
 	return total, nil

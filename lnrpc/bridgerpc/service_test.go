@@ -289,6 +289,38 @@ func TestHeadroomSubtractsWhatIsAlreadyCommitted(t *testing.T) {
 	}
 }
 
+// A swap's routing budget leaves with its payout, so headroom counts both.
+func TestHeadroomCountsTheRoutingBudget(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeNode{synced: true, balance: 10_000_000}
+	svc := serviceFor(t, usable(), f, remote(nil, nil, nil))
+
+	sd := svc.sides[0]
+	sd.balance = f.deps().ChannelBalance
+
+	ctx := context.Background()
+	now := time.Now()
+	if err := svc.journal.Put(ctx, store.Record{
+		Hash: [32]byte{1}, State: swap.Funded, OutgoingCLTVLimit: 40,
+		Invoice: "lnbcrt1payme", IncomingMsat: 4_000_000,
+		OutgoingMsat: 4_000_000, MaxFeeMsat: 12_000, Rate: 0.003,
+		Spread: 0.01, Created: now, Updated: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := svc.headroom(sd)(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 5_988_000 {
+		t.Errorf("headroom is %d with a 4,000,000 msat payout and a "+
+			"12,000 msat routing budget committed against "+
+			"10,000,000 msat, wanted 5,988,000", got)
+	}
+}
+
 // A balance the paying node cannot report is not zero headroom, it is an
 // unknown one, and quoting against a guess would commit money on no grounds.
 func TestHeadroomFailsRatherThanGuessing(t *testing.T) {
