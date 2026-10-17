@@ -180,8 +180,9 @@ tell, since the rate it checks against is that same number.
 
 Payers' wallets check every quote against the market, the worse of Neoxa and
 NonKYC for the payer, and by default refuse one more than 5% above it
-(widened by the last hour's range), so a rate set far from the market is
-refused rather than paid.
+(widened by the last hour's range, half the book's spread, and what the
+quote's spread is above 1.5%, at most 5%), so a rate set far from the market
+is refused rather than paid.
 
 ## The fee
 
@@ -194,12 +195,14 @@ The fee is a floor. The bridge charges more on the side it is running low on,
 up to three times the fee near empty, and less, never below the routing budget
 plus 0.1%, on the side that refills it.
 
-Why 1.5%: payers allow 5% over the market by default, and three times 1.5% is
-4.5%, so a bridge running low is still paid. Payers measure from the venues'
-tickers and the bridge prices from the side of the book a swap trades
-against, so what payers see is your fee plus about half the book's spread,
-less what the last hour's range adds to their allowance; a fee far above 1.5%
-can be refused by payers when the book is wide. Much below 1%, what is left after
+Why 1.5%: payers allow 5% over the market by default, plus what a quote's
+spread is above 1.5% (at most 5%), so a bridge running low (three times 1.5%
+is 4.5%) or widened for the market is still paid. Payers measure from the
+venues' tickers and the bridge prices from the side of the book a swap
+trades against at its largest swap, so what payers see is your fee plus
+about half the book's spread and what the book's depth costs, less what the
+last hour's range and the spread add to their allowance; a base fee far above
+1.5% counts against the premium and can be refused when the book is wide. Much below 1%, what is left after
 routing is smaller than an ordinary one-minute move of this market, and quotes
 funded later in their minute are given back more often. A higher fee in one
 direction makes sense when you want the coin the other one brings in.

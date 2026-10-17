@@ -244,12 +244,13 @@ const (
 // DefaultFee is the fee each direction charges when the operator names none.
 //
 // Chosen against what payers allow by default: their check refuses a price
-// more than 5% over the market, widened by the last hour's range. The
+// more than 5% over the market, widened by the last hour's range, half the
+// book's spread and what a quote's spread is above 1.5% (at most 5%). The
 // inventory policy charges up to three times the fee on the draining side,
-// so 1.5% tops out at 4.5% and stays inside it; 2% would be refused exactly
-// when the bridge is low. Below about 1%, what is left after the routing
-// budget is smaller than an ordinary two-minute move of this market, and a
-// quote funded a minute or two later would be given back often.
+// so 1.5% tops out at 4.5%, all of its widening allowed; a higher base fee
+// counts against the payer's premium. Below about 1%, what is left after the
+// routing budget is smaller than an ordinary two-minute move of this market,
+// and a quote funded a minute or two later would be given back often.
 const DefaultFee = 0.015
 
 // discountFloorOverRouting is how far above the routing budget the discounted
