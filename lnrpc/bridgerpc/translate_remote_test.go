@@ -354,3 +354,60 @@ func TestNeitherSideConcludesFailureFromAnUnknownState(t *testing.T) {
 		t.Error("remote: an unknown status must stay in flight")
 	}
 }
+
+// Both sides count every HTLC an invoice ever accepted, in any state, so a
+// cancelled invoice that was funded and given back is told apart from one
+// that lapsed unpaid.
+func TestBothSidesCountAnInvoicesHTLCs(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name   string
+		local  map[invoices.CircuitKey]*invoices.InvoiceHTLC
+		remote []*lnrpc.InvoiceHTLC
+		want   int
+	}{
+		{"none", nil, nil, 0},
+		{
+			"cancelled after it was held",
+			htlcs(htlcIn(invoices.HtlcStateCanceled, 900)),
+			remoteHTLCs(remoteHTLCIn(
+				lnrpc.InvoiceHTLCState_CANCELED, 900,
+			)),
+			1,
+		},
+		{
+			"one of each",
+			htlcs(
+				accepted(900),
+				htlcIn(invoices.HtlcStateSettled, 910),
+				htlcIn(invoices.HtlcStateCanceled, 920),
+			),
+			remoteHTLCs(
+				remoteAccepted(900),
+				remoteHTLCIn(lnrpc.InvoiceHTLCState_SETTLED,
+					910),
+				remoteHTLCIn(lnrpc.InvoiceHTLCState_CANCELED,
+					920),
+			),
+			3,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			local := TranslateInvoice(&invoices.Invoice{
+				State: invoices.ContractCanceled,
+				Htlcs: test.local,
+			})
+			remote := TranslateRemoteInvoice(&lnrpc.Invoice{
+				State: lnrpc.Invoice_CANCELED,
+				Htlcs: test.remote,
+			})
+			if local.HTLCs != test.want || remote.HTLCs != test.want {
+				t.Errorf("local %d, remote %d, wanted %d",
+					local.HTLCs, remote.HTLCs, test.want)
+			}
+		})
+	}
+}

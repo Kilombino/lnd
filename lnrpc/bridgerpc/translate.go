@@ -43,6 +43,12 @@ type InvoiceStatus struct {
 	// ExpiryHeight is the chain height at which the incoming HTLC stops
 	// being claimable, or zero while nothing is locked in.
 	ExpiryHeight int32
+
+	// HTLCs is how many HTLCs the node ever accepted for the invoice,
+	// whatever became of them: held, settled or cancelled. A cancelled
+	// invoice with none lapsed unpaid; one with any was funded and given
+	// back, and the two are not the same to a quote for its hash.
+	HTLCs int
 }
 
 // TranslateInvoice is the part of this package worth reading twice.
@@ -77,6 +83,11 @@ func TranslateInvoice(inv *invoices.Invoice) InvoiceStatus {
 	}
 
 	out.ExpiryHeight = earliestAcceptedExpiry(inv)
+	for _, htlc := range inv.Htlcs {
+		if htlc != nil {
+			out.HTLCs++
+		}
+	}
 
 	return out
 }

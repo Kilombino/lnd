@@ -52,6 +52,11 @@ func TranslateRemoteInvoice(inv *lnrpc.Invoice) InvoiceStatus {
 	}
 
 	out.ExpiryHeight = earliestRemoteAcceptedExpiry(inv)
+	for _, htlc := range inv.GetHtlcs() {
+		if htlc != nil {
+			out.HTLCs++
+		}
+	}
 
 	return out
 }
