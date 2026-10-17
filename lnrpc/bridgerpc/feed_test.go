@@ -1018,9 +1018,10 @@ func TestTheMarketOptionsAreChecked(t *testing.T) {
 	r := (&Config{}).resolve()
 	if r.market.maxVenueGap != 0.04 || r.market.driftBand != 0.10 ||
 		r.market.driftWiden != 0.25 || r.market.driftMax != 0.35 ||
-		r.market.sizeMsat != r.quote.MaxSwapMsat {
+		r.market.sizeMsat != r.quote.MaxSwapMsat ||
+		r.quote.Validity != time.Minute {
 
-		t.Errorf("defaults %+v", r.market)
+		t.Errorf("defaults %+v, validity %v", r.market, r.quote.Validity)
 	}
 }
 
@@ -1298,6 +1299,65 @@ func TestAHeldDirectionQuotesNothing(t *testing.T) {
 	if !svc.heldForRate || rev.quoting() {
 		t.Fatalf("held %v, toBLAKE2b quoting %v", svc.heldForRate,
 			rev.quoting())
+	}
+}
+
+// Just before paying, a swap is also given back when the market moved against
+// the bridge by more than half the quote's fee since it was quoted, though
+// what the payer sent still covers the payout: within the quote's validity
+// the move is otherwise the payer's free option.
+func TestThePriceCheckRefusesAMoveAgainstTheBridge(t *testing.T) {
+	t.Parallel()
+
+	cfg := usable()
+	cfg.RateSource = RateSourceNeoxa
+	m := newMarket(feedStart)
+	mkt := testFeed(t, m)
+	mkt.read(context.Background())
+
+	f := &fakeNode{synced: true, balance: 100_000_000_000}
+	svc := serviceForMarket(t, cfg, f, mkt)
+	fwd, rev := sidesOf(t, svc)
+	check := func(sd *side, sw *driver.Swap) bool {
+		t.Helper()
+		ok, err := svc.priceCheck(sd)(context.Background(), sw)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		return ok
+	}
+
+	// toSHA256 quoted at 0.00611 with a 2% fee, paying out little enough
+	// that the amounts alone never refuse: the market now, 0.006, is
+	// 1.8% under, more than half the fee.
+	sw := &driver.Swap{IncomingMsat: 1_000_000, OutgoingMsat: 5_000,
+		MaxFeeMsat: 50, Rate: 0.00611, Spread: 0.02}
+	if check(fwd, sw) {
+		t.Error("paid a swap the market moved 1.8% against, over half " +
+			"its 2% fee")
+	}
+	// 0.00605: 0.8% under, inside half the fee.
+	sw.Rate = 0.00605
+	if !check(fwd, sw) {
+		t.Error("refused a swap the market moved 0.8% against")
+	}
+	// A move in the bridge's favour is no reason to refuse.
+	sw.Rate = 0.0058
+	if !check(fwd, sw) {
+		t.Error("refused a swap the market moved in the bridge's favour")
+	}
+
+	// toBLAKE2b quoted at 1/0.0059 (BTCB2 cheaper then): at 1/0.00606
+	// now, the payout costs 2.7% more SHA256 coin than quoted.
+	sw = &driver.Swap{IncomingMsat: 6_060, OutgoingMsat: 900_000,
+		MaxFeeMsat: 3_000, Rate: 1 / 0.0059, Spread: 0.02}
+	if check(rev, sw) {
+		t.Error("paid a toBLAKE2b swap the market moved 2.7% against")
+	}
+	sw.Rate = 1 / 0.00604
+	if !check(rev, sw) {
+		t.Error("refused a toBLAKE2b swap the market moved 0.3% against")
 	}
 }
 

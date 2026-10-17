@@ -135,10 +135,12 @@ through Tor when this node uses Tor:
   (35%) that direction quotes nothing.
 - **Your fee is widened by the market's own movement** over the last ten
   minutes, as payers' wallets allow for it.
+- **A quote's rate holds for one minute.** Payers' wallets fund a quote within
+  seconds of asking for it.
 - **Just before paying,** the bridge checks the swap again at the rate then. If
-  what the payer sent no longer covers the payout and its routing budget at
-  that rate (the market moved against the bridge by more than what it
-  charged), it is given back instead of paying out at a loss.
+  what the payer sent no longer covers the payout and its routing budget, or
+  the market moved against the bridge by more than half the quote's fee since
+  it was quoted, the payment is given back instead of paid out.
 
 `lncli bridge status` shows the rate (the middle of Neoxa's book), the
 cross-check (`rate_cross_check`), the market's movement (`rate_volatility`),
@@ -180,8 +182,8 @@ tickers and the bridge prices from the side of the book a swap trades
 against, so what payers see is your fee plus about half the book's spread,
 less what the last hour's range adds to their allowance; a fee far above 1.5%
 can be refused by payers when the book is wide. Much below 1%, what is left after
-routing is smaller than an ordinary two-minute move of this market, and quotes
-funded a minute or two later are given back more often. A higher fee in one
+routing is smaller than an ordinary one-minute move of this market, and quotes
+funded later in their minute are given back more often. A higher fee in one
 direction makes sense when you want the coin the other one brings in.
 
 ## Routes

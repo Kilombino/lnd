@@ -469,14 +469,19 @@ func (s *service) inBLAKE2bMsat(btcMsat uint64) uint64 {
 }
 
 // priceCheck is asked just before a funded swap is paid: is what the payer sent
-// still worth the payout and its routing budget at the rate now?
+// still worth the payout and its routing budget at the rate now, and has the
+// market not moved against the bridge by more than half the fee since the
+// quote?
 //
-// The quote fixed what the payer owes, and they may fund it minutes later. If
-// the market moved against the bridge by more than its fee in between, paying
-// would be a loss taken knowingly; giving the payer's funds back costs nobody
-// anything. A rate that cannot be read is an error, which waits, and past the
-// funded grace the swap is given back: nothing is paid on a price the bridge
-// cannot see.
+// The quote fixed what the payer owes, and they may fund it any time before it
+// expires. If the market moved against the bridge in between, paying is a
+// loss taken knowingly, or a free option handed to whoever watches the market
+// and funds only the quotes it has moved in favour of; giving the payer's
+// funds back costs nobody anything. Half the fee leaves the bridge a margin on
+// every swap it pays and refunds only moves larger than an ordinary minute's.
+// A rate that cannot be read is an error, which waits, and past the funded
+// grace the swap is given back: nothing is paid on a price the bridge cannot
+// see.
 func (s *service) priceCheck(sd *side) runner.PriceCheck {
 	return func(_ context.Context, sw *driver.Swap) (bool, error) {
 		m, err := s.prices.quoteRate()
@@ -500,6 +505,18 @@ func (s *service) priceCheck(sd *side) runner.PriceCheck {
 				"msat payout and its %d msat routing budget",
 				sd.name, sw.Hash[:8], r, sw.IncomingMsat, worth,
 				sw.OutgoingMsat, sw.MaxFeeMsat)
+
+			return false, nil
+		}
+
+		// The quote's own rate, outgoing per incoming as r is. A record
+		// without one has only the check above.
+		if sw.Rate > 0 && r < sw.Rate*(1-sw.Spread/2) {
+			log.Warnf("Bridge giving back %s swap %x: the market "+
+				"moved against the bridge by %.2f%% since it was "+
+				"quoted at %.8g (now %.8g), more than half its "+
+				"%.2f%% fee", sd.name, sw.Hash[:8],
+				(1-r/sw.Rate)*100, sw.Rate, r, sw.Spread*100)
 
 			return false, nil
 		}

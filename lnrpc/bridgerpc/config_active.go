@@ -266,6 +266,12 @@ const (
 	DefaultDriftMax    = 0.35
 )
 
+// DefaultQuoteValidity is how long a quote's rate is honoured. A payer who
+// funds it later than its quote asks for a new one; within it, a market that
+// moves against the bridge is the bridge's, so it is kept short (a payer's
+// wallet funds a quote within seconds of asking for it).
+const DefaultQuoteValidity = time.Minute
+
 // DefaultFloorFraction is the share of the working balance held back for swaps
 // already in flight, when the bounds are derived rather than configured. It is
 // the ratio the shipped defaults use.
@@ -377,6 +383,7 @@ func (c *Config) resolve() resolved {
 		shaChain:  chainrate.BitcoinParams,
 	}
 
+	r.quote.Validity = DefaultQuoteValidity
 	r.limits = quote.DefaultLimits
 	if c.MaxUnpaid > 0 {
 		r.limits.MaxUnpaid = c.MaxUnpaid
@@ -590,7 +597,9 @@ func (c *Config) Validate() error {
 	// A funded swap waits at most the quote's validity plus this before it
 	// is paid or given back, and the invoice it pays must still be payable
 	// then: it was quoted with MinRemainingLife left. Past that, the payout
-	// is refused by the paying node for an expired invoice.
+	// is refused by the paying node for an expired invoice. The swap
+	// package's default validity, longer than DefaultQuoteValidity, keeps
+	// the bound where it was documented.
 	maxGrace := quote.DefaultPolicy.MinRemainingLife -
 		quote.DefaultPolicy.Validity - time.Minute
 	if c.FundedGrace > maxGrace {
