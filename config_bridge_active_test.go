@@ -122,3 +122,28 @@ func TestAFixedRateIsRefusedOnMainnet(t *testing.T) {
 	require.NoError(t, validateBridgeConfig(cfg, netDir),
 		"a fixedrate beside the default source is logged, not refused")
 }
+
+// Deleting cancelled invoices removes a record a quote reads besides the
+// journal, so a bridge started with either option on is warned about, and
+// still starts.
+func TestInvoiceGCIsWarnedAbout(t *testing.T) {
+	sub := &bridgerpc.Config{
+		Enabled: true, Supervised: true, ToSHA256: true,
+	}
+	cfg, netDir := bridgeTestConfig(t, sub)
+	require.Empty(t, bridgeInvoiceGCWarning(cfg))
+
+	cfg.GcCanceledInvoicesOnTheFly = true
+	require.NoError(t, validateBridgeConfig(cfg, netDir))
+	require.Contains(t, bridgeInvoiceGCWarning(cfg),
+		"gc-canceled-invoices-on-the-fly")
+
+	cfg.GcCanceledInvoicesOnTheFly = false
+	cfg.GcCanceledInvoicesOnStartup = true
+	require.Contains(t, bridgeInvoiceGCWarning(cfg),
+		"gc-canceled-invoices-on-startup")
+
+	// Not while the bridge is off.
+	sub.Enabled = false
+	require.Empty(t, bridgeInvoiceGCWarning(cfg))
+}

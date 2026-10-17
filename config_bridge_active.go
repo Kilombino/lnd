@@ -6,6 +6,7 @@ package lnd
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/lightningnetwork/lnd/lncfg"
 	"github.com/lightningnetwork/lnd/lnrpc/bridgerpc"
@@ -56,6 +57,10 @@ func validateBridgeConfig(cfg *Config, networkDir string) error {
 			"networks without a market; on mainnet the bridge "+
 			"trades at the market's rate (leave ratesource out, or "+
 			"set it to neoxa)", bridgerpc.ErrConfig)
+	}
+
+	if msg := bridgeInvoiceGCWarning(cfg); msg != "" {
+		ltndLog.Warnf("%s", msg)
 	}
 
 	if sub.SHA256TLSCertPath != "" {
@@ -132,4 +137,37 @@ func superviseSha256Node(cfg *Config, sub *bridgerpc.Config,
 	)
 
 	return nil
+}
+
+// bridgeInvoiceGCWarning is what to tell an operator running the bridge with
+// lnd's garbage collection of cancelled invoices on, or "" when it is off.
+//
+// A warning rather than a refusal: the bridge's journal is the record of its
+// swaps, and the bridge runs safely without the node's. But a quote also reads
+// the node's cancelled hold invoice for a payment hash it has seen before, so
+// that one a payer paid into is not quoted again should the journal have lost
+// its record, and these options delete that invoice.
+func bridgeInvoiceGCWarning(cfg *Config) string {
+	sub := cfg.SubRPCServers.BridgeRPC
+	if sub == nil || !sub.Enabled {
+		return ""
+	}
+
+	var on []string
+	if cfg.GcCanceledInvoicesOnTheFly {
+		on = append(on, "gc-canceled-invoices-on-the-fly")
+	}
+	if cfg.GcCanceledInvoicesOnStartup {
+		on = append(on, "gc-canceled-invoices-on-startup")
+	}
+	if len(on) == 0 {
+		return ""
+	}
+
+	return fmt.Sprintf("Bridge is on with %s: this node deletes "+
+		"cancelled invoices, the bridge's cancelled hold invoices "+
+		"among them, which a quote checks besides the bridge's journal "+
+		"so that a payment hash a payer already paid into is not "+
+		"quoted again. Leave both gc-canceled-invoices options off on "+
+		"this node and on the SHA256 node", strings.Join(on, " and "))
 }

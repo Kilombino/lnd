@@ -71,6 +71,15 @@ charges 1.5% on top of it each way.
 reverse, which starts once there is a rate. The node refuses to start the bridge with a combination of
 settings that would refuse every swap, and says which numbers to change.
 
+Leave `gc-canceled-invoices-on-the-fly` and `gc-canceled-invoices-on-startup`
+off, on this node and on the SHA256 node. They are off by default, but some
+packages offer them as settings (StartOS's LND package does). They delete
+cancelled invoices, the bridge's cancelled hold invoices among them, and a
+quote reads those as well as the bridge's journal, so that a payment hash a
+payer already paid into is not quoted again if the journal has lost its
+record. The bridge runs with them on, and this node logs a warning at startup
+when either is on here.
+
 `lncli bridge status` says whether the bridge can serve swaps right now and,
 if not, why, and how far the SHA256 node has got (`sha256_node`). If the SHA256
 node cannot be reached, or turns out not to be a stock lnd on the SHA256 chain
