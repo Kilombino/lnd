@@ -455,8 +455,9 @@ func (s *server) bridgeBlockAt(_ context.Context, height int32) (
 	}
 
 	return bridgerpc.BlockInfo{
-		Height: height,
-		Time:   block.Header.Timestamp,
+		Height:     height,
+		Time:       block.Header.Timestamp,
+		Difficulty: bridgerpc.DifficultyFromBits(block.Header.Bits),
 
 		// Historical, so by definition already in the chain.
 		SyncedToChain: true,

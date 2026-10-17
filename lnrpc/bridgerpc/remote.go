@@ -790,8 +790,12 @@ func (r *Remote) BlockAt(ctx context.Context, height int32) (BlockInfo, error) {
 	// matters because this binary's own parser is the BLAKE2b one.
 	ts := binary.LittleEndian.Uint32(raw[68:72])
 
+	// And bytes 72 to 76 its compact target, for the difficulty.
+	bits := binary.LittleEndian.Uint32(raw[72:76])
+
 	return BlockInfo{
 		Height: height, Time: time.Unix(int64(ts), 0),
+		Difficulty: difficultyFromBits(bits),
 
 		// Historical, so by definition already in the chain.
 		SyncedToChain: true,

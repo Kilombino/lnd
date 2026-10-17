@@ -126,10 +126,11 @@ func (s *service) sample(ctx context.Context) {
 	for _, src := range []struct {
 		name string
 		read func(context.Context) (BlockInfo, error)
+		at   func(context.Context, int32) (BlockInfo, error)
 		obs  *chainrate.Observer
 	}{
-		{"blake2b", s.local.BestBlock, s.b2bChain},
-		{"bitcoin", s.remote.BestBlock, s.shaChain},
+		{"blake2b", s.local.BestBlock, s.local.BlockAt, s.b2bChain},
+		{"bitcoin", s.remote.BestBlock, s.remote.BlockAt, s.shaChain},
 	} {
 		info, err := src.read(ctx)
 		if err != nil {
@@ -152,12 +153,34 @@ func (s *service) sample(ctx context.Context) {
 			continue
 		}
 
+		// A tip carries no difficulty, and without one the observer
+		// cannot scale the previous epoch to the current one: every new
+		// epoch, on either chain, would leave the bridge refusing all
+		// quotes until a hundred of its blocks had been seen, most of a
+		// day. So a new tip's header is read for it, once per block.
+		// Add replaces a height it already holds, so the same tip is
+		// not added again either: that would overwrite the difficulty
+		// the header read (or the backfill) gave it.
 		s.chainMu.Lock()
-		// Add rejects a height it already holds, which is the common
-		// case between blocks and is not worth logging.
-		_ = src.obs.Add(chainrate.Block{
+		known := s.lastTip[src.name] == info.Height
+		s.chainMu.Unlock()
+		if known {
+			continue
+		}
+		if hdr, err := src.at(ctx, info.Height); err == nil {
+			info.Difficulty = hdr.Difficulty
+		}
+
+		s.chainMu.Lock()
+		if s.lastTip == nil {
+			s.lastTip = make(map[string]int32)
+		}
+		if src.obs.Add(chainrate.Block{
 			Height: info.Height, Time: info.Time,
-		})
+			Difficulty: info.Difficulty,
+		}) == nil {
+			s.lastTip[src.name] = info.Height
+		}
 		s.chainMu.Unlock()
 	}
 }
@@ -434,6 +457,7 @@ func (s *service) backfill(ctx context.Context) {
 			s.chainMu.Lock()
 			if err := src.obs.Add(chainrate.Block{
 				Height: info.Height, Time: info.Time,
+				Difficulty: info.Difficulty,
 			}); err == nil {
 				added++
 			}

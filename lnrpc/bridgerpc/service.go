@@ -188,6 +188,10 @@ type service struct {
 	b2bChain *chainrate.Observer
 	shaChain *chainrate.Observer
 
+	// lastTip is the height of each chain's tip last added, by chain name,
+	// so a tip polled again is not re-added without its difficulty.
+	lastTip map[string]int32
+
 	// sideOf remembers which direction each swap belongs to, so that what
 	// is already committed can be counted per side.
 	//
@@ -312,6 +316,7 @@ func newServiceWith(cfg *Config, local *Local, remote *Remote,
 
 		return nil, fmt.Errorf("the SHA256 chain observer: %w", err)
 	}
+	s.lastTip = make(map[string]int32)
 
 	// A direction turned off with swaps unfinished is built all the same,
 	// to finish them, and quotes nothing: left undriven, a payer's HTLC

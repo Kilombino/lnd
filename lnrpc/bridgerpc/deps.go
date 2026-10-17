@@ -3,6 +3,7 @@ package bridgerpc
 import (
 	"context"
 	"errors"
+	"math"
 	"net"
 	"time"
 
@@ -236,4 +237,30 @@ type BlockInfo struct {
 
 	// SyncedToChain is whether this node has caught up.
 	SyncedToChain bool
+
+	// Difficulty is the block's, from the bits in its header, or zero
+	// where it was not read (a tip, whose header is looked up separately).
+	// Only the ratio between two epochs is used, which is what lets the
+	// chain observer lean on the previous epoch early in a new one.
+	Difficulty float64
 }
+
+// difficultyFromBits turns a header's compact target into a difficulty, as a
+// ratio to the classic difficulty-one target. Zero for bits that encode no
+// positive target. Floating point is plenty: the observer only compares two
+// epochs' difficulties.
+func difficultyFromBits(bits uint32) float64 {
+	mantissa := bits & 0x007fffff
+	if mantissa == 0 || bits&0x00800000 != 0 {
+		return 0
+	}
+	exp := int(bits >> 24)
+	target := float64(mantissa) * math.Pow(256, float64(exp-3))
+	diffOne := float64(0xffff) * math.Pow(256, 0x1d-3)
+
+	return diffOne / target
+}
+
+// DifficultyFromBits is difficultyFromBits for the node's own history read,
+// which lives outside this package.
+func DifficultyFromBits(bits uint32) float64 { return difficultyFromBits(bits) }
