@@ -116,18 +116,19 @@ through Tor when this node uses Tor:
   fetches, for swaps paying out SHA256 coin, and what buying it from the asks
   costs, for swaps paying out BLAKE2b coin. A small order placed at the top of
   a book and cancelled again moves this only by what it would fill. The
-  bridge trades at the median of the last few readings.
+  bridge trades at the median of the last few readings. Books are compared
+  with each other (below) at the smallest swap (`bridgerpc.minswapmsat`)
+  instead: two honest books of different depth read apart at a large size.
 - **The cross-check** is Neoxa's BTCB2_USDC book over a BTC/USD price. If the
-  middle of the two Neoxa books is more than 5% apart, or the cross-check
+  middles of the two Neoxa books are more than 5% apart, or the cross-check
   cannot be read, nothing is quoted.
 - **A second venue** is NonKYC's BTCB2_USDT book over the same BTC/USD price.
   Each direction trades at whichever venue is worse for its payer, so pushing
   BLAKE2b coin up or down on one exchange gains nothing against the bridge. If
-  the two are more than `bridgerpc.maxvenuegap` apart (4% by default) on the
-  side a direction trades against, that direction quotes nothing until they
-  come back together; the other one goes on. If NonKYC cannot be read (it
-  refuses many Tor exits), the bridge prices on Neoxa alone and says so in
-  `rate_notes`.
+  the middles of the two are more than `bridgerpc.maxvenuegap` apart (4% by
+  default), nothing is quoted until they come back together. If NonKYC cannot
+  be read (it refuses many Tor exits), the bridge prices on Neoxa alone and
+  says so in `rate_notes`.
 - **BTC/USD** is CoinGecko's, asked at most every five minutes, or
   mempool.space's when CoinGecko does not answer. Only when neither has
   answered for fifteen minutes is Neoxa's own BTC_USDC market used, with the

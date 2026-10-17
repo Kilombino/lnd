@@ -160,6 +160,11 @@ func (b *ratebook) last() (float64, time.Time) {
 // trades against, rather than from a ticker's last trade and best orders: an
 // order placed at the top of a book this thin and cancelled again moves a
 // ticker, and moves a price read at size only by what it would really fill.
+// Books are compared with each other (the cross-check, the two venues) at the
+// smallest swap instead: two honest books of different depth read apart at a
+// large size, and what one is worth against the other is their prices, not
+// their depth. Read at the smallest swap rather than at the top, a dust order
+// still moves the comparison only by what it fills.
 const (
 	neoxaTickerURL = "https://neoxa.exchange/api/exchange/ticker/"
 	neoxaBookURL   = "https://neoxa.exchange/api/exchange/orderbook/"
@@ -282,8 +287,12 @@ type feedPolicy struct {
 	// books are read at.
 	sizeMsat uint64
 
-	// maxVenueGap is how far apart the two venues may be, as a fraction,
-	// before a direction stops quoting.
+	// minSizeMsat is the smallest swap, in SHA256 millisatoshis: the size
+	// the books are compared with each other at.
+	minSizeMsat uint64
+
+	// maxVenueGap is how far apart the two venues' middles may be, as a
+	// fraction, before the directions stop quoting.
 	maxVenueGap float64
 
 	// driftBand, driftWiden and driftMax price a market away from its
@@ -364,6 +373,10 @@ type depth struct {
 	// bidShort and askShort are the fraction of it each side could not
 	// fill.
 	bidShort, askShort float64
+
+	// small is the middle of the book read at the smallest swap: what it
+	// is compared with other books on.
+	small float64
 }
 
 func (d depth) mid() float64 {
@@ -374,6 +387,7 @@ func (d depth) mid() float64 {
 func (d depth) scaled(per float64) depth {
 	d.bid /= per
 	d.ask /= per
+	d.small /= per
 
 	return d
 }
@@ -619,14 +633,26 @@ func (f *feed) measure(ctx context.Context) (poll, float64, error, bool) {
 	}
 
 	// The largest swap in BLAKE2b coin, at the top of the book: the size
-	// every book is read at.
+	// every book is read at; and the smallest, the size they are compared
+	// with each other at.
 	top := (direct.bids[0].price + direct.asks[0].price) / 2
 	size := float64(f.policy.sizeMsat) / 1e11 / top
 	if !positive(size) {
 		// No largest swap: the top of the book.
 		size = 1e-12
 	}
-	p.neoxa = direct.at(size)
+	small := float64(f.policy.minSizeMsat) / 1e11 / top
+	if !positive(small) {
+		small = 1e-12
+	}
+	small = math.Min(small, size)
+	read := func(b book) depth {
+		d := b.at(size)
+		d.small = b.at(small).mid()
+
+		return d
+	}
+	p.neoxa = read(direct)
 	p.mid = p.neoxa.mid()
 
 	usd, usdNote, err := f.btcUSD(ctx, now)
@@ -649,14 +675,17 @@ func (f *feed) measure(ctx context.Context) (poll, float64, error, bool) {
 	if err != nil {
 		return poll{}, 0, fmt.Errorf("the cross-check: %w", err), false
 	}
-	cross := usdc.at(size).scaled(usd).mid()
-	if gap := math.Abs(p.mid-cross) / math.Min(p.mid, cross); gap >
+	// Compared at the smallest swap: the USDC book is thinner, and read
+	// at the largest its depth alone would count as disagreement.
+	cross := read(usdc).scaled(usd).small
+	direct0 := p.neoxa.small
+	if gap := math.Abs(direct0-cross) / math.Min(direct0, cross); gap >
 		f.policy.rate.MaxDisagreement {
 
 		err := fmt.Errorf("%w: Neoxa's %s market says %.8g; its %s "+
 			"market over BTC/USD says %.8g, %.1f%% apart, more "+
 			"than the %.1f%% allowed", rate.ErrDisagreement,
-			pairDirect, p.mid, pairUSDC, cross, gap*100,
+			pairDirect, direct0, pairUSDC, cross, gap*100,
 			f.policy.rate.MaxDisagreement*100)
 
 		return poll{}, cross, err, true
@@ -668,7 +697,7 @@ func (f *feed) measure(ctx context.Context) (poll, float64, error, bool) {
 	if book, err := f.nonKYC(src.second, src.nkErr, now); err != nil {
 		log.Debugf("Bridge market rate: the second venue: %v", err)
 	} else {
-		p.second = book.at(size).scaled(usd)
+		p.second = read(book).scaled(usd)
 		if book.at0.IsZero() {
 			note(unverifiedSpread, "NonKYC's %s book carries no "+
 				"time to confirm it is current; fee widened "+
@@ -745,18 +774,22 @@ func (b book) at(size float64) depth {
 
 // fill is the volume-weighted price of taking size from levels, best first,
 // and how much of it they held.
+//
+// It is summed as the distance from the best price, so that a size the best
+// level holds reads exactly that price whatever the size: the sizes move with
+// the market, and a book that has not changed must read the same (stillFor).
 func fill(levels []level, size float64) (float64, float64) {
 	var got, cost float64
 	for _, l := range levels {
 		take := math.Min(l.quantity, size-got)
 		got += take
-		cost += take * l.price
+		cost += take * (l.price - levels[0].price)
 		if got >= size {
 			break
 		}
 	}
 
-	return cost / got, got
+	return levels[0].price + cost/got, got
 }
 
 // flexNum is a number sent as a JSON number or a string, as NonKYC sends
@@ -1154,9 +1187,11 @@ func (f *feed) quoteRate() (marketRate, error) {
 		bidShort: newest.neoxa.bidShort,
 		askShort: newest.neoxa.askShort,
 	}
+	neoxa.small = of(func(p poll) float64 { return p.neoxa.small })
 	second := depth{
-		bid: of(func(p poll) float64 { return p.second.bid }),
-		ask: of(func(p poll) float64 { return p.second.ask }),
+		bid:   of(func(p poll) float64 { return p.second.bid }),
+		ask:   of(func(p poll) float64 { return p.second.ask }),
+		small: of(func(p poll) float64 { return p.second.small }),
 	}
 	for i := len(f.readings) - 1; i >= 0; i-- {
 		if f.readings[i].second.bid > 0 {
@@ -1204,8 +1239,10 @@ func (f *feed) quoteRate() (marketRate, error) {
 // BLAKE2b coin into the bids, toBLAKE2b buys it from the asks, each at the
 // worse of the two venues for its payer.
 //
-// Past maxVenueGap between the venues the direction quotes nothing: one of
-// them is wrong, or being moved, by more than the fee can carry. A side of a
+// Past maxVenueGap between the venues' middles at the smallest swap the
+// direction quotes nothing: one of them is wrong, or being moved, by more than
+// the fee can carry. Their depth is not compared: each direction already
+// trades at the worse of the two read at the largest swap. A side of a
 // book too thin for the largest swap widens the fee for what it could not
 // fill. And a market far from its day's median widens the fee of the
 // direction that would buy at the moved price, by driftWiden of the distance
@@ -1220,9 +1257,7 @@ func (f *feed) side(invert bool, neoxa, second depth, anchor,
 		name = "toBLAKE2b"
 	}
 
-	if second.bid > 0 {
-		at, _, _ := worseVenue(invert, neoxa, depth{})
-		other, _, _ := worseVenue(invert, second, depth{})
+	if at, other := neoxa.small, second.small; at > 0 && other > 0 {
 		if gap := math.Abs(at-other) / math.Min(at, other); gap >
 			f.policy.maxVenueGap {
 

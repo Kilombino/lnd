@@ -407,6 +407,25 @@ func TestTheFeedRefusesWhenTheBooksDisagree(t *testing.T) {
 	}
 }
 
+// The cross-check compares the books at the smallest swap: Neoxa's USDC book
+// holding as much at the top as its BTC book and much less below reads 8%
+// under it at the largest swap, a difference of depth, and quoting goes on.
+func TestTheCrossCheckIgnoresDepth(t *testing.T) {
+	m := newMarket(feedStart)
+	m.book(pairUSDC, []level{{0.006 * fakeUSD, 0.01},
+		{0.005 * fakeUSD, 1000}}, []level{{0.00606 * fakeUSD, 1000}})
+	f := testFeed(t, m)
+	f.read(context.Background())
+
+	if _, err := f.quoteRate(); err != nil {
+		t.Fatalf("a thinner USDC book stopped quoting: %v", err)
+	}
+	if cross := f.crossCheck(); !near(cross, 0.00603) {
+		t.Errorf("cross-check %g, wanted the middle at the smallest "+
+			"swap, 0.00603", cross)
+	}
+}
+
 // Each direction trades at whichever venue is worse for its payer: BLAKE2b
 // coin pushed up on Neoxa alone is priced at NonKYC for whoever sells it to
 // the bridge, and the other direction keeps Neoxa's price.
@@ -453,12 +472,12 @@ func TestEachDirectionTakesTheWorseVenue(t *testing.T) {
 	}
 }
 
-// Past maxvenuegap a direction quotes nothing, and says why; the other one,
-// whose side of the two books still agrees, goes on quoting.
-func TestTheVenueGapStopsADirection(t *testing.T) {
+// Past maxvenuegap between the venues' middles nothing is quoted, and the
+// refusal says why.
+func TestTheVenueGapStops(t *testing.T) {
 	m := newMarket(feedStart)
-	// NonKYC's bid 5% under Neoxa's, its ask the same.
-	m.nonKYC(0.0057*fakeUSD, 0.00606*fakeUSD)
+	// NonKYC's book 5% under Neoxa's.
+	m.nonKYC(0.0057*fakeUSD, 0.005757*fakeUSD)
 	f := testFeed(t, m)
 	f.read(context.Background())
 
@@ -466,15 +485,17 @@ func TestTheVenueGapStopsADirection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = got.forSide(false)
-	if !errors.Is(err, rate.ErrDisagreement) ||
-		!strings.Contains(err.Error(), "toSHA256 quotes nothing") ||
-		!strings.Contains(err.Error(), "more than the 4.0% allowed") {
+	for _, tc := range []struct {
+		invert bool
+		name   string
+	}{{false, "toSHA256"}, {true, "toBLAKE2b"}} {
+		_, _, err = got.forSide(tc.invert)
+		if !errors.Is(err, rate.ErrDisagreement) ||
+			!strings.Contains(err.Error(), tc.name+" quotes nothing") ||
+			!strings.Contains(err.Error(), "more than the 4.0% allowed") {
 
-		t.Errorf("toSHA256 with the venues 5%% apart: %v", err)
-	}
-	if v, _ := sideOf(t, got, true); !near(v, 0.00606) {
-		t.Errorf("toBLAKE2b at %g", v)
+			t.Errorf("%s with the venues 5%% apart: %v", tc.name, err)
+		}
 	}
 
 	// The option moves the bound.
@@ -485,6 +506,35 @@ func TestTheVenueGapStopsADirection(t *testing.T) {
 	got, _ = f.quoteRate()
 	if v, _ := sideOf(t, got, false); !near(v, 0.0057) {
 		t.Errorf("toSHA256 at %g with a 6%% bound", v)
+	}
+	if v, _ := sideOf(t, got, true); !near(v, 0.00606) {
+		t.Errorf("toBLAKE2b at %g with a 6%% bound", v)
+	}
+}
+
+// The venues are compared at the smallest swap, not the largest: NonKYC's
+// book as deep as Neoxa's at the top and thinner below reads 6.8% under it at
+// the largest swap, which is a difference of depth, not of price. The
+// direction selling into it trades there, at the worse venue, rather than
+// stopping.
+func TestBookDepthIsNotAVenueGap(t *testing.T) {
+	m := newMarket(feedStart)
+	m.nonKYCBook([]level{{0.006 * fakeUSD, 0.01},
+		{0.0056 * fakeUSD, 1000}}, []level{{0.00606 * fakeUSD, 1000}})
+	f := testFeed(t, m)
+	f.read(context.Background())
+
+	got, err := f.quoteRate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := (0.01*0.006 + (swapB2B-0.01)*0.0056) / swapB2B
+	if v, _ := sideOf(t, got, false); math.Abs(v-want) > 1e-9 {
+		t.Errorf("toSHA256 at %g, wanted NonKYC's %g at the largest "+
+			"swap", v, want)
+	}
+	if v, _ := sideOf(t, got, true); !near(v, 0.00606) {
+		t.Errorf("toBLAKE2b at %g", v)
 	}
 }
 
@@ -1019,6 +1069,7 @@ func TestTheMarketOptionsAreChecked(t *testing.T) {
 	if r.market.maxVenueGap != 0.04 || r.market.driftBand != 0.10 ||
 		r.market.driftWiden != 0.25 || r.market.driftMax != 0.35 ||
 		r.market.sizeMsat != r.quote.MaxSwapMsat ||
+		r.market.minSizeMsat != r.quote.MinSwapMsat ||
 		r.quote.Validity != time.Minute {
 
 		t.Errorf("defaults %+v, validity %v", r.market, r.quote.Validity)
@@ -1477,12 +1528,12 @@ func TestStatusNotesTheMarket(t *testing.T) {
 		t.Errorf("notes %q, refusals %q", resp.RateNotes, resp.Refusals)
 	}
 
-	// NonKYC's bid 5% under Neoxa's: toSHA256 alone stops.
-	m.nonKYC(0.0057*fakeUSD, 0.00606*fakeUSD)
+	// NonKYC 5% under Neoxa: both directions stop, each saying so.
+	m.nonKYC(0.0057*fakeUSD, 0.005757*fakeUSD)
 	m.advance(time.Second)
 	srv.market.read(context.Background())
 	resp, _ = srv.Status(context.Background(), &StatusRequest{})
-	if refused() != 1 || !strings.Contains(strings.Join(resp.Refusals,
+	if refused() != 2 || !strings.Contains(strings.Join(resp.Refusals,
 		"; "), "toSHA256 quotes nothing") {
 
 		t.Errorf("refusals %q", resp.Refusals)
