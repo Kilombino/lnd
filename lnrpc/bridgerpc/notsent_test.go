@@ -6,6 +6,7 @@ package bridgerpc
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -124,4 +125,148 @@ func TestRemotePaySaysWhenNothingWasSent(t *testing.T) {
 	}).Pay(context.Background(), req)
 	require.Error(t, err)
 	require.NotErrorIs(t, err, node.ErrNotSent)
+}
+
+// A refusal the SendPaymentV2 handler sends before writing a payment record is
+// unsent, which the node confirms by having no record of the hash. Read as in
+// flight it would leave the swap paying with nothing to look up.
+func TestRemotePayRefusedBeforeARecordIsNotSent(t *testing.T) {
+	t.Parallel()
+
+	req := node.PayRequest{
+		Invoice: "lnbc1payme", CLTVLimit: 80, Timeout: time.Minute,
+	}
+	payReq := &lnrpc.PayReq{PaymentHash: strings.Repeat("ab", 32)}
+	notFound := status.Error(codes.NotFound, "payment isn't initiated")
+	cltv := status.Error(codes.Unknown, "invalid payment request: cltv "+
+		"limit 80 should be greater than 83")
+
+	for _, test := range []struct {
+		name string
+		err  error
+	}{
+		{"a CLTV limit too tight for the invoice", cltv},
+		{"an invalid argument", status.Error(codes.InvalidArgument,
+			"time preference out of range")},
+		{"a payment that already exists", status.Error(
+			codes.AlreadyExists, "payment is in transition")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := remote(&fakeMain{payReq: payReq}, nil,
+				&fakeRouter{
+					send:     &fakeStream{err: test.err},
+					trackErr: notFound,
+				},
+			).Pay(context.Background(), req)
+			require.ErrorIs(t, err, node.ErrNotSent)
+		})
+	}
+
+	// Refused on opening the stream, as a client could see it too.
+	_, err := remote(&fakeMain{payReq: payReq}, nil, &fakeRouter{
+		sendErr: cltv, trackErr: notFound,
+	}).Pay(context.Background(), req)
+	require.ErrorIs(t, err, node.ErrNotSent)
+}
+
+// Anything that leaves a doubt keeps the payment in flight: a record the node
+// does hold, a lookup that fails, an invoice it cannot read back, a refusal
+// after the node has spoken about the payment, and the codes that come from
+// the transport or a failure partway.
+func TestRemotePayRefusedWithARecordStaysInFlight(t *testing.T) {
+	t.Parallel()
+
+	req := node.PayRequest{
+		Invoice: "lnbc1payme", CLTVLimit: 80, Timeout: time.Minute,
+	}
+	payReq := &lnrpc.PayReq{PaymentHash: strings.Repeat("ab", 32)}
+	notFound := status.Error(codes.NotFound, "payment isn't initiated")
+	refused := status.Error(codes.Unknown, "invalid payment request")
+
+	for _, test := range []struct {
+		name   string
+		main   *fakeMain
+		router *fakeRouter
+	}{
+		{
+			name: "the node holds a record",
+			main: &fakeMain{payReq: payReq},
+			router: &fakeRouter{
+				send: &fakeStream{err: refused},
+				track: &fakeStream{updates: []*lnrpc.Payment{
+					{Status: lnrpc.Payment_IN_FLIGHT},
+				}},
+			},
+		},
+		{
+			name: "the lookup fails",
+			main: &fakeMain{payReq: payReq},
+			router: &fakeRouter{
+				send: &fakeStream{err: refused},
+				trackErr: status.Error(codes.Unavailable,
+					"transport is closing"),
+			},
+		},
+		{
+			name: "the invoice cannot be read back",
+			main: &fakeMain{payReqErr: status.Error(
+				codes.Unavailable, "transport is closing")},
+			router: &fakeRouter{
+				send:     &fakeStream{err: refused},
+				trackErr: notFound,
+			},
+		},
+		{
+			name: "the refusal follows an update",
+			main: &fakeMain{payReq: payReq},
+			router: &fakeRouter{
+				send: &fakeStream{
+					updates: []*lnrpc.Payment{
+						{Status: lnrpc.Payment_IN_FLIGHT},
+					},
+					err: refused,
+				},
+				trackErr: notFound,
+			},
+		},
+		{
+			name: "an internal error",
+			main: &fakeMain{payReq: payReq},
+			router: &fakeRouter{
+				send: &fakeStream{err: status.Error(
+					codes.Internal, "invalid payment request")},
+				trackErr: notFound,
+			},
+		},
+		{
+			name: "a cancelled stream",
+			main: &fakeMain{payReq: payReq},
+			router: &fakeRouter{
+				send: &fakeStream{err: status.Error(
+					codes.Canceled, "context canceled")},
+				trackErr: notFound,
+			},
+		},
+		{
+			name: "a passed deadline",
+			main: &fakeMain{payReq: payReq},
+			router: &fakeRouter{
+				send: &fakeStream{err: status.Error(
+					codes.DeadlineExceeded,
+					"context deadline exceeded")},
+				trackErr: notFound,
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := remote(test.main, nil, test.router).Pay(
+				context.Background(), req)
+			require.NoError(t, err)
+			require.Equal(t, node.PaymentInFlight, got.State)
+		})
+	}
 }

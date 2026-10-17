@@ -407,7 +407,7 @@ func (r *Remote) Pay(ctx context.Context, req node.PayRequest) (node.Payment,
 		},
 	)
 	if err != nil {
-		if neverDelivered(err) {
+		if neverDelivered(err) || r.refusedUnrecorded(ctx, req, err) {
 			return node.Payment{}, fmt.Errorf("sending: %w: %w",
 				node.ErrNotSent, err)
 		}
@@ -426,6 +426,15 @@ func (r *Remote) Pay(ctx context.Context, req node.PayRequest) (node.Payment,
 			// payment, from the part of lnd that runs before any
 			// handler, means the router never saw it.
 			if !received && neverDelivered(err) {
+				return node.Payment{}, fmt.Errorf("sending: %w: %w",
+					node.ErrNotSent, err)
+			}
+
+			// A refusal from the handler itself, before it wrote
+			// a payment record (a CLTV limit too tight for the
+			// invoice, say), is as unsent, and the node says so
+			// by having no record of the hash.
+			if !received && r.refusedUnrecorded(ctx, req, err) {
 				return node.Payment{}, fmt.Errorf("sending: %w: %w",
 					node.ErrNotSent, err)
 			}
@@ -864,6 +873,54 @@ func neverDelivered(err error) bool {
 	}
 
 	return false
+}
+
+// refusedUnrecorded reports whether SendPaymentV2 failed with a refusal its
+// handler sent before dispatching anything, for a payment the node holds no
+// record of.
+//
+// The handler checks the request (the invoice, the CLTV limit against the
+// invoice's final delta) before it writes the payment record, and answers a
+// failed check with a status of its own: Unknown, InvalidArgument, or
+// AlreadyExists for a hash it has already paid or is paying. Read as in
+// flight, such a refusal leaves the swap paying with nothing for the node to
+// look up, and an operator to sort it out. The code alone is not enough,
+// because a payment that has started can fail with Unknown too, so the node is
+// asked: no record of the hash is what makes it unsent.
+//
+// Unavailable, Canceled, DeadlineExceeded and Internal are left alone: they
+// come from the transport or from a failure partway, after which the request
+// may have been delivered. So is any doubt in the asking: an invoice that
+// cannot be read back, or a lookup that fails, keeps the payment in flight.
+func (r *Remote) refusedUnrecorded(ctx context.Context, req node.PayRequest,
+	err error) bool {
+
+	st, ok := status.FromError(err)
+	if !ok {
+		return false
+	}
+	switch st.Code() {
+	case codes.Unknown, codes.InvalidArgument, codes.AlreadyExists:
+	default:
+		return false
+	}
+
+	dec, decErr := r.main.DecodePayReq(
+		ctx, &lnrpc.PayReqString{PayReq: req.Invoice},
+	)
+	if decErr != nil {
+		return false
+	}
+	h, decErr := hex.DecodeString(dec.GetPaymentHash())
+	var hash node.Hash
+	if decErr != nil || len(h) != len(hash) {
+		return false
+	}
+	copy(hash[:], h)
+
+	pmt, lookupErr := r.LookupPayment(ctx, hash)
+
+	return lookupErr == nil && pmt.State == node.PaymentNone
 }
 
 // A quote asks the SHA256 node for a route before committing anything.
