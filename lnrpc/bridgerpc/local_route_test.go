@@ -504,3 +504,26 @@ func TestLocalFindRouteBlindedPaths(t *testing.T) {
 	require.EqualValues(t, 250_000, got.Amount)
 	require.EqualValues(t, 3_000, got.Restrictions.FeeLimit)
 }
+
+// A blinded invoice splits by its paths' features when they have any, as
+// lnd's router reads them in place of the invoice's.
+func TestLocalSplitsByBlindedPathFeatures(t *testing.T) {
+	t.Parallel()
+
+	inv := splittableInvoice(t, 250_000, true)
+	require.True(t, localSplits(inv), "paths without features of their "+
+		"own split by the invoice's")
+
+	inv.BlindedPaymentPaths[0].Features = lnwire.NewFeatureVector(
+		lnwire.NewRawFeatureVector(lnwire.TLVOnionPayloadRequired),
+		lnwire.Features,
+	)
+	require.False(t, localSplits(inv))
+
+	inv.BlindedPaymentPaths[0].Features = lnwire.NewFeatureVector(
+		lnwire.NewRawFeatureVector(lnwire.MPPOptional),
+		lnwire.Features,
+	)
+	inv.Features = lnwire.EmptyFeatureVector()
+	require.True(t, localSplits(inv))
+}

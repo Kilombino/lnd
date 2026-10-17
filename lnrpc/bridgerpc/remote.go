@@ -737,12 +737,28 @@ func (r *Remote) FindRoute(ctx context.Context, invoice string,
 // remoteSplits reports whether the SHA256 node's payment to the invoice may be
 // split, by the rule its router applies: the invoice declares multi-part
 // payments (feature bit 16 or 17), and has a payment address or blinded paths
-// to carry the parts.
+// to carry the parts. For an invoice with blinded paths the router reads the
+// paths' features in place of the invoice's when they have any (they all have
+// the same).
 func remoteSplits(req *lnrpc.PayReq) bool {
-	features := req.GetFeatures()
-	_, optional := features[uint32(lnwire.MPPOptional)]
-	_, required := features[uint32(lnwire.MPPRequired)]
-	if !optional && !required {
+	mpp := func(bit uint32) bool {
+		return bit == uint32(lnwire.MPPOptional) ||
+			bit == uint32(lnwire.MPPRequired)
+	}
+
+	declared := false
+	if paths := req.GetBlindedPaths(); len(paths) > 0 &&
+		len(paths[0].GetFeatures()) > 0 {
+
+		for _, bit := range paths[0].GetFeatures() {
+			declared = declared || mpp(uint32(bit))
+		}
+	} else {
+		for bit := range req.GetFeatures() {
+			declared = declared || mpp(bit)
+		}
+	}
+	if !declared {
 		return false
 	}
 

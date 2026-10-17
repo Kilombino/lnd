@@ -372,10 +372,17 @@ func (l *Local) FindRoute(ctx context.Context, invoice string,
 // localSplits reports whether this node's payment to the invoice may be
 // split, by the rule its router applies: the invoice declares multi-part
 // payments, and has a payment address or blinded paths to carry the parts.
+// For an invoice with blinded paths the router reads the paths' features in
+// place of the invoice's when they have any (they all have the same).
 func localSplits(pay *zpay32.Invoice) bool {
-	if pay.Features == nil ||
-		!pay.Features.HasFeature(lnwire.MPPOptional) {
+	features := pay.Features
+	if paths := pay.BlindedPaymentPaths; len(paths) > 0 &&
+		paths[0] != nil && paths[0].Features != nil &&
+		!paths[0].Features.IsEmpty() {
 
+		features = paths[0].Features
+	}
+	if features == nil || !features.HasFeature(lnwire.MPPOptional) {
 		return false
 	}
 

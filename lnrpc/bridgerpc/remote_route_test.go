@@ -163,3 +163,25 @@ func TestRemoteFindRoute(t *testing.T) {
 		require.Empty(t, m.routesReq.DestFeatures)
 	})
 }
+
+// A blinded invoice splits by its paths' features when they have any, as
+// lnd's router reads them in place of the invoice's.
+func TestRemoteSplitsByBlindedPathFeatures(t *testing.T) {
+	t.Parallel()
+
+	req := splittablePayReq()
+	req.BlindedPaths = []*lnrpc.BlindedPaymentPath{{}}
+	require.True(t, remoteSplits(req), "paths without features of their "+
+		"own split by the invoice's")
+
+	req.BlindedPaths[0].Features = []lnrpc.FeatureBit{
+		lnrpc.FeatureBit(lnwire.TLVOnionPayloadRequired),
+	}
+	require.False(t, remoteSplits(req))
+
+	req.BlindedPaths[0].Features = []lnrpc.FeatureBit{
+		lnrpc.FeatureBit(lnwire.MPPRequired),
+	}
+	req.Features = nil
+	require.True(t, remoteSplits(req))
+}
