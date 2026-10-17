@@ -835,10 +835,16 @@ type rawLevel struct {
 	Quantity flexNum `json:"quantity"`
 }
 
-// sides orders a book's raw levels best first and checks it is a book: both
-// sides present, every level positive, not crossed.
-func sides(rawBids, rawAsks []rawLevel) (book, bool) {
+// sides orders a book's raw levels best first and makes it a book, named name
+// in the log: a level without a positive price and quantity is skipped, and
+// while the best bid is at or over the best ask both are dropped. Neither says
+// which of them is wrong, and dropping both only takes depth from each side,
+// which reads the book worse for whoever trades with the bridge, not better.
+// One bad level does not discard the rest; a book left with an empty side is
+// no book.
+func sides(name string, rawBids, rawAsks []rawLevel) (book, bool) {
 	var b book
+	skipped := 0
 	for _, side := range []struct {
 		raw []rawLevel
 		out *[]level
@@ -846,13 +852,12 @@ func sides(rawBids, rawAsks []rawLevel) (book, bool) {
 		for _, r := range side.raw {
 			p, q := float64(r.Price), float64(r.Quantity)
 			if !positive(p) || !positive(q) {
-				return book{}, false
+				skipped++
+
+				continue
 			}
 			*side.out = append(*side.out, level{p, q})
 		}
-	}
-	if len(b.bids) == 0 || len(b.asks) == 0 {
-		return book{}, false
 	}
 	sort.Slice(b.bids, func(i, j int) bool {
 		return b.bids[i].price > b.bids[j].price
@@ -860,8 +865,20 @@ func sides(rawBids, rawAsks []rawLevel) (book, bool) {
 	sort.Slice(b.asks, func(i, j int) bool {
 		return b.asks[i].price < b.asks[j].price
 	})
+	crossed := 0
+	for len(b.bids) > 0 && len(b.asks) > 0 &&
+		b.bids[0].price >= b.asks[0].price {
 
-	return b, b.bids[0].price < b.asks[0].price
+		b.bids, b.asks = b.bids[1:], b.asks[1:]
+		crossed++
+	}
+	if skipped > 0 || crossed > 0 {
+		log.Debugf("Bridge market rate: %s's book: skipped %d levels "+
+			"without a positive price and quantity, dropped %d "+
+			"crossed pairs of levels", name, skipped, crossed)
+	}
+
+	return b, len(b.bids) > 0 && len(b.asks) > 0
 }
 
 // neoxaBook is Neoxa's book as it sends it.
@@ -883,7 +900,7 @@ func parseNeoxaBook(raw []byte, pair string) (book, error) {
 			"with something other than its book", errFeedUnreadable,
 			pair)
 	}
-	b, ok := sides(nb.Bids, nb.Asks)
+	b, ok := sides("Neoxa's "+pair, nb.Bids, nb.Asks)
 	if !ok {
 		return book{}, fmt.Errorf("%w: Neoxa's %s market has no "+
 			"usable book", errFeedUnreadable, pair)
@@ -917,7 +934,7 @@ func (f *feed) nonKYC(raw []byte, err error, now time.Time) (book, error) {
 			"with something other than its book", errFeedUnreadable,
 			pairNonKYC)
 	}
-	b, ok := sides(nb.Bids, nb.Asks)
+	b, ok := sides("NonKYC's "+pairNonKYC, nb.Bids, nb.Asks)
 	if !ok {
 		return book{}, fmt.Errorf("%w: NonKYC's %s market has no "+
 			"usable book", errFeedUnreadable, pairNonKYC)

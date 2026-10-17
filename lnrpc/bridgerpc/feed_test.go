@@ -700,6 +700,57 @@ func TestAStuckBookWidensTheFee(t *testing.T) {
 	}
 }
 
+// One bad level does not discard a book: a level without a positive price or
+// quantity is skipped, and a bid at or over the best ask is dropped with that
+// ask. Only a book left with an empty side is refused.
+func TestABadLevelDoesNotDiscardTheBook(t *testing.T) {
+	m := newMarket(feedStart)
+	m.mu.Lock()
+	m.body[bookURL(pairDirect)] = `{"success":true,"pair":"BTCB2_BTC",` +
+		`"bids":[{"price":0.006,"quantity":1000},` +
+		`{"price":0.0059,"quantity":0},{"price":-1,"quantity":5},` +
+		`{"price":0.0061,"quantity":0.001}],` +
+		`"asks":[{"price":0.00606,"quantity":0.001},` +
+		`{"price":0.00607,"quantity":1000}]}`
+	m.mu.Unlock()
+	f := testFeed(t, m)
+	f.read(context.Background())
+
+	got, err := f.quoteRate()
+	if err != nil {
+		t.Fatalf("a book with bad levels stopped quoting: %v", err)
+	}
+	// The crossed bid at 0.0061 went with the best ask, 0.00606.
+	if v, _ := sideOf(t, got, false); !near(v, 0.006) {
+		t.Errorf("toSHA256 at %g, wanted 0.006", v)
+	}
+	if v, _ := sideOf(t, got, true); !near(v, 0.00607) {
+		t.Errorf("toBLAKE2b at %g, wanted 0.00607", v)
+	}
+
+	for _, tc := range []struct {
+		name       string
+		bids, asks []rawLevel
+		ok         bool
+	}{
+		{"fine", []rawLevel{{1, 1}}, []rawLevel{{2, 1}}, true},
+		{"locked", []rawLevel{{2, 1}, {1, 1}}, []rawLevel{{2, 1},
+			{3, 1}}, true},
+		{"one side bad", []rawLevel{{0, 1}}, []rawLevel{{2, 1}},
+			false},
+		{"all crossed", []rawLevel{{3, 1}}, []rawLevel{{2, 1}}, false},
+		{"empty", nil, []rawLevel{{2, 1}}, false},
+	} {
+		b, ok := sides(tc.name, tc.bids, tc.asks)
+		if ok != tc.ok {
+			t.Errorf("%s: ok %v", tc.name, ok)
+		}
+		if ok && b.bids[0].price >= b.asks[0].price {
+			t.Errorf("%s: crossed %+v", tc.name, b)
+		}
+	}
+}
+
 // A market that cannot be read leaves the last reading usable only while it is
 // fresh; after that nothing is quoted.
 func TestTheFeedStopsWhenTheMarketCannotBeRead(t *testing.T) {
