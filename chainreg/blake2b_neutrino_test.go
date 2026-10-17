@@ -22,7 +22,9 @@ type fakeNeutrino struct {
 	byHeight map[int64]chainhash.Hash
 }
 
-func newFakeNeutrino(t *testing.T, height int32, at int64, hexStr string) *fakeNeutrino {
+func newFakeNeutrino(t *testing.T, height int32, at int64,
+	hexStr string) *fakeNeutrino {
+
 	t.Helper()
 	raw, err := hex.DecodeString(hexStr)
 	require.NoError(t, err)
@@ -48,7 +50,9 @@ func (f *fakeNeutrino) GetBlockHash(h int64) (*chainhash.Hash, error) {
 	return &hash, nil
 }
 
-func (f *fakeNeutrino) GetBlockHeader(hash *chainhash.Hash) (*wire.BlockHeader, error) {
+func (f *fakeNeutrino) GetBlockHeader(hash *chainhash.Hash) (
+	*wire.BlockHeader, error) {
+
 	h, ok := f.byHash[*hash]
 	if !ok {
 		return nil, errors.New("unknown header")
@@ -71,7 +75,9 @@ func TestNeutrinoChainParamsCheckpoint(t *testing.T) {
 	require.EqualValues(t, Blake2bMainnetActivationHeight, last.Height)
 	require.Equal(t, *Blake2bMainnetActivationHash, *last.Hash)
 	for i := 1; i < len(p.Checkpoints); i++ {
-		require.Less(t, p.Checkpoints[i-1].Height, p.Checkpoints[i].Height)
+		require.Less(
+			t, p.Checkpoints[i-1].Height, p.Checkpoints[i].Height,
+		)
 	}
 
 	t4 := NeutrinoChainParams(BitcoinTestNet4Params)
@@ -85,7 +91,9 @@ func TestNeutrinoChainIdentity(t *testing.T) {
 	t.Run("activation header confirms", func(t *testing.T) {
 		status := filepath.Join(t.TempDir(), ChainIdentityFileName)
 		rpc := &neutrinoIdentityRPC{
-			src:   newFakeNeutrino(t, 976700, 961640, activationHeaderHex),
+			src: newFakeNeutrino(
+				t, 976700, 961640, activationHeaderHex,
+			),
 			chain: "main",
 		}
 		c := newTestChecker(t, rpc, BitcoinMainNetParams, status)
@@ -96,13 +104,18 @@ func TestNeutrinoChainIdentity(t *testing.T) {
 		st, err := ReadChainIdentityStatus(status)
 		require.NoError(t, err)
 		require.Equal(t, ChainIdentityConfirmed, st.State)
-		require.Equal(t, Blake2bMainnetActivationHash.String(), st.ActivationHash)
+		require.Equal(
+			t, Blake2bMainnetActivationHash.String(),
+			st.ActivationHash,
+		)
 	})
 
 	t.Run("classic header refused", func(t *testing.T) {
 		status := filepath.Join(t.TempDir(), ChainIdentityFileName)
 		rpc := &neutrinoIdentityRPC{
-			src:   newFakeNeutrino(t, 976700, 961640, lastSHA256HeaderHex),
+			src: newFakeNeutrino(
+				t, 976700, 961640, lastSHA256HeaderHex,
+			),
 			chain: "main",
 		}
 		c := newTestChecker(t, rpc, BitcoinMainNetParams, status)

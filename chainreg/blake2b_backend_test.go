@@ -51,7 +51,9 @@ func TestChainIdentityWaitStopsOnShutdown(t *testing.T) {
 	}
 
 	done := make(chan error, 1)
-	go func() { done <- verifyBlake2bChain(rpc, cfg, make(chan struct{})) }()
+	go func() {
+		done <- verifyBlake2bChain(rpc, cfg, make(chan struct{}))
+	}()
 	close(shutdown)
 
 	select {
