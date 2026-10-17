@@ -23,9 +23,10 @@ const (
 
 type QuoteRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The payment request the payer wants delivered, on whichever chain it is
-	// for. It is never rewritten: its payment hash is what the hold invoice is
-	// built on, and settling requires that exact preimage.
+	//
+	//The payment request the payer wants delivered, on whichever chain it is
+	//for. It is never rewritten: its payment hash is what the hold invoice is
+	//built on, and settling requires that exact preimage.
 	Invoice       string `protobuf:"bytes,1,opt,name=invoice,proto3" json:"invoice,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -70,13 +71,15 @@ func (x *QuoteRequest) GetInvoice() string {
 
 type QuoteResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// What the payer pays, on the other chain. It is a hold invoice and does not
-	// settle until the bridge has delivered, which is the whole mechanism.
+	//
+	//What the payer pays, on the other chain. It is a hold invoice and does not
+	//settle until the bridge has delivered, which is the whole mechanism.
 	HoldInvoice string `protobuf:"bytes,1,opt,name=hold_invoice,json=holdInvoice,proto3" json:"hold_invoice,omitempty"`
 	// The payment hash both legs share, and the key to ask about this swap.
 	Hash []byte `protobuf:"bytes,2,opt,name=hash,proto3" json:"hash,omitempty"`
-	// What the payer owes. Note that incoming and outgoing are in different
-	// units: a millisatoshi on one chain is not a millisatoshi on the other.
+	//
+	//What the payer owes. Note that incoming and outgoing are in different
+	//units: a millisatoshi on one chain is not a millisatoshi on the other.
 	IncomingMsat uint64 `protobuf:"varint,3,opt,name=incoming_msat,json=incomingMsat,proto3" json:"incoming_msat,omitempty"`
 	// What the destination receives.
 	OutgoingMsat uint64 `protobuf:"varint,4,opt,name=outgoing_msat,json=outgoingMsat,proto3" json:"outgoing_msat,omitempty"`
@@ -84,19 +87,21 @@ type QuoteResponse struct {
 	Rate float64 `protobuf:"fixed64,5,opt,name=rate,proto3" json:"rate,omitempty"`
 	// The fraction charged on top of the rate.
 	Spread float64 `protobuf:"fixed64,6,opt,name=spread,proto3" json:"spread,omitempty"`
-	// The incoming leg's required CLTV, in blocks of the incoming chain. It is
-	// sized in wall-clock by the margin policy and converted, so it is usually
-	// far larger than a same-chain invoice would ask for.
+	//
+	//The incoming leg's required CLTV, in blocks of the incoming chain. It is
+	//sized in wall-clock by the margin policy and converted, so it is usually
+	//far larger than a same-chain invoice would ask for.
 	CltvDelta uint32 `protobuf:"varint,7,opt,name=cltv_delta,json=cltvDelta,proto3" json:"cltv_delta,omitempty"`
 	// Which way this swap runs, for a payer deciding which node to pay from.
 	Direction string `protobuf:"bytes,8,opt,name=direction,proto3" json:"direction,omitempty"`
-	// The deadline for paying hold_invoice, as a Unix timestamp in seconds. Pay
-	// it before this and the swap proceeds at the quoted rate; leave it and the
-	// bridge cancels the hold invoice, after which paying it fails.
 	//
-	// It applies only while the invoice is unpaid. Once the incoming HTLC is
-	// locked in the swap is no longer racing a clock in minutes, and cltv_delta
-	// is what bounds it.
+	//The deadline for paying hold_invoice, as a Unix timestamp in seconds. Pay
+	//it before this and the swap proceeds at the quoted rate; leave it and the
+	//bridge cancels the hold invoice, after which paying it fails.
+	//
+	//It applies only while the invoice is unpaid. Once the incoming HTLC is
+	//locked in the swap is no longer racing a clock in minutes, and cltv_delta
+	//is what bounds it.
 	ExpiresAt     int64 `protobuf:"varint,9,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -240,6 +245,51 @@ func (x *LookupSwapRequest) GetHash() []byte {
 	return nil
 }
 
+type ResolveSwapRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The payment hash of the swap to decide.
+	Hash          []byte `protobuf:"bytes,1,opt,name=hash,proto3" json:"hash,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResolveSwapRequest) Reset() {
+	*x = ResolveSwapRequest{}
+	mi := &file_bridgerpc_bridge_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResolveSwapRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResolveSwapRequest) ProtoMessage() {}
+
+func (x *ResolveSwapRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_bridgerpc_bridge_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResolveSwapRequest.ProtoReflect.Descriptor instead.
+func (*ResolveSwapRequest) Descriptor() ([]byte, []int) {
+	return file_bridgerpc_bridge_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *ResolveSwapRequest) GetHash() []byte {
+	if x != nil {
+		return x.Hash
+	}
+	return nil
+}
+
 type Swap struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Hash  []byte                 `protobuf:"bytes,1,opt,name=hash,proto3" json:"hash,omitempty"`
@@ -247,8 +297,9 @@ type Swap struct {
 	State        string `protobuf:"bytes,2,opt,name=state,proto3" json:"state,omitempty"`
 	IncomingMsat uint64 `protobuf:"varint,3,opt,name=incoming_msat,json=incomingMsat,proto3" json:"incoming_msat,omitempty"`
 	OutgoingMsat uint64 `protobuf:"varint,4,opt,name=outgoing_msat,json=outgoingMsat,proto3" json:"outgoing_msat,omitempty"`
-	// Present once there is one. It is the payer's proof that the destination was
-	// paid, and the value that claims the incoming hold invoice.
+	//
+	//Present once there is one. It is the payer's proof that the destination was
+	//paid, and the value that claims the incoming hold invoice.
 	Preimage      []byte `protobuf:"bytes,5,opt,name=preimage,proto3" json:"preimage,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -256,7 +307,7 @@ type Swap struct {
 
 func (x *Swap) Reset() {
 	*x = Swap{}
-	mi := &file_bridgerpc_bridge_proto_msgTypes[3]
+	mi := &file_bridgerpc_bridge_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -268,7 +319,7 @@ func (x *Swap) String() string {
 func (*Swap) ProtoMessage() {}
 
 func (x *Swap) ProtoReflect() protoreflect.Message {
-	mi := &file_bridgerpc_bridge_proto_msgTypes[3]
+	mi := &file_bridgerpc_bridge_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -281,7 +332,7 @@ func (x *Swap) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Swap.ProtoReflect.Descriptor instead.
 func (*Swap) Descriptor() ([]byte, []int) {
-	return file_bridgerpc_bridge_proto_rawDescGZIP(), []int{3}
+	return file_bridgerpc_bridge_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *Swap) GetHash() []byte {
@@ -327,7 +378,7 @@ type StatusRequest struct {
 
 func (x *StatusRequest) Reset() {
 	*x = StatusRequest{}
-	mi := &file_bridgerpc_bridge_proto_msgTypes[4]
+	mi := &file_bridgerpc_bridge_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -339,7 +390,7 @@ func (x *StatusRequest) String() string {
 func (*StatusRequest) ProtoMessage() {}
 
 func (x *StatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_bridgerpc_bridge_proto_msgTypes[4]
+	mi := &file_bridgerpc_bridge_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -352,60 +403,71 @@ func (x *StatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatusRequest.ProtoReflect.Descriptor instead.
 func (*StatusRequest) Descriptor() ([]byte, []int) {
-	return file_bridgerpc_bridge_proto_rawDescGZIP(), []int{4}
+	return file_bridgerpc_bridge_proto_rawDescGZIP(), []int{5}
 }
 
 type StatusResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Whether the operator has turned the bridge on.
 	Enabled bool `protobuf:"varint,1,opt,name=enabled,proto3" json:"enabled,omitempty"`
-	// The directions this node will currently quote. A direction disappears from
-	// here when it is disabled or when the node on that side cannot be reached.
+	//
+	//The directions this node will currently quote. A direction disappears from
+	//here when it is disabled or when the node on that side cannot be reached.
 	Directions []string `protobuf:"bytes,2,rep,name=directions,proto3" json:"directions,omitempty"`
-	// Why the bridge is refusing to quote, if it is. Empty when it is serving.
-	// This is the field to read first: a bridge with no liquidity, an unsynced
-	// node or a stale price refuses every swap, and the reason belongs here
-	// rather than in a log.
+	//
+	//Why the bridge is refusing to quote, if it is. Empty when it is serving.
+	//This is the field to read first: a bridge with no liquidity, an unsynced
+	//node or a stale price refuses every swap, and the reason belongs here
+	//rather than in a log.
 	Refusals []string `protobuf:"bytes,3,rep,name=refusals,proto3" json:"refusals,omitempty"`
 	// How many swaps are being driven right now.
 	SwapsInFlight uint32 `protobuf:"varint,4,opt,name=swaps_in_flight,json=swapsInFlight,proto3" json:"swaps_in_flight,omitempty"`
-	// The rate in force, as SHA256 coin per BLAKE2b coin: the market's last
-	// reading (rate_source neoxa) or the operator's own (fixed).
+	//
+	//The rate in force, as SHA256 coin per BLAKE2b coin: the market's last
+	//reading (rate_source neoxa) or the operator's own (fixed).
 	Rate float64 `protobuf:"fixed64,5,opt,name=rate,proto3" json:"rate,omitempty"`
 	// When it was set or read, as a Unix timestamp in seconds.
 	RateSetAt int64 `protobuf:"varint,6,opt,name=rate_set_at,json=rateSetAt,proto3" json:"rate_set_at,omitempty"`
-	// When it stops being used, as a Unix timestamp in seconds, or zero if the
-	// bridge allows a rate of any age. Following the market, a reading is used
-	// for a short while and replaced by the next.
+	//
+	//When it stops being used, as a Unix timestamp in seconds, or zero if the
+	//bridge allows a rate of any age. Following the market, a reading is used
+	//for a short while and replaced by the next.
 	RateExpiresAt int64 `protobuf:"varint,7,opt,name=rate_expires_at,json=rateExpiresAt,proto3" json:"rate_expires_at,omitempty"`
-	// Swaps that need the operator: ones that ended lost (paid out and the
-	// claim on the money coming in could not be settled) or that the bridge
-	// stopped driving because it must not decide them alone. Each is the
-	// payment hash, the state and why. The bridge keeps quoting; these are for
-	// a person to look at.
+	//
+	//Swaps that need the operator: ones that ended lost (paid out and the
+	//claim on the money coming in could not be settled) or that the bridge
+	//stopped driving because it must not decide them alone. Each is the
+	//payment hash, the state and why. The bridge keeps quoting; these are for
+	//a person to look at.
 	NeedsOperator []string `protobuf:"bytes,8,rep,name=needs_operator,json=needsOperator,proto3" json:"needs_operator,omitempty"`
-	// The Lightning node on the SHA256 chain: how far it has got and what it
-	// holds. Present whenever the bridge is enabled, including while it cannot
-	// start, since that node is usually why.
+	//
+	//The Lightning node on the SHA256 chain: how far it has got and what it
+	//holds. Present whenever the bridge is enabled, including while it cannot
+	//start, since that node is usually why.
 	Sha256Node *Sha256Node `protobuf:"bytes,9,opt,name=sha256_node,json=sha256Node,proto3" json:"sha256_node,omitempty"`
-	// How many swaps the journal holds unfinished: being driven, waiting to be,
-	// or stopped for the operator. Answered whether the bridge is on, off and
-	// finishing them, or not up (then as last read). A lost swap is final and
-	// not counted; it stays in needs_operator. This is what to wait on before
-	// turning the bridge off or changing its SHA256 node.
+	//
+	//How many swaps the journal holds unfinished: being driven, waiting to be,
+	//or stopped for the operator. Answered whether the bridge is on, off and
+	//finishing them, or not up (then as last read). A lost swap is final and
+	//not counted; it stays in needs_operator. This is what to wait on before
+	//turning the bridge off or changing its SHA256 node.
 	Unfinished uint32 `protobuf:"varint,10,opt,name=unfinished,proto3" json:"unfinished,omitempty"`
-	// Where the rate comes from: "neoxa" (the market, read live) or, on test
-	// networks only, "fixed" (one set with SetRate or the configuration).
+	//
+	//Where the rate comes from: "neoxa" (the market, read live) or, on test
+	//networks only, "fixed" (one set with SetRate or the configuration).
 	RateSource string `protobuf:"bytes,11,opt,name=rate_source,json=rateSource,proto3" json:"rate_source,omitempty"`
-	// Following the market: the cross-check's last reading, Neoxa's BTCB2_USDC
-	// market over a BTC/USD price, in the same unit as rate. The bridge quotes
-	// only while the two agree.
+	//
+	//Following the market: the cross-check's last reading, Neoxa's BTCB2_USDC
+	//market over a BTC/USD price, in the same unit as rate. The bridge quotes
+	//only while the two agree.
 	RateCrossCheck float64 `protobuf:"fixed64,12,opt,name=rate_cross_check,json=rateCrossCheck,proto3" json:"rate_cross_check,omitempty"`
-	// Following the market: how far it moved in the last few minutes, as a
-	// fraction, which each quote's fee is widened by.
+	//
+	//Following the market: how far it moved in the last few minutes, as a
+	//fraction, which each quote's fee is widened by.
 	RateVolatility float64 `protobuf:"fixed64,13,opt,name=rate_volatility,json=rateVolatility,proto3" json:"rate_volatility,omitempty"`
-	// The fee each direction charges on top of the rate, as a fraction, before
-	// the market's movement and the inventory policy widen it.
+	//
+	//The fee each direction charges on top of the rate, as a fraction, before
+	//the market's movement and the inventory policy widen it.
 	FeeToSha256   float64 `protobuf:"fixed64,14,opt,name=fee_to_sha256,json=feeToSha256,proto3" json:"fee_to_sha256,omitempty"`
 	FeeToBlake2B  float64 `protobuf:"fixed64,15,opt,name=fee_to_blake2b,json=feeToBlake2b,proto3" json:"fee_to_blake2b,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -414,7 +476,7 @@ type StatusResponse struct {
 
 func (x *StatusResponse) Reset() {
 	*x = StatusResponse{}
-	mi := &file_bridgerpc_bridge_proto_msgTypes[5]
+	mi := &file_bridgerpc_bridge_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -426,7 +488,7 @@ func (x *StatusResponse) String() string {
 func (*StatusResponse) ProtoMessage() {}
 
 func (x *StatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_bridgerpc_bridge_proto_msgTypes[5]
+	mi := &file_bridgerpc_bridge_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -439,7 +501,7 @@ func (x *StatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatusResponse.ProtoReflect.Descriptor instead.
 func (*StatusResponse) Descriptor() ([]byte, []int) {
-	return file_bridgerpc_bridge_proto_rawDescGZIP(), []int{5}
+	return file_bridgerpc_bridge_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *StatusResponse) GetEnabled() bool {
@@ -549,11 +611,13 @@ func (x *StatusResponse) GetFeeToBlake2B() float64 {
 
 type Sha256Node struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// supervised when this node runs it for the bridge, external when it is a
-	// node the operator already ran.
+	//
+	//supervised when this node runs it for the bridge, external when it is a
+	//node the operator already ran.
 	Mode string `protobuf:"bytes,1,opt,name=mode,proto3" json:"mode,omitempty"`
-	// Where that node is, as a stable code: starting, creating_wallet, locked,
-	// syncing, ready, unreachable, not_ours or error.
+	//
+	//Where that node is, as a stable code: starting, creating_wallet, locked,
+	//syncing, ready, unreachable, not_ours or error.
 	State string `protobuf:"bytes,2,opt,name=state,proto3" json:"state,omitempty"`
 	// The same in a sentence, including what to do about it.
 	Detail string `protobuf:"bytes,3,opt,name=detail,proto3" json:"detail,omitempty"`
@@ -569,8 +633,9 @@ type Sha256Node struct {
 	ActiveChannels        uint32 `protobuf:"varint,10,opt,name=active_channels,json=activeChannels,proto3" json:"active_channels,omitempty"`
 	InactiveChannels      uint32 `protobuf:"varint,11,opt,name=inactive_channels,json=inactiveChannels,proto3" json:"inactive_channels,omitempty"`
 	PendingChannels       uint32 `protobuf:"varint,12,opt,name=pending_channels,json=pendingChannels,proto3" json:"pending_channels,omitempty"`
-	// What its channels could send and receive now, in millisatoshis. Sending
-	// is what the bridge pays out with on the SHA256 chain.
+	//
+	//What its channels could send and receive now, in millisatoshis. Sending
+	//is what the bridge pays out with on the SHA256 chain.
 	OutboundMsat uint64 `protobuf:"varint,13,opt,name=outbound_msat,json=outboundMsat,proto3" json:"outbound_msat,omitempty"`
 	InboundMsat  uint64 `protobuf:"varint,14,opt,name=inbound_msat,json=inboundMsat,proto3" json:"inbound_msat,omitempty"`
 	Peers        uint32 `protobuf:"varint,15,opt,name=peers,proto3" json:"peers,omitempty"`
@@ -582,7 +647,7 @@ type Sha256Node struct {
 
 func (x *Sha256Node) Reset() {
 	*x = Sha256Node{}
-	mi := &file_bridgerpc_bridge_proto_msgTypes[6]
+	mi := &file_bridgerpc_bridge_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -594,7 +659,7 @@ func (x *Sha256Node) String() string {
 func (*Sha256Node) ProtoMessage() {}
 
 func (x *Sha256Node) ProtoReflect() protoreflect.Message {
-	mi := &file_bridgerpc_bridge_proto_msgTypes[6]
+	mi := &file_bridgerpc_bridge_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -607,7 +672,7 @@ func (x *Sha256Node) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Sha256Node.ProtoReflect.Descriptor instead.
 func (*Sha256Node) Descriptor() ([]byte, []int) {
-	return file_bridgerpc_bridge_proto_rawDescGZIP(), []int{6}
+	return file_bridgerpc_bridge_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *Sha256Node) GetMode() string {
@@ -730,7 +795,7 @@ type ExportSha256SeedRequest struct {
 
 func (x *ExportSha256SeedRequest) Reset() {
 	*x = ExportSha256SeedRequest{}
-	mi := &file_bridgerpc_bridge_proto_msgTypes[7]
+	mi := &file_bridgerpc_bridge_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -742,7 +807,7 @@ func (x *ExportSha256SeedRequest) String() string {
 func (*ExportSha256SeedRequest) ProtoMessage() {}
 
 func (x *ExportSha256SeedRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_bridgerpc_bridge_proto_msgTypes[7]
+	mi := &file_bridgerpc_bridge_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -755,13 +820,14 @@ func (x *ExportSha256SeedRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExportSha256SeedRequest.ProtoReflect.Descriptor instead.
 func (*ExportSha256SeedRequest) Descriptor() ([]byte, []int) {
-	return file_bridgerpc_bridge_proto_rawDescGZIP(), []int{7}
+	return file_bridgerpc_bridge_proto_rawDescGZIP(), []int{8}
 }
 
 type ExportSha256SeedResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The 24-word aezeed phrase, with no passphrase. Each call salts it afresh,
-	// so the words differ from call to call; every one restores the same node.
+	//
+	//The 24-word aezeed phrase, with no passphrase. Each call salts it afresh,
+	//so the words differ from call to call; every one restores the same node.
 	Mnemonic []string `protobuf:"bytes,1,rep,name=mnemonic,proto3" json:"mnemonic,omitempty"`
 	// The same seed as a BIP32 root key (xprv on mainnet), which
 	// `lncli create` also accepts.
@@ -778,7 +844,7 @@ type ExportSha256SeedResponse struct {
 
 func (x *ExportSha256SeedResponse) Reset() {
 	*x = ExportSha256SeedResponse{}
-	mi := &file_bridgerpc_bridge_proto_msgTypes[8]
+	mi := &file_bridgerpc_bridge_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -790,7 +856,7 @@ func (x *ExportSha256SeedResponse) String() string {
 func (*ExportSha256SeedResponse) ProtoMessage() {}
 
 func (x *ExportSha256SeedResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_bridgerpc_bridge_proto_msgTypes[8]
+	mi := &file_bridgerpc_bridge_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -803,7 +869,7 @@ func (x *ExportSha256SeedResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExportSha256SeedResponse.ProtoReflect.Descriptor instead.
 func (*ExportSha256SeedResponse) Descriptor() ([]byte, []int) {
-	return file_bridgerpc_bridge_proto_rawDescGZIP(), []int{8}
+	return file_bridgerpc_bridge_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ExportSha256SeedResponse) GetMnemonic() []string {
@@ -849,7 +915,7 @@ type InfoRequest struct {
 
 func (x *InfoRequest) Reset() {
 	*x = InfoRequest{}
-	mi := &file_bridgerpc_bridge_proto_msgTypes[9]
+	mi := &file_bridgerpc_bridge_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -861,7 +927,7 @@ func (x *InfoRequest) String() string {
 func (*InfoRequest) ProtoMessage() {}
 
 func (x *InfoRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_bridgerpc_bridge_proto_msgTypes[9]
+	mi := &file_bridgerpc_bridge_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -874,7 +940,7 @@ func (x *InfoRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InfoRequest.ProtoReflect.Descriptor instead.
 func (*InfoRequest) Descriptor() ([]byte, []int) {
-	return file_bridgerpc_bridge_proto_rawDescGZIP(), []int{9}
+	return file_bridgerpc_bridge_proto_rawDescGZIP(), []int{10}
 }
 
 type DirectionInfo struct {
@@ -891,8 +957,9 @@ type DirectionInfo struct {
 	Rate float64 `protobuf:"fixed64,5,opt,name=rate,proto3" json:"rate,omitempty"`
 	// When the rate was set, as a Unix timestamp in seconds.
 	RateSetAt int64 `protobuf:"varint,6,opt,name=rate_set_at,json=rateSetAt,proto3" json:"rate_set_at,omitempty"`
-	// The fraction charged on top of the rate at the bridge's current position.
-	// It can move between this call and a quote.
+	//
+	//The fraction charged on top of the rate at the bridge's current position.
+	//It can move between this call and a quote.
 	Spread float64 `protobuf:"fixed64,7,opt,name=spread,proto3" json:"spread,omitempty"`
 	// Bounds on the invoice to be paid, in the outgoing chain's millisatoshis.
 	MinMsat       uint64 `protobuf:"varint,8,opt,name=min_msat,json=minMsat,proto3" json:"min_msat,omitempty"`
@@ -903,7 +970,7 @@ type DirectionInfo struct {
 
 func (x *DirectionInfo) Reset() {
 	*x = DirectionInfo{}
-	mi := &file_bridgerpc_bridge_proto_msgTypes[10]
+	mi := &file_bridgerpc_bridge_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -915,7 +982,7 @@ func (x *DirectionInfo) String() string {
 func (*DirectionInfo) ProtoMessage() {}
 
 func (x *DirectionInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_bridgerpc_bridge_proto_msgTypes[10]
+	mi := &file_bridgerpc_bridge_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -928,7 +995,7 @@ func (x *DirectionInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DirectionInfo.ProtoReflect.Descriptor instead.
 func (*DirectionInfo) Descriptor() ([]byte, []int) {
-	return file_bridgerpc_bridge_proto_rawDescGZIP(), []int{10}
+	return file_bridgerpc_bridge_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *DirectionInfo) GetName() string {
@@ -998,8 +1065,9 @@ type InfoResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The version of the payer API this bridge speaks.
 	Version uint32 `protobuf:"varint,1,opt,name=version,proto3" json:"version,omitempty"`
-	// This node's key. Every hold invoice the bridge issues on this chain is
-	// payable to exactly this key.
+	//
+	//This node's key. Every hold invoice the bridge issues on this chain is
+	//payable to exactly this key.
 	Node string `protobuf:"bytes,2,opt,name=node,proto3" json:"node,omitempty"`
 	// One entry per enabled direction.
 	Directions    []*DirectionInfo `protobuf:"bytes,3,rep,name=directions,proto3" json:"directions,omitempty"`
@@ -1009,7 +1077,7 @@ type InfoResponse struct {
 
 func (x *InfoResponse) Reset() {
 	*x = InfoResponse{}
-	mi := &file_bridgerpc_bridge_proto_msgTypes[11]
+	mi := &file_bridgerpc_bridge_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1021,7 +1089,7 @@ func (x *InfoResponse) String() string {
 func (*InfoResponse) ProtoMessage() {}
 
 func (x *InfoResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_bridgerpc_bridge_proto_msgTypes[11]
+	mi := &file_bridgerpc_bridge_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1034,7 +1102,7 @@ func (x *InfoResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InfoResponse.ProtoReflect.Descriptor instead.
 func (*InfoResponse) Descriptor() ([]byte, []int) {
-	return file_bridgerpc_bridge_proto_rawDescGZIP(), []int{11}
+	return file_bridgerpc_bridge_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *InfoResponse) GetVersion() uint32 {
@@ -1068,7 +1136,7 @@ type SetRateRequest struct {
 
 func (x *SetRateRequest) Reset() {
 	*x = SetRateRequest{}
-	mi := &file_bridgerpc_bridge_proto_msgTypes[12]
+	mi := &file_bridgerpc_bridge_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1080,7 +1148,7 @@ func (x *SetRateRequest) String() string {
 func (*SetRateRequest) ProtoMessage() {}
 
 func (x *SetRateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_bridgerpc_bridge_proto_msgTypes[12]
+	mi := &file_bridgerpc_bridge_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1093,7 +1161,7 @@ func (x *SetRateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetRateRequest.ProtoReflect.Descriptor instead.
 func (*SetRateRequest) Descriptor() ([]byte, []int) {
-	return file_bridgerpc_bridge_proto_rawDescGZIP(), []int{12}
+	return file_bridgerpc_bridge_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *SetRateRequest) GetRate() float64 {
@@ -1114,7 +1182,7 @@ type SetRateResponse struct {
 
 func (x *SetRateResponse) Reset() {
 	*x = SetRateResponse{}
-	mi := &file_bridgerpc_bridge_proto_msgTypes[13]
+	mi := &file_bridgerpc_bridge_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1126,7 +1194,7 @@ func (x *SetRateResponse) String() string {
 func (*SetRateResponse) ProtoMessage() {}
 
 func (x *SetRateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_bridgerpc_bridge_proto_msgTypes[13]
+	mi := &file_bridgerpc_bridge_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1139,7 +1207,7 @@ func (x *SetRateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetRateResponse.ProtoReflect.Descriptor instead.
 func (*SetRateResponse) Descriptor() ([]byte, []int) {
-	return file_bridgerpc_bridge_proto_rawDescGZIP(), []int{13}
+	return file_bridgerpc_bridge_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *SetRateResponse) GetRate() float64 {
@@ -1176,6 +1244,8 @@ const file_bridgerpc_bridge_proto_rawDesc = "" +
 	"\n" +
 	"expires_at\x18\t \x01(\x03R\texpiresAt\"'\n" +
 	"\x11LookupSwapRequest\x12\x12\n" +
+	"\x04hash\x18\x01 \x01(\fR\x04hash\"(\n" +
+	"\x12ResolveSwapRequest\x12\x12\n" +
 	"\x04hash\x18\x01 \x01(\fR\x04hash\"\x96\x01\n" +
 	"\x04Swap\x12\x12\n" +
 	"\x04hash\x18\x01 \x01(\fR\x04hash\x12\x14\n" +
@@ -1256,7 +1326,7 @@ const file_bridgerpc_bridge_proto_rawDesc = "" +
 	"\x04rate\x18\x01 \x01(\x01R\x04rate\"E\n" +
 	"\x0fSetRateResponse\x12\x12\n" +
 	"\x04rate\x18\x01 \x01(\x01R\x04rate\x12\x1e\n" +
-	"\vrate_set_at\x18\x02 \x01(\x03R\trateSetAt2\x98\x03\n" +
+	"\vrate_set_at\x18\x02 \x01(\x03R\trateSetAt2\xd7\x03\n" +
 	"\x06Bridge\x12:\n" +
 	"\x05Quote\x12\x17.bridgerpc.QuoteRequest\x1a\x18.bridgerpc.QuoteResponse\x12;\n" +
 	"\n" +
@@ -1264,7 +1334,8 @@ const file_bridgerpc_bridge_proto_rawDesc = "" +
 	"\x06Status\x12\x18.bridgerpc.StatusRequest\x1a\x19.bridgerpc.StatusResponse\x127\n" +
 	"\x04Info\x12\x16.bridgerpc.InfoRequest\x1a\x17.bridgerpc.InfoResponse\x12@\n" +
 	"\aSetRate\x12\x19.bridgerpc.SetRateRequest\x1a\x1a.bridgerpc.SetRateResponse\x12[\n" +
-	"\x10ExportSha256Seed\x12\".bridgerpc.ExportSha256SeedRequest\x1a#.bridgerpc.ExportSha256SeedResponseB1Z/github.com/lightningnetwork/lnd/lnrpc/bridgerpcb\x06proto3"
+	"\x10ExportSha256Seed\x12\".bridgerpc.ExportSha256SeedRequest\x1a#.bridgerpc.ExportSha256SeedResponse\x12=\n" +
+	"\vResolveSwap\x12\x1d.bridgerpc.ResolveSwapRequest\x1a\x0f.bridgerpc.SwapB1Z/github.com/lightningnetwork/lnd/lnrpc/bridgerpcb\x06proto3"
 
 var (
 	file_bridgerpc_bridge_proto_rawDescOnce sync.Once
@@ -1278,40 +1349,43 @@ func file_bridgerpc_bridge_proto_rawDescGZIP() []byte {
 	return file_bridgerpc_bridge_proto_rawDescData
 }
 
-var file_bridgerpc_bridge_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
+var file_bridgerpc_bridge_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
 var file_bridgerpc_bridge_proto_goTypes = []any{
 	(*QuoteRequest)(nil),             // 0: bridgerpc.QuoteRequest
 	(*QuoteResponse)(nil),            // 1: bridgerpc.QuoteResponse
 	(*LookupSwapRequest)(nil),        // 2: bridgerpc.LookupSwapRequest
-	(*Swap)(nil),                     // 3: bridgerpc.Swap
-	(*StatusRequest)(nil),            // 4: bridgerpc.StatusRequest
-	(*StatusResponse)(nil),           // 5: bridgerpc.StatusResponse
-	(*Sha256Node)(nil),               // 6: bridgerpc.Sha256Node
-	(*ExportSha256SeedRequest)(nil),  // 7: bridgerpc.ExportSha256SeedRequest
-	(*ExportSha256SeedResponse)(nil), // 8: bridgerpc.ExportSha256SeedResponse
-	(*InfoRequest)(nil),              // 9: bridgerpc.InfoRequest
-	(*DirectionInfo)(nil),            // 10: bridgerpc.DirectionInfo
-	(*InfoResponse)(nil),             // 11: bridgerpc.InfoResponse
-	(*SetRateRequest)(nil),           // 12: bridgerpc.SetRateRequest
-	(*SetRateResponse)(nil),          // 13: bridgerpc.SetRateResponse
+	(*ResolveSwapRequest)(nil),       // 3: bridgerpc.ResolveSwapRequest
+	(*Swap)(nil),                     // 4: bridgerpc.Swap
+	(*StatusRequest)(nil),            // 5: bridgerpc.StatusRequest
+	(*StatusResponse)(nil),           // 6: bridgerpc.StatusResponse
+	(*Sha256Node)(nil),               // 7: bridgerpc.Sha256Node
+	(*ExportSha256SeedRequest)(nil),  // 8: bridgerpc.ExportSha256SeedRequest
+	(*ExportSha256SeedResponse)(nil), // 9: bridgerpc.ExportSha256SeedResponse
+	(*InfoRequest)(nil),              // 10: bridgerpc.InfoRequest
+	(*DirectionInfo)(nil),            // 11: bridgerpc.DirectionInfo
+	(*InfoResponse)(nil),             // 12: bridgerpc.InfoResponse
+	(*SetRateRequest)(nil),           // 13: bridgerpc.SetRateRequest
+	(*SetRateResponse)(nil),          // 14: bridgerpc.SetRateResponse
 }
 var file_bridgerpc_bridge_proto_depIdxs = []int32{
-	6,  // 0: bridgerpc.StatusResponse.sha256_node:type_name -> bridgerpc.Sha256Node
-	10, // 1: bridgerpc.InfoResponse.directions:type_name -> bridgerpc.DirectionInfo
+	7,  // 0: bridgerpc.StatusResponse.sha256_node:type_name -> bridgerpc.Sha256Node
+	11, // 1: bridgerpc.InfoResponse.directions:type_name -> bridgerpc.DirectionInfo
 	0,  // 2: bridgerpc.Bridge.Quote:input_type -> bridgerpc.QuoteRequest
 	2,  // 3: bridgerpc.Bridge.LookupSwap:input_type -> bridgerpc.LookupSwapRequest
-	4,  // 4: bridgerpc.Bridge.Status:input_type -> bridgerpc.StatusRequest
-	9,  // 5: bridgerpc.Bridge.Info:input_type -> bridgerpc.InfoRequest
-	12, // 6: bridgerpc.Bridge.SetRate:input_type -> bridgerpc.SetRateRequest
-	7,  // 7: bridgerpc.Bridge.ExportSha256Seed:input_type -> bridgerpc.ExportSha256SeedRequest
-	1,  // 8: bridgerpc.Bridge.Quote:output_type -> bridgerpc.QuoteResponse
-	3,  // 9: bridgerpc.Bridge.LookupSwap:output_type -> bridgerpc.Swap
-	5,  // 10: bridgerpc.Bridge.Status:output_type -> bridgerpc.StatusResponse
-	11, // 11: bridgerpc.Bridge.Info:output_type -> bridgerpc.InfoResponse
-	13, // 12: bridgerpc.Bridge.SetRate:output_type -> bridgerpc.SetRateResponse
-	8,  // 13: bridgerpc.Bridge.ExportSha256Seed:output_type -> bridgerpc.ExportSha256SeedResponse
-	8,  // [8:14] is the sub-list for method output_type
-	2,  // [2:8] is the sub-list for method input_type
+	5,  // 4: bridgerpc.Bridge.Status:input_type -> bridgerpc.StatusRequest
+	10, // 5: bridgerpc.Bridge.Info:input_type -> bridgerpc.InfoRequest
+	13, // 6: bridgerpc.Bridge.SetRate:input_type -> bridgerpc.SetRateRequest
+	8,  // 7: bridgerpc.Bridge.ExportSha256Seed:input_type -> bridgerpc.ExportSha256SeedRequest
+	3,  // 8: bridgerpc.Bridge.ResolveSwap:input_type -> bridgerpc.ResolveSwapRequest
+	1,  // 9: bridgerpc.Bridge.Quote:output_type -> bridgerpc.QuoteResponse
+	4,  // 10: bridgerpc.Bridge.LookupSwap:output_type -> bridgerpc.Swap
+	6,  // 11: bridgerpc.Bridge.Status:output_type -> bridgerpc.StatusResponse
+	12, // 12: bridgerpc.Bridge.Info:output_type -> bridgerpc.InfoResponse
+	14, // 13: bridgerpc.Bridge.SetRate:output_type -> bridgerpc.SetRateResponse
+	9,  // 14: bridgerpc.Bridge.ExportSha256Seed:output_type -> bridgerpc.ExportSha256SeedResponse
+	4,  // 15: bridgerpc.Bridge.ResolveSwap:output_type -> bridgerpc.Swap
+	9,  // [9:16] is the sub-list for method output_type
+	2,  // [2:9] is the sub-list for method input_type
 	2,  // [2:2] is the sub-list for extension type_name
 	2,  // [2:2] is the sub-list for extension extendee
 	0,  // [0:2] is the sub-list for field type_name
@@ -1328,7 +1402,7 @@ func file_bridgerpc_bridge_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_bridgerpc_bridge_proto_rawDesc), len(file_bridgerpc_bridge_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   14,
+			NumMessages:   15,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -167,6 +167,10 @@ type service struct {
 	stoppedMu sync.Mutex
 	stopped   map[node.Hash]string
 
+	// resolveMu lets one operator's resolve decide a stopped swap at a
+	// time; see resolve.
+	resolveMu sync.Mutex
+
 	// sides holds whichever directions are enabled, in the order a quote
 	// request tries them.
 	sides []*side

@@ -98,6 +98,20 @@ var (
 			Entity: "macaroon",
 			Action: "generate",
 		}},
+		// Resolving a stopped swap settles or cancels a payer's held
+		// payment on the operator's word that the paying node's
+		// records are whole, so it is the operator's alone, as the
+		// rate is.
+		"/bridgerpc.Bridge/ResolveSwap": {{
+			Entity: "offchain",
+			Action: "write",
+		}, {
+			Entity: "invoices",
+			Action: "write",
+		}, {
+			Entity: "macaroon",
+			Action: "generate",
+		}},
 	}
 )
 
@@ -1076,6 +1090,11 @@ func (s *Server) LookupSwap(ctx context.Context, req *LookupSwapRequest) (
 		return nil, notFound
 	}
 
+	return swapMessage(rec), nil
+}
+
+// swapMessage is what the API says about a swap's record.
+func swapMessage(rec store.Record) *Swap {
 	out := &Swap{
 		Hash:         rec.Hash[:],
 		State:        rec.State.String(),
@@ -1089,7 +1108,51 @@ func (s *Server) LookupSwap(ctx context.Context, req *LookupSwapRequest) (
 		out.Preimage = rec.Preimage[:]
 	}
 
-	return out, nil
+	return out
+}
+
+// ResolveSwap decides a swap the bridge stopped in paying for the operator, by
+// asking the paying node again what became of the payment (see
+// service.resolve).
+func (s *Server) ResolveSwap(ctx context.Context, req *ResolveSwapRequest) (
+	*Swap, error) {
+
+	// While draining too: a stopped swap is what keeps a drain going.
+	svc := s.service()
+	if (!s.cfg.Enabled && !s.draining) || svc == nil {
+		return nil, s.notServing()
+	}
+	if len(req.GetHash()) != len(node.Hash{}) {
+		return nil, coded(codes.InvalidArgument, "invalid_request",
+			fmt.Sprintf("the hash must be %d bytes, got %d",
+				len(node.Hash{}), len(req.GetHash())))
+	}
+
+	var hash node.Hash
+	copy(hash[:], req.GetHash())
+
+	rec, err := svc.resolve(ctx, hash)
+	switch {
+	case err == nil:
+		return swapMessage(rec), nil
+
+	case errors.Is(err, store.ErrNotFound):
+		return nil, coded(codes.NotFound, "not_found",
+			fmt.Sprintf("no swap with hash %x", hash))
+
+	case errors.Is(err, errNotStopped):
+		return nil, coded(codes.FailedPrecondition, "not_stopped",
+			err.Error()+"; resolve is for a swap needs_operator "+
+				"lists as stopped while paying")
+
+	case errors.Is(err, errStillInFlight):
+		return nil, coded(codes.FailedPrecondition, "in_flight",
+			"the paying node says the payment is still in flight; "+
+				"it may yet succeed or fail, so the swap is left "+
+				"as it is. Try again once it has resolved")
+	}
+
+	return nil, coded(codes.Unavailable, "unavailable", err.Error())
 }
 
 // Status reports whether this node is in a position to serve swaps.

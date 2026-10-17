@@ -106,6 +106,39 @@
         ]
       }
     },
+    "/v2/bridge/resolve": {
+      "post": {
+        "summary": "lncli: `bridge resolve`\nResolveSwap decides a swap the bridge stopped in paying for the operator,\nby asking the paying node again what became of the payment. None or\nfailed: the swap fails, and the payer's held payment is cancelled, which\nrefunds them. Succeeded: the payer's payment is settled with the preimage\nand the swap is paid. Still in flight: refused, since the payment may yet\ngo either way. Only for an admin macaroon, and only for a swap listed in\nneeds_operator.",
+        "operationId": "Bridge_ResolveSwap",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/bridgerpcSwap"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/bridgerpcResolveSwapRequest"
+            }
+          }
+        ],
+        "tags": [
+          "Bridge"
+        ]
+      }
+    },
     "/v2/bridge/sha256seed": {
       "post": {
         "summary": "lncli: `bridge sha256seed`\nExportSha256Seed shows how to restore the SHA256 node this node runs for\nthe bridge, outside Lightning Fork: a 24-word aezeed phrase and the\nequivalent BIP32 root key. Neither is stored anywhere; both are derived\nfrom this node's own wallet, so the operator's one recovery phrase is\nenough. For the node Lightning Fork runs, or ran, for the bridge\n(answered in any bridge mode, since that node may still hold coins);\nonly for an admin macaroon.",
@@ -360,6 +393,16 @@
           "type": "string",
           "format": "int64",
           "description": "The deadline for paying hold_invoice, as a Unix timestamp in seconds. Pay\nit before this and the swap proceeds at the quoted rate; leave it and the\nbridge cancels the hold invoice, after which paying it fails.\n\nIt applies only while the invoice is unpaid. Once the incoming HTLC is\nlocked in the swap is no longer racing a clock in minutes, and cltv_delta\nis what bounds it."
+        }
+      }
+    },
+    "bridgerpcResolveSwapRequest": {
+      "type": "object",
+      "properties": {
+        "hash": {
+          "type": "string",
+          "format": "byte",
+          "description": "The payment hash of the swap to decide."
         }
       }
     },

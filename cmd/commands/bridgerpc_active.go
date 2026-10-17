@@ -36,6 +36,7 @@ func bridgeCommands() []cli.Command {
 				bridgeSetRateCommand,
 				bridgeQuoteCommand,
 				bridgeSwapCommand,
+				bridgeResolveCommand,
 				bridgeCodeCommand,
 				bridgeSha256SeedCommand,
 			},
@@ -201,6 +202,46 @@ var bridgeSwapCommand = cli.Command{
 
 		resp, err := client.LookupSwap(getContext(),
 			&bridgerpc.LookupSwapRequest{Hash: hash})
+		if err != nil {
+			return err
+		}
+		printRespJSON(resp)
+
+		return nil
+	}),
+}
+
+var bridgeResolveCommand = cli.Command{
+	Name:      "resolve",
+	Usage:     "Decide a swap the bridge stopped while paying.",
+	ArgsUsage: "payment_hash",
+	Description: `
+	For a swap 'lncli bridge status' lists in needs_operator as stopped
+	while paying: the bridge started its payment, and the paying node has
+	no record of it. That almost always means the payment never left, but
+	the bridge cannot rule out a paying node whose database was restored
+	from a backup, or whose payments were deleted by hand. Rule those out
+	first, then run this.
+
+	It asks the paying node again. No record, or failed: the swap fails
+	and the payer's held payment is cancelled, which refunds them.
+	Succeeded: the payer's payment is settled with the preimage. Still in
+	flight: refused, and the swap is left as it is. Needs an admin
+	macaroon.`,
+	Action: actionDecorator(func(ctx *cli.Context) error {
+		if ctx.NArg() != 1 {
+			return cli.ShowCommandHelp(ctx, "resolve")
+		}
+		hash, err := hex.DecodeString(ctx.Args().First())
+		if err != nil {
+			return fmt.Errorf("the payment hash must be hex: %w", err)
+		}
+
+		client, cleanUp := getBridgeClient(ctx)
+		defer cleanUp()
+
+		resp, err := client.ResolveSwap(getContext(),
+			&bridgerpc.ResolveSwapRequest{Hash: hash})
 		if err != nil {
 			return err
 		}

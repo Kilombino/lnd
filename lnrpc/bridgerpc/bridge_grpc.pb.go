@@ -19,47 +19,56 @@ const _ = grpc.SupportPackageIsVersion7
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type BridgeClient interface {
 	// lncli: `bridge quote`
-	// Quote asks what a swap would cost and creates the hold invoice to pay for
-	// it. Which direction the swap runs is worked out by asking both nodes to
-	// decode the invoice, not by reading its prefix here.
+	//Quote asks what a swap would cost and creates the hold invoice to pay for
+	//it. Which direction the swap runs is worked out by asking both nodes to
+	//decode the invoice, not by reading its prefix here.
 	//
-	// A quote reserves nothing until the returned hold invoice is paid, but it
-	// does fix a rate until expires_at.
+	//A quote reserves nothing until the returned hold invoice is paid, but it
+	//does fix a rate until expires_at.
 	Quote(ctx context.Context, in *QuoteRequest, opts ...grpc.CallOption) (*QuoteResponse, error)
 	// lncli: `bridge swap`
-	// LookupSwap reports what the bridge believes about a swap it has quoted,
-	// including the preimage once there is one, which is the payer's proof that
-	// the destination was paid.
+	//LookupSwap reports what the bridge believes about a swap it has quoted,
+	//including the preimage once there is one, which is the payer's proof that
+	//the destination was paid.
 	LookupSwap(ctx context.Context, in *LookupSwapRequest, opts ...grpc.CallOption) (*Swap, error)
 	// lncli: `bridge status`
-	// Status reports whether this node is in a position to serve swaps: which
-	// directions are enabled, whether both chains can be measured, whether a
-	// usable price is available, and how many swaps are in flight.
+	//Status reports whether this node is in a position to serve swaps: which
+	//directions are enabled, whether both chains can be measured, whether a
+	//usable price is available, and how many swaps are in flight.
 	//
-	// It answers while the bridge is refusing everything, which is the case it
-	// exists for.
+	//It answers while the bridge is refusing everything, which is the case it
+	//exists for.
 	Status(ctx context.Context, in *StatusRequest, opts ...grpc.CallOption) (*StatusResponse, error)
 	// lncli: `bridge info`
-	// Info reports what the bridge would charge now, per direction, without
-	// creating or reserving anything. It is the call a payer makes to show a
-	// price before the user commits, so it is safe to hand to participants.
+	//Info reports what the bridge would charge now, per direction, without
+	//creating or reserving anything. It is the call a payer makes to show a
+	//price before the user commits, so it is safe to hand to participants.
 	Info(ctx context.Context, in *InfoRequest, opts ...grpc.CallOption) (*InfoResponse, error)
 	// lncli: `bridge setrate`
-	// SetRate changes the rate the bridge trades at, without a restart. The rate
-	// is kept across restarts and stamped with when it was set; once it is older
-	// than the configured limit the bridge refuses to quote until it is set
-	// again, because a rate nobody has looked at in a moving market is a loss
-	// waiting to be taken.
+	//SetRate changes the rate the bridge trades at, without a restart, on a
+	//test network trading at a fixed rate (rate source fixed); following the
+	//market, which mainnet always does, it is refused. The rate is kept across
+	//restarts and stamped with when it was set; once it is older than the
+	//configured limit the bridge refuses to quote until it is set again.
 	SetRate(ctx context.Context, in *SetRateRequest, opts ...grpc.CallOption) (*SetRateResponse, error)
 	// lncli: `bridge sha256seed`
-	// ExportSha256Seed shows how to restore the SHA256 node this node runs for
-	// the bridge, outside Lightning Fork: a 24-word aezeed phrase and the
-	// equivalent BIP32 root key. Neither is stored anywhere; both are derived
-	// from this node's own wallet, so the operator's one recovery phrase is
-	// enough. For the node Lightning Fork runs, or ran, for the bridge
-	// (answered in any bridge mode, since that node may still hold coins);
-	// only for an admin macaroon.
+	//ExportSha256Seed shows how to restore the SHA256 node this node runs for
+	//the bridge, outside Lightning Fork: a 24-word aezeed phrase and the
+	//equivalent BIP32 root key. Neither is stored anywhere; both are derived
+	//from this node's own wallet, so the operator's one recovery phrase is
+	//enough. For the node Lightning Fork runs, or ran, for the bridge
+	//(answered in any bridge mode, since that node may still hold coins);
+	//only for an admin macaroon.
 	ExportSha256Seed(ctx context.Context, in *ExportSha256SeedRequest, opts ...grpc.CallOption) (*ExportSha256SeedResponse, error)
+	// lncli: `bridge resolve`
+	//ResolveSwap decides a swap the bridge stopped in paying for the operator,
+	//by asking the paying node again what became of the payment. None or
+	//failed: the swap fails, and the payer's held payment is cancelled, which
+	//refunds them. Succeeded: the payer's payment is settled with the preimage
+	//and the swap is paid. Still in flight: refused, since the payment may yet
+	//go either way. Only for an admin macaroon, and only for a swap listed in
+	//needs_operator.
+	ResolveSwap(ctx context.Context, in *ResolveSwapRequest, opts ...grpc.CallOption) (*Swap, error)
 }
 
 type bridgeClient struct {
@@ -124,52 +133,70 @@ func (c *bridgeClient) ExportSha256Seed(ctx context.Context, in *ExportSha256See
 	return out, nil
 }
 
+func (c *bridgeClient) ResolveSwap(ctx context.Context, in *ResolveSwapRequest, opts ...grpc.CallOption) (*Swap, error) {
+	out := new(Swap)
+	err := c.cc.Invoke(ctx, "/bridgerpc.Bridge/ResolveSwap", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // BridgeServer is the server API for Bridge service.
 // All implementations must embed UnimplementedBridgeServer
 // for forward compatibility
 type BridgeServer interface {
 	// lncli: `bridge quote`
-	// Quote asks what a swap would cost and creates the hold invoice to pay for
-	// it. Which direction the swap runs is worked out by asking both nodes to
-	// decode the invoice, not by reading its prefix here.
+	//Quote asks what a swap would cost and creates the hold invoice to pay for
+	//it. Which direction the swap runs is worked out by asking both nodes to
+	//decode the invoice, not by reading its prefix here.
 	//
-	// A quote reserves nothing until the returned hold invoice is paid, but it
-	// does fix a rate until expires_at.
+	//A quote reserves nothing until the returned hold invoice is paid, but it
+	//does fix a rate until expires_at.
 	Quote(context.Context, *QuoteRequest) (*QuoteResponse, error)
 	// lncli: `bridge swap`
-	// LookupSwap reports what the bridge believes about a swap it has quoted,
-	// including the preimage once there is one, which is the payer's proof that
-	// the destination was paid.
+	//LookupSwap reports what the bridge believes about a swap it has quoted,
+	//including the preimage once there is one, which is the payer's proof that
+	//the destination was paid.
 	LookupSwap(context.Context, *LookupSwapRequest) (*Swap, error)
 	// lncli: `bridge status`
-	// Status reports whether this node is in a position to serve swaps: which
-	// directions are enabled, whether both chains can be measured, whether a
-	// usable price is available, and how many swaps are in flight.
+	//Status reports whether this node is in a position to serve swaps: which
+	//directions are enabled, whether both chains can be measured, whether a
+	//usable price is available, and how many swaps are in flight.
 	//
-	// It answers while the bridge is refusing everything, which is the case it
-	// exists for.
+	//It answers while the bridge is refusing everything, which is the case it
+	//exists for.
 	Status(context.Context, *StatusRequest) (*StatusResponse, error)
 	// lncli: `bridge info`
-	// Info reports what the bridge would charge now, per direction, without
-	// creating or reserving anything. It is the call a payer makes to show a
-	// price before the user commits, so it is safe to hand to participants.
+	//Info reports what the bridge would charge now, per direction, without
+	//creating or reserving anything. It is the call a payer makes to show a
+	//price before the user commits, so it is safe to hand to participants.
 	Info(context.Context, *InfoRequest) (*InfoResponse, error)
 	// lncli: `bridge setrate`
-	// SetRate changes the rate the bridge trades at, without a restart. The rate
-	// is kept across restarts and stamped with when it was set; once it is older
-	// than the configured limit the bridge refuses to quote until it is set
-	// again, because a rate nobody has looked at in a moving market is a loss
-	// waiting to be taken.
+	//SetRate changes the rate the bridge trades at, without a restart, on a
+	//test network trading at a fixed rate (rate source fixed); following the
+	//market, which mainnet always does, it is refused. The rate is kept across
+	//restarts and stamped with when it was set; once it is older than the
+	//configured limit the bridge refuses to quote until it is set again.
 	SetRate(context.Context, *SetRateRequest) (*SetRateResponse, error)
 	// lncli: `bridge sha256seed`
-	// ExportSha256Seed shows how to restore the SHA256 node this node runs for
-	// the bridge, outside Lightning Fork: a 24-word aezeed phrase and the
-	// equivalent BIP32 root key. Neither is stored anywhere; both are derived
-	// from this node's own wallet, so the operator's one recovery phrase is
-	// enough. For the node Lightning Fork runs, or ran, for the bridge
-	// (answered in any bridge mode, since that node may still hold coins);
-	// only for an admin macaroon.
+	//ExportSha256Seed shows how to restore the SHA256 node this node runs for
+	//the bridge, outside Lightning Fork: a 24-word aezeed phrase and the
+	//equivalent BIP32 root key. Neither is stored anywhere; both are derived
+	//from this node's own wallet, so the operator's one recovery phrase is
+	//enough. For the node Lightning Fork runs, or ran, for the bridge
+	//(answered in any bridge mode, since that node may still hold coins);
+	//only for an admin macaroon.
 	ExportSha256Seed(context.Context, *ExportSha256SeedRequest) (*ExportSha256SeedResponse, error)
+	// lncli: `bridge resolve`
+	//ResolveSwap decides a swap the bridge stopped in paying for the operator,
+	//by asking the paying node again what became of the payment. None or
+	//failed: the swap fails, and the payer's held payment is cancelled, which
+	//refunds them. Succeeded: the payer's payment is settled with the preimage
+	//and the swap is paid. Still in flight: refused, since the payment may yet
+	//go either way. Only for an admin macaroon, and only for a swap listed in
+	//needs_operator.
+	ResolveSwap(context.Context, *ResolveSwapRequest) (*Swap, error)
 	mustEmbedUnimplementedBridgeServer()
 }
 
@@ -194,6 +221,9 @@ func (UnimplementedBridgeServer) SetRate(context.Context, *SetRateRequest) (*Set
 }
 func (UnimplementedBridgeServer) ExportSha256Seed(context.Context, *ExportSha256SeedRequest) (*ExportSha256SeedResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ExportSha256Seed not implemented")
+}
+func (UnimplementedBridgeServer) ResolveSwap(context.Context, *ResolveSwapRequest) (*Swap, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ResolveSwap not implemented")
 }
 func (UnimplementedBridgeServer) mustEmbedUnimplementedBridgeServer() {}
 
@@ -316,6 +346,24 @@ func _Bridge_ExportSha256Seed_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Bridge_ResolveSwap_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResolveSwapRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(BridgeServer).ResolveSwap(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/bridgerpc.Bridge/ResolveSwap",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(BridgeServer).ResolveSwap(ctx, req.(*ResolveSwapRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Bridge_ServiceDesc is the grpc.ServiceDesc for Bridge service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -346,6 +394,10 @@ var Bridge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ExportSha256Seed",
 			Handler:    _Bridge_ExportSha256Seed_Handler,
+		},
+		{
+			MethodName: "ResolveSwap",
+			Handler:    _Bridge_ResolveSwap_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

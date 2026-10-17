@@ -19,3 +19,6 @@ http:
     - selector: bridgerpc.Bridge.ExportSha256Seed
       post: "/v2/bridge/sha256seed"
       body: "*"
+    - selector: bridgerpc.Bridge.ResolveSwap
+      post: "/v2/bridge/resolve"
+      body: "*"

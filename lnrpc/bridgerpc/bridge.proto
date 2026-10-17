@@ -84,6 +84,17 @@ service Bridge {
     */
     rpc ExportSha256Seed (ExportSha256SeedRequest)
         returns (ExportSha256SeedResponse);
+
+    /* lncli: `bridge resolve`
+    ResolveSwap decides a swap the bridge stopped in paying for the operator,
+    by asking the paying node again what became of the payment. None or
+    failed: the swap fails, and the payer's held payment is cancelled, which
+    refunds them. Succeeded: the payer's payment is settled with the preimage
+    and the swap is paid. Still in flight: refused, since the payment may yet
+    go either way. Only for an admin macaroon, and only for a swap listed in
+    needs_operator.
+    */
+    rpc ResolveSwap (ResolveSwapRequest) returns (Swap);
 }
 
 message QuoteRequest {
@@ -144,6 +155,11 @@ message QuoteResponse {
 
 message LookupSwapRequest {
     // The payment hash the quote returned.
+    bytes hash = 1;
+}
+
+message ResolveSwapRequest {
+    // The payment hash of the swap to decide.
     bytes hash = 1;
 }
 
