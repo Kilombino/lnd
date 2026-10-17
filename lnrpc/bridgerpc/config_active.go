@@ -68,7 +68,7 @@ type Config struct {
 	SHA256TLSCertPath string `long:"sha256.tlscertpath" description:"Path to the SHA256 node's TLS certificate."`
 
 	// SHA256MacaroonPath is a macaroon for that node.
-	SHA256MacaroonPath string `long:"sha256.macaroonpath" description:"Path to a macaroon for the SHA256 node: its admin.macaroon, or one with info and onchain read, invoices, and offchain read and write."`
+	SHA256MacaroonPath string `long:"sha256.macaroonpath" description:"Path to a macaroon for the SHA256 node: one baked with info and onchain read and invoices and offchain read and write (see docs/bridge.md), or its admin.macaroon."`
 
 	// Supervised says the SHA256 node is the one this node runs for the
 	// operator, rather than one they already had.

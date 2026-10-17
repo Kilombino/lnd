@@ -24,8 +24,8 @@ on.
     SHA256 chain you already run and starts empty. See
     [bridge-sha256-node.md](bridge-sha256-node.md); or
   - **one you already run**: a stock lnd (v0.21.3-beta or later) with the
-    `chainrpc` sub-server (release builds have it), its admin macaroon and
-    TLS certificate.
+    `chainrpc` sub-server (release builds have it), a macaroon baked for the
+    bridge (below) and its TLS certificate.
 
 ## Turning it on
 
@@ -44,14 +44,24 @@ start a stock lnd once
 --wallet-unlock-allow-create`, its gRPC on `127.0.0.1:10019` (or name it with
 `bridgerpc.sha256.rpchost`), against your full node on the SHA256 chain.
 
-With an LND you already run:
+With an LND you already run, bake the bridge a macaroon on that node rather
+than giving it the admin one:
+
+```
+lncli bakemacaroon --save_to=/path/to/sha256-node/bridge.macaroon \
+    info:read onchain:read invoices:read invoices:write offchain:read offchain:write
+```
+
+These cover every call the bridge makes there. `offchain:write` is what paying
+needs, and it can still spend that node's channel funds, so keep the file as
+carefully as an admin macaroon. Then:
 
 ```
 bridgerpc.enabled=true
 bridgerpc.tosha256=true
 bridgerpc.sha256.rpchost=10.0.0.5:10009
 bridgerpc.sha256.tlscertpath=/path/to/sha256-node/tls.cert
-bridgerpc.sha256.macaroonpath=/path/to/sha256-node/admin.macaroon
+bridgerpc.sha256.macaroonpath=/path/to/sha256-node/bridge.macaroon
 ```
 
 Either way the bridge trades at the market's rate, read live (below), and
@@ -208,6 +218,11 @@ them nothing, which is why the first one matters. Your admin macaroon is not
 limited. Any other macaroon of this node's own (one you baked for an app, say)
 is counted as one participant, all of them together.
 
+A participant code is one payer's credential. Everyone holding it shares its
+limits (2 unpaid quotes, 4 swaps in progress, 6 quotes a minute), so one
+visitor can use them up for all. Don't publish a code; give each person or app
+its own.
+
 The calls a participant's wallet makes, the checks it must run before paying,
 and the refusal codes it can receive are described in `docs/payer-api.md` in
 the `lightning-fork-bridge` repository.
@@ -217,9 +232,12 @@ the `lightning-fork-bridge` repository.
 The bridge keeps two files beside each other, by default under
 `bridge/` in the network directory:
 
-- `swaps.journal` records every swap in flight, including what was paid and
-  the preimages that claim it. Losing it while a swap is running loses the
-  record of an HTLC that is still out there.
+- `swaps.journal` records every swap, including what was paid and the
+  preimages that claim it. Losing it while a swap is running loses the
+  record of an HTLC that is still out there. Every hour it is rewritten with
+  one line per swap: each finished swap keeps its last state, which is what
+  lets the bridge tell whether an invoice it has seen before may be quoted
+  again.
 - `rate.json` is the rate in force and when it was set.
 
 Back up the SHA256 node's channels as you would any other node's.

@@ -475,12 +475,14 @@ func (s *service) backfill(ctx context.Context) {
 	}
 }
 
-// DefaultCompactInterval is how often the journal is rewritten without the
-// swaps that have finished.
+// DefaultCompactInterval is how often the journal is rewritten with one line
+// per swap.
 const DefaultCompactInterval = time.Hour
 
-// compact rewrites the journal without the swaps that have finished, until ctx
-// ends.
+// compact rewrites the journal with one line per swap, until ctx ends: the
+// latest record of each, finished or not. A finished swap keeps its last
+// state, which is how a later quote for the same hash is told whether it may
+// go ahead, so it is the history before that state that is dropped.
 //
 // The journal is append-only, so every state a swap passes through is another
 // line, and a node that runs for months replays all of them at startup.
