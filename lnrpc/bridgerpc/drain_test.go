@@ -83,7 +83,9 @@ func TestAnOffBridgeDrainsWhatIsUnfinished(t *testing.T) {
 	status, err := srv.Status(context.Background(), &StatusRequest{})
 	require.NoError(t, err)
 	require.False(t, status.Enabled)
-	require.Contains(t, status.Refusals[len(status.Refusals)-1],
+	// Not necessarily the last: the first try at the SHA256 node may
+	// already have failed, and that is said after it.
+	require.Contains(t, strings.Join(status.Refusals, "; "),
 		"finishing the swaps already under way")
 	_, err = srv.Quote(context.Background(), &QuoteRequest{Invoice: "x"})
 	require.Error(t, err, "nothing is quoted while draining")
