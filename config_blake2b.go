@@ -44,16 +44,19 @@ func applyBlake2bChainConfig(cfg *Config) error {
 		// It ends up in btcd's int32 heights: a value past that would
 		// turn negative there and fail with a misleading message.
 		if cfg.Bitcoin.Blake2bActivationHeight > math.MaxInt32 {
-			return fmt.Errorf("bitcoin.blake2b-activation-height %d is "+
-				"out of range", cfg.Bitcoin.Blake2bActivationHeight)
+			return fmt.Errorf("bitcoin.blake2b-activation-height "+
+				"%d is out of range",
+				cfg.Bitcoin.Blake2bActivationHeight)
 		}
-		params.Blake2bActivationHeight = cfg.Bitcoin.Blake2bActivationHeight
+		height := cfg.Bitcoin.Blake2bActivationHeight
+		params.Blake2bActivationHeight = height
 
-		// The light client validates BLAKE2b proof of work itself from the
-		// btcd parameters, so they must carry this run's height too. A copy,
-		// so the package-level parameters stay as shipped.
+		// The light client validates BLAKE2b proof of work itself from
+		// the btcd parameters, so they must carry this run's height
+		// too. A copy, so the package-level parameters stay as
+		// shipped.
 		p := *params.Params
-		p.Blake2bHeight = int32(cfg.Bitcoin.Blake2bActivationHeight)
+		p.Blake2bHeight = int32(height)
 		if p.Blake2bTargetShift == 0 {
 			p.Blake2bTargetShift = blake2bDefaultTargetShift
 		}
@@ -68,7 +71,9 @@ func applyBlake2bChainConfig(cfg *Config) error {
 		params.Blake2bActivationHeight == 0 &&
 		params.Params.Blake2bPowDeployed() {
 
-		params.Blake2bActivationHeight = uint32(params.Params.Blake2bHeight)
+		params.Blake2bActivationHeight = uint32(
+			params.Params.Blake2bHeight,
+		)
 	}
 
 	if cfg.Bitcoin.ChainHashOverride != "" {
@@ -176,9 +181,9 @@ func checkNeutrinoBlake2b(cfg *Config) error {
 		cfg.NeutrinoMode.FilterHeadersSource != "" {
 
 		return fmt.Errorf("neutrino.blockheaderssource and " +
-			"neutrino.filterheaderssource are not supported on the " +
-			"Bitcoin BLAKE2b chain: the import reads 80-byte headers " +
-			"only")
+			"neutrino.filterheaderssource are not supported on " +
+			"the Bitcoin BLAKE2b chain: the import reads 80-byte " +
+			"headers only")
 	}
 
 	// The same rule chainreg applies when it builds the fee estimator, but
@@ -190,15 +195,18 @@ func checkNeutrinoBlake2b(cfg *Config) error {
 			"neutrino on mainnet")
 	}
 
-	if cfg.Bitcoin.IsLocalNetwork() || len(cfg.NeutrinoMode.ConnectPeers) > 0 {
+	if cfg.Bitcoin.IsLocalNetwork() ||
+		len(cfg.NeutrinoMode.ConnectPeers) > 0 {
+
 		return nil
 	}
 	if len(cfg.NeutrinoMode.AddPeers) == 0 {
 		return fmt.Errorf("bitcoin.node=neutrino on %s needs "+
 			"neutrino.connect: the DNS seeds return nodes on the "+
-			"SHA256d chain; name Bitcoin Knots nodes on the BLAKE2b "+
-			"chain with blockfilterindex=1 and peerblockfilters=1, "+
-			"ideally your own", cfg.ActiveNetParams.Name)
+			"SHA256d chain; name Bitcoin Knots nodes on the "+
+			"BLAKE2b chain with blockfilterindex=1 and "+
+			"peerblockfilters=1, ideally your own",
+			cfg.ActiveNetParams.Name)
 	}
 	ltndLog.Warnf("neutrino.addpeer without neutrino.connect: peers from "+
 		"the DNS seeds, almost all on the SHA256d chain, are dialled "+

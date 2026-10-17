@@ -159,9 +159,12 @@ func TestBackendChoicesRefused(t *testing.T) {
 	// bitcoind and neutrino are accepted by the backend switch; whatever
 	// fails later (RPC credentials or peers are not configured here) must
 	// not be that message.
-	for _, node := range []string{bitcoindBackendName, neutrinoBackendName} {
+	backends := []string{bitcoindBackendName, neutrinoBackendName}
+	for _, node := range backends {
 		if err := validate(t, node); err != nil {
-			require.NotContains(t, err.Error(), "not supported", node)
+			require.NotContains(
+				t, err.Error(), "not supported", node,
+			)
 		}
 	}
 }
@@ -271,7 +274,9 @@ func TestPeerNetworksOptionsThatContradict(t *testing.T) {
 func TestNeutrinoBlake2bParams(t *testing.T) {
 	t.Run("mainnet", func(t *testing.T) {
 		cfg := blake2bTestConfig(t, chainreg.BitcoinMainNetParams,
-			func(c *Config) { c.Bitcoin.Node = neutrinoBackendName })
+			func(c *Config) {
+				c.Bitcoin.Node = neutrinoBackendName
+			})
 		require.NoError(t, applyBlake2bChainConfig(cfg))
 		require.Equal(t,
 			int32(cfg.ActiveNetParams.Blake2bActivationHeight),
@@ -309,10 +314,13 @@ func TestNeutrinoNeedsHeightOnLocalNetworks(t *testing.T) {
 			fileParser := flags.NewParser(&cfg, flags.Default)
 			flagParser := flags.NewParser(&cfg, flags.Default)
 			_, err := ValidateConfig(
-				cfg, signal.Interceptor{}, fileParser, flagParser,
+				cfg, signal.Interceptor{}, fileParser,
+				flagParser,
 			)
 			require.Error(t, err)
-			require.Contains(t, err.Error(), "blake2b-activation-height")
+			require.Contains(
+				t, err.Error(), "blake2b-activation-height",
+			)
 		})
 	}
 }
@@ -324,7 +332,9 @@ func TestNeutrinoTestnet4Height(t *testing.T) {
 	cfg := blake2bTestConfig(t, chainreg.BitcoinTestNet4Params,
 		func(c *Config) { c.Bitcoin.Node = neutrinoBackendName })
 	require.NoError(t, applyBlake2bChainConfig(cfg))
-	require.EqualValues(t, 150308, cfg.ActiveNetParams.Blake2bActivationHeight)
+	require.EqualValues(
+		t, 150308, cfg.ActiveNetParams.Blake2bActivationHeight,
+	)
 
 	cfg = blake2bTestConfig(t, chainreg.BitcoinRegTestNetParams,
 		func(c *Config) {

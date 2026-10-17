@@ -1830,7 +1830,9 @@ func initNeutrinoBackend(ctx context.Context, cfg *Config, chainDir string,
 		Database: db,
 		// With a checkpoint at the BLAKE2b activation block where it
 		// is pinned (mainnet); see chainreg.NeutrinoChainParams.
-		ChainParams:  *chainreg.NeutrinoChainParams(cfg.ActiveNetParams),
+		ChainParams: *chainreg.NeutrinoChainParams(
+			cfg.ActiveNetParams,
+		),
 		AddPeers:     cfg.NeutrinoMode.AddPeers,
 		ConnectPeers: cfg.NeutrinoMode.ConnectPeers,
 		Dialer: func(addr net.Addr) (net.Conn, error) {
