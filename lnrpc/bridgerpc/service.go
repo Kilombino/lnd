@@ -253,7 +253,7 @@ func newServiceWith(cfg *Config, local *Local, remote *Remote,
 	}
 
 	var err error
-	if s.journal, err = store.Open(cfg.Journal); err != nil {
+	if s.journal, err = openJournal(cfg.Journal); err != nil {
 		return nil, fmt.Errorf("opening the swap journal %s: %w",
 			cfg.Journal, err)
 	}

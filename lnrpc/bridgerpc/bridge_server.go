@@ -382,7 +382,7 @@ func unfinishedInJournal(path string) (int, error) {
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
 		return 0, nil
 	}
-	j, err := store.Open(path)
+	j, err := openJournal(path)
 	if err != nil {
 		return 0, err
 	}
