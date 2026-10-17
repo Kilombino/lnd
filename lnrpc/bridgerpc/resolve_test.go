@@ -6,6 +6,7 @@ package bridgerpc
 import (
 	"context"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,7 +23,9 @@ import (
 type lookupOut struct {
 	*fakeOutDecoder
 
-	pmt    node.Payment
+	pmt node.Payment
+
+	mu     sync.Mutex
 	asked  int
 	looked node.Hash
 }
@@ -30,10 +33,19 @@ type lookupOut struct {
 func (o *lookupOut) LookupPayment(_ context.Context, hash node.Hash) (
 	node.Payment, error) {
 
+	o.mu.Lock()
+	defer o.mu.Unlock()
 	o.asked++
 	o.looked = hash
 
 	return o.pmt, nil
+}
+
+func (o *lookupOut) lookups() (int, node.Hash) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	return o.asked, o.looked
 }
 
 // resolveFixture is a server whose toSHA256 swap h was stopped in paying,
@@ -106,6 +118,7 @@ func newResolveFixture(t *testing.T, pmt node.Payment) *resolveFixture {
 	for _, sd := range svc.sides {
 		if sd.name == "toSHA256" {
 			sd.out = fx.out
+			sd.runner.Driver.Out = fx.out
 		}
 	}
 
@@ -151,7 +164,8 @@ func TestResolveAPaymentTheNodeNeverRecordedRefunds(t *testing.T) {
 	got, err := fx.resolve(t)
 	require.NoError(t, err)
 	require.Equal(t, swap.Failing.String(), got.State)
-	require.Equal(t, fx.hash, fx.out.looked)
+	_, looked := fx.out.lookups()
+	require.Equal(t, fx.hash, looked)
 
 	select {
 	case h := <-fx.cancelled:
@@ -235,7 +249,8 @@ func TestResolveRefusesASwapNotStoppedInPaying(t *testing.T) {
 		require.Equal(t, codes.FailedPrecondition, status.Code(err))
 		require.Contains(t, err.Error(), "not_stopped")
 		require.Equal(t, swap.Paying, fx.state(t))
-		require.Zero(t, fx.out.asked)
+		asked, _ := fx.out.lookups()
+		require.Zero(t, asked)
 	})
 
 	t.Run("not paying", func(t *testing.T) {
