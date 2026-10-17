@@ -183,8 +183,9 @@ func checkNeutrinoBlake2b(cfg *Config) error {
 
 	// The same rule chainreg applies when it builds the fee estimator, but
 	// that runs only once the node has synced to the BLAKE2b activation
-	// height; refused here it fails at start instead.
-	if cfg.Bitcoin.MainNet && cfg.Fee.URL == "" {
+	// height; refused here it fails at start instead. The deprecated
+	// feeurl option counts too: chainreg copies it into fee.url later.
+	if cfg.Bitcoin.MainNet && cfg.Fee.URL == "" && cfg.FeeURL == "" {
 		return fmt.Errorf("--fee.url parameter required when running " +
 			"neutrino on mainnet")
 	}
