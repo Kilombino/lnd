@@ -19,6 +19,7 @@ import (
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"github.com/lightningnetwork/lnd/lnrpc"
 	"github.com/paulscode/lightning-fork-bridge/node"
+	"github.com/paulscode/lightning-fork-bridge/quote"
 	"github.com/paulscode/lightning-fork-bridge/rate"
 	"github.com/paulscode/lightning-fork-bridge/store"
 	"google.golang.org/grpc"
@@ -977,6 +978,10 @@ func (s *Server) notServing() error {
 		"again every minute; lncli bridge status says why")
 }
 
+// maxInvoiceLength is the longest payment request zpay32 decodes, which a
+// payment request on either chain is decoded with.
+const maxInvoiceLength = 7089
+
 // Quote asks what a swap would cost and creates the hold invoice to pay for it.
 //
 // The swap begins being driven before this returns. That is deliberate: the
@@ -1002,6 +1007,18 @@ func (s *Server) Quote(ctx context.Context, req *QuoteRequest) (*QuoteResponse,
 	if req.GetInvoice() == "" {
 		return nil, coded(codes.InvalidArgument, "invalid_request",
 			"no invoice to pay")
+	}
+
+	// Before anything reads it: routing a quote has both nodes decode the
+	// invoice, and a participant's per-minute limit is counted only after
+	// that, so this is the one check that stops an oversized string before
+	// it costs either node anything. Refused uncounted, since refusing it
+	// here costs nothing either.
+	if len(req.GetInvoice()) > maxInvoiceLength {
+		return nil, coded(codes.InvalidArgument,
+			string(quote.CodeInvalidInvoice), fmt.Sprintf("the "+
+				"invoice is longer than any payment request "+
+				"can be (%d characters)", maxInvoiceLength))
 	}
 
 	// Read from the caller's context before it is replaced below.

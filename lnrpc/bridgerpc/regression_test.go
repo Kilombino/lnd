@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 
 	"github.com/lightningnetwork/lnd/lnrpc"
 	"github.com/lightningnetwork/lnd/lnrpc/chainrpc"
+	"github.com/lightningnetwork/lnd/zpay32"
 	"github.com/paulscode/lightning-fork-bridge/chainrate"
 	"github.com/paulscode/lightning-fork-bridge/inventory"
 	"github.com/paulscode/lightning-fork-bridge/node"
@@ -1812,5 +1814,63 @@ func TestSampleTakesOnlyASyncedTip(t *testing.T) {
 	svc.sample(context.Background())
 	if got := svc.b2bChain.Len(); got != before+1 {
 		t.Fatalf("a synced tip was not taken (%d -> %d)", before, got)
+	}
+}
+
+// countingDecoder counts how often a paying node is asked to read an invoice.
+type countingDecoder struct {
+	*fakeOutDecoder
+
+	decodes atomic.Int32
+}
+
+func (c *countingDecoder) Decode(ctx context.Context, inv string) (
+	node.Decoded, error) {
+
+	c.decodes.Add(1)
+
+	return c.fakeOutDecoder.Decode(ctx, inv)
+}
+
+// An invoice longer than any payment request can be is refused before either
+// node is asked to read it, and the limit is zpay32's own: one character more
+// than it decodes.
+func TestQuoteRefusesAnOversizedInvoiceUnread(t *testing.T) {
+	t.Parallel()
+
+	svc := sidedService(t, 10_000_000)
+	svc.ctx = context.Background()
+	var counters []*countingDecoder
+	for _, sd := range svc.sides {
+		c := &countingDecoder{fakeOutDecoder: sd.out.(*fakeOutDecoder)}
+		sd.out = c
+		counters = append(counters, c)
+	}
+	s := serverWith(t, true, &fakeNode{synced: true})
+	s.svc = svc
+
+	long := "sideA-" + strings.Repeat("q", maxInvoiceLength)
+	_, err := s.Quote(context.Background(), &QuoteRequest{Invoice: long})
+	if status.Code(err) != codes.InvalidArgument ||
+		!strings.HasPrefix(status.Convert(err).Message(),
+			string(quote.CodeInvalidInvoice)+": ") {
+
+		t.Fatalf("answered %v, wanted invalid_invoice", err)
+	}
+	for _, c := range counters {
+		if n := c.decodes.Load(); n != 0 {
+			t.Errorf("a node was asked to read it %d times", n)
+		}
+	}
+
+	_, err = zpay32.Decode(strings.Repeat("q", maxInvoiceLength+1), nil)
+	if !errors.Is(err, zpay32.ErrInvoiceTooLarge) {
+		t.Errorf("zpay32 decodes a longer invoice than %d: %v",
+			maxInvoiceLength, err)
+	}
+	_, err = zpay32.Decode(strings.Repeat("q", maxInvoiceLength), nil)
+	if errors.Is(err, zpay32.ErrInvoiceTooLarge) {
+		t.Errorf("zpay32 refuses %d characters as too large",
+			maxInvoiceLength)
 	}
 }
