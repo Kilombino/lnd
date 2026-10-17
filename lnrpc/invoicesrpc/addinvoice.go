@@ -161,12 +161,13 @@ type AddInvoiceData struct {
 	// used to assist in reaching the invoice's destination.
 	RouteHints [][]zpay32.HopHint
 
-	// Metadata is optional payment metadata (BOLT 11 field m), which BOLT 11
-	// has the payer send back with the payment. An invoice that carries it
-	// also sets the optional feature bit 49, BOLT 9's option_payment_metadata,
-	// so payers can tell it expects the metadata back; BOLT 11 itself does not
-	// require the bit. lnd#10316 proposes field 11 of AddHoldInvoiceRequest
-	// (metadata) for the same thing; the RPC uses 1000 until upstream decides.
+	// Metadata is optional payment metadata (BOLT 11 field m), which
+	// BOLT 11 has the payer send back with the payment. An invoice that
+	// carries it also sets the optional feature bit 49, BOLT 9's
+	// option_payment_metadata, so payers can tell it expects the metadata
+	// back; BOLT 11 itself does not require the bit. lnd#10316 proposes
+	// field 11 of AddHoldInvoiceRequest (metadata) for the same thing; the
+	// RPC uses 1000 until upstream decides.
 	Metadata []byte
 }
 
@@ -502,14 +503,14 @@ func AddInvoice(ctx context.Context, cfg *AddInvoiceConfig,
 	}
 	if len(invoice.Metadata) > 0 {
 		if len(invoice.Metadata) > MaxMetadataLength {
-			return nil, nil, fmt.Errorf("payment metadata too long: %d "+
-				"bytes, at most %d", len(invoice.Metadata),
-				MaxMetadataLength)
+			return nil, nil, fmt.Errorf("payment metadata too "+
+				"long: %d bytes, at most %d",
+				len(invoice.Metadata), MaxMetadataLength)
 		}
 		options = append(options, zpay32.Metadata(invoice.Metadata))
 
-		// The vector may be shared with every other invoice: set the bit on
-		// a copy.
+		// The vector may be shared with every other invoice: set the
+		// bit on a copy.
 		invoiceFeatures = invoiceFeatures.Clone()
 		invoiceFeatures.Set(lnwire.PaymentMetadataOptional)
 	}
