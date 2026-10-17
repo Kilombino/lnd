@@ -21,6 +21,7 @@ import (
 	"github.com/lightningnetwork/lnd/lntypes"
 	"github.com/lightningnetwork/lnd/lnwire"
 	paymentsdb "github.com/lightningnetwork/lnd/payments/db"
+	"github.com/lightningnetwork/lnd/routing/route"
 	"github.com/lightningnetwork/lnd/tor"
 	"github.com/lightningnetwork/lnd/zpay32"
 )
@@ -325,8 +326,26 @@ func (s *server) payBridgeInvoice(ctx context.Context,
 			bridgerpc.ErrPaymentNotSent, err)
 	}
 
-	preimage, route, err := s.chanRouter.SendPayment(ctx, intent)
-	if err != nil && !s.bridgePaymentRecorded(ctx, intent.Identifier()) {
+	recorded := func() bool {
+		return s.bridgePaymentRecorded(ctx, intent.Identifier())
+	}
+	sent := awaitBridgePayment(ctx, func() bridgeSendResult {
+		pre, rt, err := s.chanRouter.SendPayment(ctx, intent)
+
+		return bridgeSendResult{preimage: pre, route: rt, err: err}
+	}, recorded, bridgeRecordPoll)
+	if sent.left {
+		// The bridge is stopping and the payment is recorded, so the
+		// router finishes it and a lookup finds how. Waiting here
+		// would hold the stop for as long as the payee holds the HTLC.
+		srvrLog.Infof("Bridge leaving payment %x to the router while "+
+			"it stops; it is recorded, and looked up on resume",
+			intent.Identifier())
+
+		return bridgerpc.PaymentStatus{Known: true, InFlight: true}, nil
+	}
+	preimage, route, err := sent.preimage, sent.route, sent.err
+	if err != nil && !recorded() {
 		// The router writes its record before it sends anything, so a
 		// payment it holds no record of after the call has returned
 		// never left: it was refused (a blinded path it could not use,
@@ -358,6 +377,66 @@ func (s *server) payBridgeInvoice(ctx context.Context,
 	}
 
 	return status, nil
+}
+
+// bridgeRecordPoll is how often a stopping bridge asks whether its payment
+// has been recorded yet, while the router is still setting it up.
+const bridgeRecordPoll = 100 * time.Millisecond
+
+// bridgeSendResult is what sending a bridge payment came to. left is set
+// instead of the rest when the bridge stopped waiting (see awaitBridgePayment).
+type bridgeSendResult struct {
+	preimage [32]byte
+	route    *route.Route
+	err      error
+	left     bool
+}
+
+// awaitBridgePayment runs send and waits for its answer, unless ctx ends
+// first. Then it stops waiting as soon as recorded says the router holds a
+// record of the payment, and reports only that it left.
+//
+// The router waits for every HTLC it has sent to resolve, whatever its context
+// says, and a payee holding one can keep it for hours: the bridge's stop, and
+// so a rebuild, would wait as long. Once the payment is recorded, nothing
+// about it depends on this call: the router finishes it, or resumes it after
+// a restart, and the bridge's resume looks it up. Before it is recorded, the
+// call is still deciding whether to send it at all, which is quick, and its
+// answer is needed: a refusal there is a payment that never left.
+func awaitBridgePayment(ctx context.Context, send func() bridgeSendResult,
+	recorded func() bool, poll time.Duration) bridgeSendResult {
+
+	done := make(chan bridgeSendResult, 1)
+	go func() {
+		done <- send()
+	}()
+
+	select {
+	case r := <-done:
+		return r
+	case <-ctx.Done():
+	}
+
+	tick := time.NewTicker(poll)
+	defer tick.Stop()
+	for {
+		// An answer already in wins over a record: it says what a
+		// lookup would.
+		select {
+		case r := <-done:
+			return r
+		default:
+		}
+		if recorded() {
+			return bridgeSendResult{left: true}
+		}
+
+		select {
+		case r := <-done:
+			return r
+		case <-tick.C:
+		}
+	}
 }
 
 // bridgePaymentRecorded reports whether the router holds a record of a

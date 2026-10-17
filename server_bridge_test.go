@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -117,4 +118,103 @@ func TestBridgeNetGoesThroughTorForEveryTarget(t *testing.T) {
 	require.Equal(t, &tor.ProxyNet{
 		SOCKS: "127.0.0.1:9050", DNS: "dns:53", StreamIsolation: true,
 	}, got)
+}
+
+// A bridge that stops while its payment is held by the payee must not wait for
+// the HTLC: once the router has recorded the payment, the router finishes it
+// and the bridge's resume looks it up. Before that, its answer is still
+// needed, since a refusal there is a payment that never left.
+func TestBridgePaymentLeftToTheRouterOnStop(t *testing.T) {
+	const poll = time.Millisecond
+
+	t.Run("an answer before the stop is returned", func(t *testing.T) {
+		got := awaitBridgePayment(context.Background(),
+			func() bridgeSendResult {
+				return bridgeSendResult{preimage: [32]byte{1}}
+			}, func() bool { return true }, poll,
+		)
+		require.False(t, got.left)
+		require.Equal(t, [32]byte{1}, got.preimage)
+	})
+
+	t.Run("a recorded payment held by the payee", func(t *testing.T) {
+		held := make(chan struct{})
+		defer close(held)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		done := make(chan bridgeSendResult, 1)
+		go func() {
+			done <- awaitBridgePayment(ctx, func() bridgeSendResult {
+				<-held
+
+				return bridgeSendResult{}
+			}, func() bool { return true }, poll)
+		}()
+
+		select {
+		case got := <-done:
+			require.True(t, got.left)
+		case <-time.After(10 * time.Second):
+			t.Fatal("the stop waited for a held HTLC")
+		}
+	})
+
+	t.Run("a payment refused before it was recorded", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		refused := errors.New("refused")
+		release := make(chan struct{})
+		var asks atomic.Int32
+		go func() {
+			start := time.Now()
+			for asks.Load() < 3 &&
+				time.Since(start) < 10*time.Second {
+
+				time.Sleep(poll)
+			}
+			close(release)
+		}()
+
+		got := awaitBridgePayment(ctx, func() bridgeSendResult {
+			<-release
+
+			return bridgeSendResult{err: refused}
+		}, func() bool {
+			asks.Add(1)
+
+			return false
+		}, poll)
+		require.False(t, got.left)
+		require.ErrorIs(t, got.err, refused)
+	})
+
+	t.Run("a payment recorded after the stop", func(t *testing.T) {
+		held := make(chan struct{})
+		defer close(held)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		var asks atomic.Int32
+		done := make(chan bridgeSendResult, 1)
+		go func() {
+			done <- awaitBridgePayment(ctx, func() bridgeSendResult {
+				<-held
+
+				return bridgeSendResult{}
+			}, func() bool {
+				return asks.Add(1) > 3
+			}, poll)
+		}()
+
+		select {
+		case got := <-done:
+			require.True(t, got.left)
+		case <-time.After(10 * time.Second):
+			t.Fatal("the stop waited for a held HTLC")
+		}
+	})
 }
