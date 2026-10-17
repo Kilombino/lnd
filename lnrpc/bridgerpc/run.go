@@ -69,6 +69,10 @@ func (s *service) start() {
 // tearing down the invoice registry and the router underneath it, and a swap
 // still driving would find them gone mid-HTLC.
 func (s *service) stop() {
+	s.driveMu.Lock()
+	s.halted = true
+	s.driveMu.Unlock()
+
 	if s.cancel != nil {
 		s.cancel()
 	}
@@ -356,7 +360,21 @@ func (s *service) drive(sd *side, hash node.Hash) {
 	// read headroom without this swap counted against its own side.
 	s.remember(hash, sd)
 
+	// Not on a service that is stopping: stop's wait would not cover
+	// this one. The record is as far along as the nodes are, so the next
+	// service resumes the swap.
+	s.driveMu.Lock()
+	if s.halted || (s.ctx != nil && s.ctx.Err() != nil) {
+		s.driveMu.Unlock()
+		log.Infof("Bridge not driving %s swap %s: stopping, so the "+
+			"next start resumes it", sd.name,
+			hex.EncodeToString(hash[:]))
+
+		return
+	}
 	s.wg.Add(1)
+	s.driveMu.Unlock()
+
 	go func() {
 		defer s.wg.Done()
 

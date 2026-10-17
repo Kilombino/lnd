@@ -224,6 +224,15 @@ type service struct {
 
 	wg sync.WaitGroup
 
+	// driveMu orders a swap driven from a call (a quote, a resolve)
+	// against stop: stop sets halted under it before it waits, and drive
+	// adds to wg under it only while halted is not set. Without it a call
+	// straddling a stop could add to wg while stop waits on it, which the
+	// WaitGroup does not allow (it can panic), and drive a swap on a
+	// service that is going away.
+	driveMu sync.Mutex
+	halted  bool
+
 	closeOnce sync.Once
 }
 

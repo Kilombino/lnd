@@ -291,3 +291,59 @@ func TestResolveIsTheOperatorsAlone(t *testing.T) {
 	}
 	require.True(t, generate, "ResolveSwap must need macaroon:generate")
 }
+
+// A swap driven from a call that straddles a stop (a resolve, or a quote,
+// finishing while a rebuild stops the service) is left for the next start
+// rather than started: stop's wait would not cover it, and adding to the
+// WaitGroup while stop waits on it can panic.
+func TestADriveStraddlingStopIsNotStarted(t *testing.T) {
+	t.Parallel()
+
+	_, svc := measuredServer(t, 100_000_000_000)
+	svc.ctx, svc.cancel = context.WithCancel(context.Background())
+	hash := node.Hash{0x5f}
+	svc.markAlerted(hash, "raised while driving")
+
+	// A swap in flight, which stop waits for.
+	svc.wg.Add(1)
+	stopped := make(chan struct{})
+	go func() {
+		svc.stop()
+		close(stopped)
+	}()
+	<-svc.ctx.Done()
+
+	svc.drive(svc.sides[0], hash)
+	svc.wg.Done()
+	<-stopped
+
+	// A drive that ran would have forgotten the alert when it ended,
+	// before stop returned.
+	svc.stoppedMu.Lock()
+	defer svc.stoppedMu.Unlock()
+	require.Contains(t, svc.alerted, hash, "a swap was driven on a "+
+		"service that was stopping")
+}
+
+// Drives racing a stop, under -race: none is added to the WaitGroup while
+// stop waits on it.
+func TestDrivesRacingStop(t *testing.T) {
+	t.Parallel()
+
+	for i := 0; i < 10; i++ {
+		_, svc := measuredServer(t, 100_000_000_000)
+		svc.ctx, svc.cancel = context.WithCancel(context.Background())
+
+		var wg sync.WaitGroup
+		for j := 0; j < 8; j++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				svc.drive(svc.sides[j%len(svc.sides)],
+					node.Hash{byte(i), byte(j)})
+			}()
+		}
+		svc.stop()
+		wg.Wait()
+	}
+}
