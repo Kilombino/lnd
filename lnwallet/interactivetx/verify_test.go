@@ -106,6 +106,16 @@ func (sp *splice) peerWitnesses(t *testing.T, wpkhType,
 				sp.res.Tx, sigHashes, i, int64(in.Value),
 				in.PkScript, trType, sp.tr,
 			)
+		} else if wpkhType&0x1f == txscript.SigHashSingle &&
+			i >= len(sp.res.Tx.TxOut) {
+
+			// btcd refuses to sign SIGHASH_SINGLE without an output
+			// at the input's index, which is what a peer's witness
+			// can still carry; built by hand to test its refusal.
+			w, err = singleWithoutOutput(
+				sp.res.Tx, sigHashes, i, int64(in.Value),
+				in.PkScript, wpkhType, sp.wpkh,
+			)
 		} else {
 			w, err = txscript.WitnessSignature(
 				sp.res.Tx, sigHashes, i, int64(in.Value),
@@ -117,6 +127,26 @@ func (sp *splice) peerWitnesses(t *testing.T, wpkhType,
 	}
 
 	return witnesses
+}
+
+// singleWithoutOutput is a P2WPKH witness signed with a SIGHASH_SINGLE type for
+// an input with no output at its index (BIP 143 commits to an empty
+// hashOutputs then).
+func singleWithoutOutput(tx *wire.MsgTx, sigHashes *txscript.TxSigHashes,
+	idx int, amt int64, pkScript []byte, hashType txscript.SigHashType,
+	key *btcec.PrivateKey) (wire.TxWitness, error) {
+
+	hash, err := txscript.CalcWitnessSigHash(
+		pkScript, sigHashes, hashType, tx, idx, amt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	sig := ecdsa.Sign(key, hash).Serialize()
+
+	return wire.TxWitness{
+		append(sig, byte(hashType)), key.PubKey().SerializeCompressed(),
+	}, nil
 }
 
 func TestPeerWitnessesVerify(t *testing.T) {
