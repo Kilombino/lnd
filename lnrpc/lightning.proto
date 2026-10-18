@@ -1777,6 +1777,12 @@ message EstimateSpliceRequest {
     node's wallet.
     */
     string addr = 7;
+
+    /*
+    For SPLICE_IN, the only coins of the wallet the splice may spend (coin
+    control). Empty: the wallet chooses.
+    */
+    repeated OutPoint outpoints = 8;
 }
 
 message EstimateSpliceResponse {
@@ -1827,7 +1833,8 @@ message EstimateSpliceResponse {
 
     /*
     Empty when the splice is possible; otherwise why not: "insufficient_funds",
-    "immature_inputs", "below_min", "above_max_out", "fee_below_floor",
+    "immature_inputs", "unknown_coin" (an outpoint asked for isn't a coin the
+    splice can spend), "below_min", "above_max_out", "fee_below_floor",
     "reserve_on_change", "close_address_set", "node_cap", or one of
     Channel.splice_status's values.
     */
@@ -1864,6 +1871,12 @@ message SpliceChannelRequest {
     fee.
     */
     bool force_low_fee = 8;
+
+    /*
+    For SPLICE_IN, the only coins of the wallet the splice may spend (coin
+    control). Empty: the wallet chooses.
+    */
+    repeated OutPoint outpoints = 9;
 }
 
 message SpliceUpdate {
