@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/wtxmgr"
@@ -189,6 +190,50 @@ type CoinSource interface {
 
 	// FetchTx returns a wallet transaction.
 	FetchTx(chainhash.Hash) (*wire.MsgTx, error)
+}
+
+// ErrUnknownCoin is returned when a coin asked for isn't one a splice can
+// spend: not in the wallet's default account, unconfirmed, spent or leased.
+var ErrUnknownCoin = errors.New("coin not spendable by a splice")
+
+// OnlyCoins narrows coins to the ones at outpoints, for a splice that may
+// spend only those (coin control), and lowers the reserve kept for
+// fee-bumping anchor closes by what the coins left out hold: they stay in
+// the wallet, so the chosen ones needn't keep it themselves. With no
+// outpoints it returns coins and reserve as they are.
+func OnlyCoins(coins []Coin, outpoints []wire.OutPoint,
+	reserve btcutil.Amount) ([]Coin, btcutil.Amount, error) {
+
+	if len(outpoints) == 0 {
+		return coins, reserve, nil
+	}
+
+	want := make(map[wire.OutPoint]bool, len(outpoints))
+	for _, op := range outpoints {
+		if want[op] {
+			return nil, 0, fmt.Errorf("%w: %v given twice",
+				ErrUnknownCoin, op)
+		}
+		want[op] = true
+	}
+
+	var (
+		chosen []Coin
+		left   btcutil.Amount
+	)
+	for _, c := range coins {
+		if want[c.OutPoint] {
+			chosen = append(chosen, c)
+			delete(want, c.OutPoint)
+		} else {
+			left += c.Value
+		}
+	}
+	for op := range want {
+		return nil, 0, fmt.Errorf("%w: %v", ErrUnknownCoin, op)
+	}
+
+	return chosen, max(0, reserve-left), nil
 }
 
 // ListCoins returns the confirmed coins of the default account a splice can
