@@ -16,6 +16,12 @@ on.
 
 - This node, with channels on the BLAKE2b chain that payers can reach you
   through. Payers who open a channel to you have the shortest route.
+- A full node backend for this node: bitcoind (Bitcoin Knots on the BLAKE2b
+  chain) is recommended. On a neutrino light client the bridge runs only with
+  `neutrino.connect` set to your own Knots node: a light client checks no
+  transactions or scripts and believes the peers it talks to, and without
+  `neutrino.connect` those include peers it finds itself or is given with
+  `neutrino.addpeer`. The bridge refuses to start otherwise.
 - A Lightning node on the SHA256 chain, with outbound capacity on its
   channels. Either:
   - **one Lightning Fork runs for you** (`bridgerpc.sha256.supervised`): a

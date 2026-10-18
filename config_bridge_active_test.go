@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/lightningnetwork/lnd/chainreg"
+	"github.com/lightningnetwork/lnd/lncfg"
 	"github.com/lightningnetwork/lnd/lnrpc/bridgerpc"
 	"github.com/stretchr/testify/require"
 )
@@ -146,4 +147,55 @@ func TestInvoiceGCIsWarnedAbout(t *testing.T) {
 	// Not while the bridge is off.
 	sub.Enabled = false
 	require.Empty(t, bridgeInvoiceGCWarning(cfg))
+}
+
+// A bridge on a neutrino light client is refused unless neutrino.connect names
+// the node it talks to: a light client checks no transactions or scripts, and
+// takes peers from neutrino.addpeer or the network with only a warning. A
+// full node backend is unaffected, as is a disabled bridge.
+func TestTheBridgeOnNeutrinoNeedsConnect(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		node     string
+		connect  []string
+		addpeers []string
+		enabled  bool
+		ok       bool
+	}{
+		{"bitcoind", "bitcoind", nil, nil, true, true},
+		{"neutrino alone", neutrinoBackendName, nil, nil, true, false},
+		{"neutrino with addpeer", neutrinoBackendName, nil,
+			[]string{"10.0.0.2:8333"}, true, false},
+		{"neutrino with connect", neutrinoBackendName,
+			[]string{"10.0.0.2:8333"}, nil, true, true},
+		{"neutrino, bridge off", neutrinoBackendName, nil, nil, false,
+			true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			sub := &bridgerpc.Config{Enabled: c.enabled}
+			cfg, _ := bridgeTestConfig(t, sub)
+			cfg.Bitcoin = &lncfg.Chain{Node: c.node}
+			cfg.NeutrinoMode = &lncfg.Neutrino{
+				ConnectPeers: c.connect, AddPeers: c.addpeers,
+			}
+
+			err := bridgeChainBackendCheck(cfg)
+			if c.ok {
+				require.NoError(t, err)
+
+				return
+			}
+			require.ErrorIs(t, err, bridgerpc.ErrConfig)
+			require.Contains(t, err.Error(), "neutrino.connect")
+		})
+	}
+
+	// And through the bridge's startup checks.
+	sub := &bridgerpc.Config{Enabled: true, ToSHA256: true}
+	cfg, netDir := bridgeTestConfig(t, sub)
+	cfg.Bitcoin = &lncfg.Chain{Node: neutrinoBackendName}
+	cfg.NeutrinoMode = &lncfg.Neutrino{}
+	err := validateBridgeConfig(cfg, netDir)
+	require.ErrorIs(t, err, bridgerpc.ErrConfig)
+	require.Contains(t, err.Error(), "neutrino.connect")
 }

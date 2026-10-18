@@ -38,7 +38,7 @@ type Config struct {
 	// Enabled turns the bridge on. It is off by default and stays off
 	// until an operator says otherwise: a node carrying this code is not
 	// the same thing as a node offering to swap other people's money.
-	Enabled bool `long:"enabled" description:"Offer cross-chain swaps between this chain and the SHA256 chain. Requires a node there and funded channels on both sides."`
+	Enabled bool `long:"enabled" description:"Offer cross-chain swaps between this chain and the SHA256 chain. Requires a node there and funded channels on both sides. Needs a full node backend (bitcoind); on neutrino, only with neutrino.connect set to your own node."`
 
 	// SHA256RPCHost is the Lightning node on the SHA256 chain, as
 	// host:port.

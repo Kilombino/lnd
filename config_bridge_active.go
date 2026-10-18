@@ -59,6 +59,10 @@ func validateBridgeConfig(cfg *Config, networkDir string) error {
 			"set it to neoxa)", bridgerpc.ErrConfig)
 	}
 
+	if err := bridgeChainBackendCheck(cfg); err != nil {
+		return err
+	}
+
 	if msg := bridgeInvoiceGCWarning(cfg); msg != "" {
 		ltndLog.Warnf("%s", msg)
 	}
@@ -82,6 +86,35 @@ func validateBridgeConfig(cfg *Config, networkDir string) error {
 	}
 
 	return sub.Validate()
+}
+
+// bridgeChainBackendCheck refuses an enabled bridge on a light client that
+// picks its own peers.
+//
+// The bridge holds payers' HTLCs against deadlines counted in this chain's
+// blocks, and decides whether to pay out by reading them. A neutrino light
+// client checks headers and filters, not transactions or scripts, so it
+// believes what its peers serve it about anything else; and peers named with
+// neutrino.addpeer, or found on the network, are taken with only a warning.
+// With neutrino.connect it talks only to the nodes named there, which an
+// operator names because they are their own full node, and the bridge may
+// run. A full node backend (bitcoind) is what the bridge is meant for.
+func bridgeChainBackendCheck(cfg *Config) error {
+	sub := cfg.SubRPCServers.BridgeRPC
+	if !sub.Enabled || cfg.Bitcoin == nil ||
+		cfg.Bitcoin.Node != neutrinoBackendName {
+
+		return nil
+	}
+	if cfg.NeutrinoMode != nil && len(cfg.NeutrinoMode.ConnectPeers) > 0 {
+		return nil
+	}
+
+	return fmt.Errorf("%w: the bridge on a neutrino backend needs "+
+		"neutrino.connect set to your own full node: a light client "+
+		"checks no transactions or scripts and believes the peers it "+
+		"finds or is given with neutrino.addpeer. Use bitcoind, or set "+
+		"neutrino.connect to your own node", bridgerpc.ErrConfig)
 }
 
 // superviseSha256Node fills in where the supervised SHA256 node and this node's
