@@ -5517,7 +5517,8 @@ type EstimateSpliceRequest struct {
 	Addr string `protobuf:"bytes,7,opt,name=addr,proto3" json:"addr,omitempty"`
 	//
 	//For SPLICE_IN, the only coins of the wallet the splice may spend (coin
-	//control). Empty: the wallet chooses.
+	//control), at most 251. Only confirmed P2WKH and P2TR coins can be spent,
+	//never coinbase outputs. Empty: the wallet chooses.
 	Outpoints     []*OutPoint `protobuf:"bytes,8,rep,name=outpoints,proto3" json:"outpoints,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -5644,7 +5645,8 @@ type EstimateSpliceResponse struct {
 	//
 	//Empty when the splice is possible; otherwise why not: "insufficient_funds",
 	//"immature_inputs", "unknown_coin" (an outpoint asked for isn't a coin the
-	//splice can spend), "below_min", "above_max_out", "fee_below_floor",
+	//splice can spend: only confirmed P2WKH and P2TR coins, never coinbase
+	//outputs, at most 251), "below_min", "above_max_out", "fee_below_floor",
 	//"reserve_on_change", "close_address_set", "node_cap", or one of
 	//Channel.splice_status's values.
 	RefusalCode   string `protobuf:"bytes,15,opt,name=refusal_code,json=refusalCode,proto3" json:"refusal_code,omitempty"`
@@ -5811,7 +5813,8 @@ type SpliceChannelRequest struct {
 	ForceLowFee bool `protobuf:"varint,8,opt,name=force_low_fee,json=forceLowFee,proto3" json:"force_low_fee,omitempty"`
 	//
 	//For SPLICE_IN, the only coins of the wallet the splice may spend (coin
-	//control). Empty: the wallet chooses.
+	//control), at most 251. Only confirmed P2WKH and P2TR coins can be spent,
+	//never coinbase outputs. Empty: the wallet chooses.
 	Outpoints     []*OutPoint `protobuf:"bytes,9,rep,name=outpoints,proto3" json:"outpoints,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
