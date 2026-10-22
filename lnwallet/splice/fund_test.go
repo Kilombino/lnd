@@ -486,4 +486,13 @@ func TestOnlyCoins(t *testing.T) {
 		all, []wire.OutPoint{small.OutPoint, small.OutPoint}, 0,
 	)
 	require.ErrorIs(t, err, ErrUnknownCoin)
+
+	// More coins than a splice takes: refused, not quietly cut.
+	many := make([]wire.OutPoint, interactivetx.MaxInputsOrOutputs)
+	for i := range many {
+		many[i] = wire.OutPoint{Index: uint32(i)}
+	}
+	_, _, err = OnlyCoins(all, many, 0)
+	require.ErrorIs(t, err, ErrUnknownCoin)
+	require.ErrorContains(t, err, "at most 251")
 }

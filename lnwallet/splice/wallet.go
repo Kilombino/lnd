@@ -13,6 +13,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/wtxmgr"
 	"github.com/lightningnetwork/lnd/lnwallet"
+	"github.com/lightningnetwork/lnd/lnwallet/interactivetx"
 	"github.com/lightningnetwork/lnd/lnwire"
 )
 
@@ -193,8 +194,13 @@ type CoinSource interface {
 }
 
 // ErrUnknownCoin is returned when a coin asked for isn't one a splice can
-// spend: not in the wallet's default account, unconfirmed, spent or leased.
-var ErrUnknownCoin = errors.New("coin not spendable by a splice")
+// spend: not in the wallet's default account, unconfirmed, spent or leased,
+// not P2WKH or P2TR (the only kinds a splice spends), or a coinbase output
+// (never spent by a splice; miners paying to their LND wallet meet this one).
+// Also when more coins are asked for than a splice takes.
+var ErrUnknownCoin = errors.New("coin not spendable by a splice (a splice " +
+	"spends only confirmed P2WKH and P2TR coins of the default account, " +
+	"never coinbase outputs)")
 
 // OnlyCoins narrows coins to the ones at outpoints, for a splice that may
 // spend only those (coin control), and lowers the reserve kept for
@@ -206,6 +212,14 @@ func OnlyCoins(coins []Coin, outpoints []wire.OutPoint,
 
 	if len(outpoints) == 0 {
 		return coins, reserve, nil
+	}
+
+	// A splice takes at most this many of our inputs (SelectAddFunds caps
+	// the candidates there): more would quietly leave the rest out.
+	if len(outpoints) > interactivetx.MaxInputsOrOutputs-1 {
+		return nil, 0, fmt.Errorf("%w: %d coins chosen, a splice takes "+
+			"at most %d", ErrUnknownCoin, len(outpoints),
+			interactivetx.MaxInputsOrOutputs-1)
 	}
 
 	want := make(map[wire.OutPoint]bool, len(outpoints))
